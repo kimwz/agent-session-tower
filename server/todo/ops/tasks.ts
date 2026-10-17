@@ -56,15 +56,27 @@ function schedule(dueDate: string | null, dueTime: string | null, recurrence: To
 }
 
 /** Where a task lands: under a parent (taking its project and section), or in a project and section. */
+/** An archived project (or one above it) or an archived section: shown read-only, so nothing is put in it. */
+function shelved(ctx: TodoContext, projectId: string, sectionId: string | null): boolean {
+  for (let id: string | null = projectId, count = 0; id && count < 8; count++) {
+    const project: { parent_id: string | null; archived_at: string | null } | undefined = ctx.get('SELECT parent_id, archived_at FROM todo_projects WHERE id = ?', id);
+    if (!project) break;
+    if (project.archived_at) return true;
+    id = project.parent_id;
+  }
+  return !!sectionId && !!ctx.get<{ archived_at: string | null }>('SELECT archived_at FROM todo_sections WHERE id = ?', sectionId)?.archived_at;
+}
+
 function destination(ctx: TodoContext, input: { projectId?: string; sectionId?: string | null; parentId?: string | null }, fallbackProject: string) {
   if (input.parentId) {
     const parent = liveTask(ctx, input.parentId);
+    if (shelved(ctx, parent.project_id, parent.section_id)) throw invalid('보관된 프로젝트나 섹션의 작업 아래에는 넣을 수 없습니다.');
     const depth = ancestors(ctx, parent.id).length + 1;
     return { projectId: parent.project_id, sectionId: parent.section_id, parentId: parent.id, depth, parent };
   }
   const project = liveProject(ctx, input.projectId ?? fallbackProject);
-  if (project.archived_at) throw invalid('보관된 프로젝트에는 작업을 넣을 수 없습니다.');
   const sectionId = input.sectionId ?? null;
+  if (shelved(ctx, project.id, sectionId)) throw invalid('보관된 프로젝트나 섹션에는 작업을 넣을 수 없습니다.');
   if (sectionId && liveSection(ctx, sectionId).project_id !== project.id) throw invalid('섹션이 그 프로젝트에 없습니다.');
   return { projectId: project.id, sectionId, parentId: null, depth: 0, parent: undefined };
 }
@@ -172,16 +184,18 @@ export function duplicateTask(ctx: TodoContext, op: TodoOpOf<'task.duplicate'>):
   const source = liveTask(ctx, op.id);
   const parent = source.parent_id ? taskRow(ctx, source.parent_id) : undefined;
   if (parent?.completed_at) throw invalid('완료된 작업 아래에는 복사할 수 없습니다.');
-  if (!parent && liveProject(ctx, source.project_id).archived_at) throw invalid('보관된 프로젝트에는 작업을 넣을 수 없습니다.');
+  if (shelved(ctx, source.project_id, source.section_id)) throw invalid('보관된 프로젝트나 섹션에는 작업을 넣을 수 없습니다.');
   // Open sub-tasks under open parents, nearest first; one below a task left out is left out with it.
   const copies = new Map([[source.id, op.copyId]]);
   const below: (TaskRow & { depth: number })[] = [];
   for (const row of descendants(ctx, source.id).sort((a, b) => a.depth - b.depth || (a.sort_key < b.sort_key ? -1 : a.sort_key > b.sort_key ? 1 : 0))) {
     if (row.deleted_at || row.completed_at || !copies.has(row.parent_id!)) continue;
-    if (copies.size >= MAX_DUPLICATE_TASKS) throw invalid(`작업은 하위 작업을 합쳐 ${MAX_DUPLICATE_TASKS}개까지 복사할 수 있습니다.`);
+    if (ctx.copied + copies.size >= MAX_DUPLICATE_TASKS) throw invalid(`한 번에 작업은 하위 작업을 합쳐 ${MAX_DUPLICATE_TASKS}개까지 복사할 수 있습니다.`);
     copies.set(row.id, randomUUID());
     below.push(row);
   }
+  ctx.copied += copies.size;
+  if (ctx.copied > MAX_DUPLICATE_TASKS) throw invalid(`한 번에 작업은 하위 작업을 합쳐 ${MAX_DUPLICATE_TASKS}개까지 복사할 수 있습니다.`);
   const [where, params] = siblings(source.project_id, source.section_id, source.parent_id);
   const key = ctx.place('todo_tasks', where, [...params], source.id);
   for (const row of [source, ...below]) {

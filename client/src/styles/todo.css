@@ -520,7 +520,7 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-cal-week-view { flex:none; height:calc(100dvh - 210px); }
   .todo-cal-unscheduled { flex:none; max-height:170px; }
   .todo-cal-unscheduled > div { flex-direction:row; flex-wrap:wrap; }
-  .todo-cal-unscheduled .todo-cal-entry { width:auto; max-width:100%; }
+  .todo-cal-unscheduled .todo-cal-entry, .todo-cal-unscheduled .todo-cal-item { width:auto; max-width:100%; }
   .todo-layout-switch span { display:none; }
   .todo-description-files { margin-left:0; }
   .todo-file-thumbs { grid-template-columns:repeat(3, minmax(0, 1fr)); }

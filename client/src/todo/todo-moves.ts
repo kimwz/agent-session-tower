@@ -65,10 +65,13 @@ export function subtaskReorderOp(siblings: readonly TodoTask[], id: string, over
   return { op: 'task.move', id, parentId: list[from].parentId, afterId: index > 0 ? order[index - 1].id : null };
 }
 
-/** Found tasks `task` can go under: not itself, one below it, its present parent, or a completed or deleted one. */
-export function moveUnderCandidates(tasks: Readonly<Record<string, TodoTask>>, task: TodoTask, found: readonly TodoTask[]): TodoTask[] {
+/**
+ * Found tasks `task` can go under: not itself, one below it, its present parent, a completed or deleted one, or one in
+ * an archived project or section (`shelved`), which is read-only.
+ */
+export function moveUnderCandidates(tasks: Readonly<Record<string, TodoTask>>, task: TodoTask, found: readonly TodoTask[], shelved: (task: TodoTask) => boolean = () => false): TodoTask[] {
   const below = (candidate: string) => { for (let item = tasks[candidate], count = 0; item?.parentId && count < 10; item = tasks[item.parentId], count++) if (item.parentId === task.id) return true; return false; };
-  return found.filter(item => item.id !== task.id && item.id !== task.parentId && !item.completedAt && !item.deletedAt && !below(item.id));
+  return found.filter(item => item.id !== task.id && item.id !== task.parentId && !item.completedAt && !item.deletedAt && !shelved(item) && !below(item.id));
 }
 
 /** A sub-task made a task of its own, in its parent's project and section, right after the task it was under. */

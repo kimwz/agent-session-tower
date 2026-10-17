@@ -313,7 +313,8 @@ export function parseQuickAdd(input: string, context: QuickAddContext): QuickAdd
       // Its start and end belong to it: turning the repeat back into text turns them too.
       const read = repeatMatcher(rest, today);
       const found = attempt('repeat', read, value => { result.recurrence = value; });
-      if (read && !found) skip = read.length + repeatBounds(rest.slice(read.length), today, true).length;
+      // Turned back into text, nothing else is read inside it.
+      if (read && !found) { skip = read.length + repeatBounds(rest.slice(read.length), today, true).length; return undefined; }
       if (read && found) {
         const bounds = repeatBounds(rest.slice(read.length), today, !taken('date'));
         return { ...found, length: read.length + bounds.length, key: keyOf('repeat', rest.slice(0, read.length)), apply: () => {

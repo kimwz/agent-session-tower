@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { closestCorners, DndContext, DragOverlay, pointerWithin, useDroppable, type CollisionDetection, type DragEndEvent, type DragOverEvent, type DragStartEvent } from '@dnd-kit/core';
-import { arrayMove, horizontalListSortingStrategy, SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { horizontalListSortingStrategy, SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { useTodoSensors } from './todo-dnd';
 import { GripVertical, MoreHorizontal, Plus } from 'lucide-react';
 import type { TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { TaskCard, type TaskCardProps } from './TaskCard';
-import type { BoardColumn, CardContext } from './todo-views';
+import { dayAfterOf, type BoardColumn, type CardContext } from './todo-views';
 
 /**
  * Columns of cards. Cards are dragged with a mouse, a held touch or the keyboard: within a column to put them in order
@@ -31,6 +31,8 @@ export interface BoardProps {
   onDrop: (task: TodoTask, column: BoardColumn, afterId: string | null | undefined) => void;
   /** A card put in order among its own date's tasks in a column of several dates. */
   onDayMove?: (task: TodoTask, afterId: string | null) => void;
+  /** Read-only tasks (archived project or section) wherever they show: never picked up, changed or attached to. */
+  taskLocked?: (task: TodoTask) => boolean;
   onSectionMove: (sectionId: string, afterId: string | null) => void;
   onAddSection: (name: string) => void;
   onSectionMenu: (sectionId: string, anchor: HTMLElement) => void;
@@ -94,7 +96,7 @@ function Column({ column, board, active, over, children }: { column: BoardColumn
 function ColumnTab({ column, index, current, onPick }: { column: BoardColumn; index: number; current: boolean; onPick: (index: number) => void }) {
   const { setNodeRef, isOver } = useDroppable({ id: `tab:${column.id}`, data: { type: 'column', column }, disabled: !column.drop });
   return <button ref={setNodeRef} type="button" role="tab" aria-selected={current} className={`${current ? 'current' : ''} ${isOver ? 'drop-target' : ''} ${column.tone ?? ''}`} onClick={() => onPick(index)}>
-    {column.title}{column.tasks.length > 0 && <b>{column.tasks.length}</b>}
+    {column.title}{(column.count ?? column.tasks.length) > 0 && <b>{column.count ?? column.tasks.length}</b>}
   </button>;
 }
 
@@ -159,16 +161,15 @@ export function BoardView(board: BoardProps) {
     const overTask = over.data.current?.type === 'task' ? (over.data.current.task as TodoTask) : undefined;
     // In a column of several dates (overdue, the next days, later), a card put among its own date's tasks takes its
     // place there; it never changes its date by being dropped in the column it came from.
-    if (manual && target && !target.drop && target.id === source.id && !target.locked && task.dueDate && overTask?.dueDate === task.dueDate && overTask.id !== task.id) {
-      const from = target.tasks.findIndex(item => item.id === task.id), to = target.tasks.findIndex(item => item.id === overTask.id);
-      const order = arrayMove(target.tasks, from, to);
-      const before = order.slice(0, order.findIndex(item => item.id === task.id)).filter(item => item.dueDate === task.dueDate);
-      board.onDayMove?.(task, before.at(-1)?.id ?? null);
+    if (manual && target && !target.drop && target.id === source.id && !target.locked && overTask) {
+      const afterId = dayAfterOf(target.tasks, task.id, overTask.id);
+      if (afterId !== undefined) board.onDayMove?.(task, afterId);
       return;
     }
     if (!target?.drop) return;
     const list = target.tasks.filter(item => item.id !== task.id);
-    if (!manual) { if (target.id !== source.id) board.onDrop(task, target, undefined); return; }
+    // A folded column hides its tasks: what is let go on it goes last.
+    if (!manual || target.collapsed) { if (target.id !== source.id) board.onDrop(task, target, undefined); return; }
     let index = overTask ? target.tasks.findIndex(item => item.id === overTask.id) : list.length;
     if (target.id === source.id) {
       const from = source.tasks.findIndex(item => item.id === task.id);
@@ -179,8 +180,8 @@ export function BoardView(board: BoardProps) {
 
   const renderColumn = (column: BoardColumn) => <Column key={column.id} column={column} board={board} active={!!activeTask} over={overColumn === column.id}>
     <SortableContext items={column.tasks.map(task => cardId(task.id))} strategy={verticalListSortingStrategy}>
-      {column.tasks.map(task => <SortableCard key={task.id} task={task} column={column} context={context} selected={board.selectedId === task.id} {...board.card}
-        {...(column.locked ? { readOnly: true, onMenu: undefined, onFiles: undefined } : {})} />)}
+      {column.tasks.map(task => <SortableCard key={task.id} task={task} column={column.locked || !board.taskLocked?.(task) ? column : { ...column, locked: true }} context={context} selected={board.selectedId === task.id} {...board.card}
+        {...(column.locked || board.taskLocked?.(task) ? { readOnly: true } : {})} />)}
     </SortableContext>
   </Column>;
 

@@ -110,7 +110,7 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
       </div>
       {onMenu && !readOnly && <button type="button" className="todo-card-more icon-button" aria-label={t('작업 메뉴')} onClick={event => { event.stopPropagation(); onMenu(task, event.currentTarget); }}><MoreHorizontal size={15} /></button>}
     </div>
-    {children.length > 0 && <div className="todo-card-subtasks">
+    {(children.length > 0 || (!task.completedAt && (context.world.subtaskCounts[task.id]?.total ?? 0) > 0)) && <div className="todo-card-subtasks">
       <button type="button" className="todo-subtask-toggle" aria-expanded={!folded} onClick={event => { event.stopPropagation(); setSubtasksFolded(task.id, !folded); setFolded(!folded); }}>
         <ChevronRight size={12} />{subtaskToggleText(context.world, task.id, children.length)}
       </button>

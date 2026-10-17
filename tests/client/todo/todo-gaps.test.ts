@@ -7,7 +7,8 @@ import { saveWithFiles } from '../../../client/src/todo/QuickAdd.js';
 import { activityText, shareItems } from '../../../client/src/todo/TaskDetail.js';
 import { subtaskToggleText } from '../../../client/src/todo/TaskCard.js';
 import { CalendarView } from '../../../client/src/todo/calendar/CalendarView.js';
-import { archivedColumns, shapeSections } from '../../../client/src/todo/todo-views.js';
+import { archivedColumns, dayAfterOf, shapeSections, taskLocked } from '../../../client/src/todo/todo-views.js';
+import { compareDay } from '../../../shared/todo/day-order.js';
 import { createActions, taskLink } from '../../../client/src/todo/todo-actions.js';
 import { emptyWorld, worldFromOverview, type TodoWorld } from '../../../client/src/todo/todo-model.js';
 import { labelStepOp, moveUnderCandidates, outOfParentOp, parentCandidates, projectStepOp, subtaskReorderOp } from '../../../client/src/todo/todo-moves.js';
@@ -71,7 +72,8 @@ test('the sub-task toggle counts done of all from the server, else the open ones
 test('the activity names the fields a change touched, when the server named them', () => {
   assert.equal(activityText({ kind: 'updated', detail: { fields: ['dueDate', 'priority'] } }), '날짜·우선순위를 고쳤습니다');
   assert.equal(activityText({ kind: 'updated', detail: { fields: ['content'] } }), '제목을 고쳤습니다');
-  assert.equal(activityText({ kind: 'moved', detail: { fields: ['projectId', 'sectionId'] } }), '옮겼습니다 (프로젝트·섹션)');
+  assert.equal(activityText({ kind: 'moved', detail: { projectId: 'p', sectionId: null, parentId: null } }), '옮겼습니다');
+  assert.equal(activityText({ kind: 'moved', detail: { day: '2026-10-17' } }), '순서를 바꿨습니다');
   assert.equal(activityText({ kind: 'updated', detail: {} }), '고쳤습니다');
   assert.equal(activityText({ kind: 'completed', detail: { fields: ['x'] } }), '완료했습니다');
 });
@@ -118,15 +120,37 @@ test('a collapsed section keeps its header and count, an archived one leaves the
   const view = { kind: 'project', id: 'p' } as const;
   const context = { world: shape, today: '2026-10-14', start: '2026-10-14', query: '', searchResults: null };
   const base = boardColumns(view, defaultDisplay(view), context);
-  const hidden = shapeSections(base, sections, { collapse: true, showArchived: false });
+  const hidden = shapeSections(base, sections, { collapse: true, showArchived: false, tasks });
   assert.equal(hidden.archived, 1);
   assert.deepEqual(hidden.columns.map(column => [column.id, column.tasks.map(item => item.id), column.note ?? '']), [['section:none', ['c'], ''], ['section:s1', [], '접힘 · 1']]);
   assert.ok(hidden.columns[1].drop, 'a collapsed column still takes cards');
-  const shown = shapeSections(base, sections, { collapse: true, showArchived: true });
+  const shown = shapeSections(base, sections, { collapse: true, showArchived: true, tasks });
   assert.deepEqual(shown.columns.at(-1)?.tasks.map(item => item.id), ['b']);
   assert.equal(shown.columns.at(-1)?.drop, null, 'read only');
   const archived = world(tasks, { projects: [project('inbox', { inbox: true }), project('p', { archivedAt: '2026-10-14T00:00:00.000Z' })], sections });
   const locked = archivedColumns(view, defaultDisplay(view), { ...context, world: archived }, 'p');
   assert.deepEqual(locked.flatMap(column => column.tasks.map(item => item.id)).sort(), ['a', 'b', 'c'], 'its tasks show though the lists leave archived projects out');
   assert.ok(locked.every(column => column.drop === null && !column.sectionId), 'nothing drops, no section menu');
+});
+
+test('an archived section’s tasks read only wherever they show, and leave the date lists', () => {
+  const sections = [section('s1', 'p'), section('s2', 'p', { archivedAt: '2026-10-14T00:00:00.000Z' })];
+  const tasks = [task('a', { projectId: 'p', sectionId: 's1', dueDate: '2026-10-14' }), task('b', { projectId: 'p', sectionId: 's2', dueDate: '2026-10-14' })];
+  const shape = world(tasks, { projects: [project('inbox', { inbox: true }), project('p'), project('old', { archivedAt: '2026-10-14T00:00:00.000Z' })], sections });
+  assert.deepEqual([taskLocked(shape, tasks[0]), taskLocked(shape, tasks[1]), taskLocked(shape, task('c', { projectId: 'old' })), taskLocked(shape, undefined)], [false, true, true, false]);
+  const view = { kind: 'today' } as const;
+  const columns = boardColumns(view, defaultDisplay(view), { world: shape, today: '2026-10-14', start: '2026-10-14', query: '', searchResults: null });
+  assert.deepEqual(columns.flatMap(column => column.tasks.map(item => item.id)), ['a']);
+});
+
+test('in a column of several dates the dates stay together, and a drop finds the task it goes after within its date', () => {
+  const order = [
+    task('x', { dueDate: '2026-10-01', priority: 1 }), task('y', { dueDate: '2026-10-01' }),
+    task('c', { dueDate: '2026-10-10', dayOrder: '2026-10-10|b' }), task('d', { dueDate: '2026-10-10', dayOrder: '2026-10-10|a' }),
+  ].sort(compareDay);
+  assert.deepEqual(order.map(item => item.id), ['x', 'y', 'd', 'c'], 'an earlier date first, though its tasks have no order of their own');
+  assert.equal(dayAfterOf(order, 'c', 'd'), null, 'first of its date');
+  assert.equal(dayAfterOf(order, 'd', 'c'), 'c');
+  assert.equal(dayAfterOf(order, 'y', 'x'), null);
+  assert.equal(dayAfterOf(order, 'c', 'y'), undefined, 'another date is a change of date, not of order');
 });

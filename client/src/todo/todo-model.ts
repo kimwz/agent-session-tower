@@ -285,7 +285,12 @@ const OPTIMISTIC: { [N in TodoOp['op']]?: (world: TodoWorld, op: TodoOpOf<N>, co
     const projectId = parent?.projectId ?? (moved ? op.projectId ?? task.projectId : task.projectId);
     const sectionId = parent ? parent.sectionId : op.sectionId !== undefined ? op.sectionId : op.projectId && op.projectId !== task.projectId ? null : task.sectionId;
     const place = { projectId, sectionId, parentId: parent?.id ?? (moved ? null : task.parentId) };
-    let next = patchTask(world, op.id, { ...place, sortKey: placeKey(siblingsOf(world, place, op.id), op.afterId), updatedAt: now });
+    // After a completed sibling (the server counts those too), among all of them.
+    const anchor = op.afterId ? world.tasks[op.afterId] : undefined;
+    const list = anchor && !isOpen(anchor) && !anchor.deletedAt
+      ? Object.values(world.tasks).filter(item => !item.deletedAt && item.id !== op.id && item.projectId === place.projectId && item.sectionId === place.sectionId && item.parentId === place.parentId).sort(byOrder)
+      : siblingsOf(world, place, op.id);
+    let next = patchTask(world, op.id, { ...place, sortKey: placeKey(list, op.afterId), updatedAt: now });
     if (projectId !== task.projectId || sectionId !== task.sectionId) for (const below of descendants(world, op.id)) next = patchTask(next, below.id, { projectId, sectionId });
     return next;
   },

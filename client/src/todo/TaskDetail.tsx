@@ -3,6 +3,7 @@ import { closestCenter, DndContext, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { ArrowLeft, ArrowRight, ArrowUpFromLine, CalendarDays, Check, CheckCheck, ChevronDown, Clock3, Copy, CornerDownRight, Flag, GripVertical, History, Link, Link2, LoaderCircle, MoreHorizontal, Paperclip, Pencil, Plus, Tag, Trash2, X } from 'lucide-react';
 import type { TodoEvent, TodoFile, TodoPriority, TodoTask } from '../../../shared/todo/types';
+import { liveProjectIds } from '../../../shared/todo/compose';
 import { relativeTime } from '../common/lib';
 import { getLanguage, translate as t } from '../i18n/i18n';
 import { DatePicker, type DateValue } from './DatePicker';
@@ -18,7 +19,7 @@ import { colorOf, dateLabel, durationLabel, monthDay, priorityName, recurrenceLa
 import { byOrder, isOpen, visibleFiles, type TodoWorld } from './todo-model';
 import { moveUnderCandidates, outOfParentOp, subtaskReorderOp } from './todo-moves';
 import { newId, type TodoClient } from './todo-store';
-import { projectTree } from './todo-views';
+import { archivedSectionIds, projectTree } from './todo-views';
 
 /**
  * One task, what is used most first and largest: its title, properties, description, sub-tasks and comments; then the
@@ -230,7 +231,8 @@ function Subtasks({ task, world, actions, client, onOpen, readOnly }: DetailCont
     if (op) client.apply([op]);
   };
   return <section className="todo-detail-section">
-    <h4>{t('하위 작업')}{rows.length > 0 && <span>{open}/{rows.length}</span>}</h4>
+    {/* Done of all, as on the card. */}
+    <h4>{t('하위 작업')}{rows.length > 0 && <span>{rows.length - open}/{rows.length}</span>}</h4>
     {rows.length > 0 && <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onEnd}>
       <SortableContext items={rows.map(row => row.task.id)} strategy={verticalListSortingStrategy}>
         <ul className="todo-subtask-list">{rows.map(({ task: child, depth }) => <SubtaskRow key={child.id} task={child} depth={depth} readOnly={readOnly} actions={actions} client={client} onOpen={onOpen} />)}</ul>
@@ -282,7 +284,8 @@ function MoveUnderSearch({ task, world, client, anchor, onClose }: { task: TodoT
     }, 200);
     return () => { live = false; clearTimeout(timer); };
   }, [query, client]);
-  const shown = moveUnderCandidates(world.tasks, task, results.map(item => world.tasks[item.id] ?? item));
+  const live = liveProjectIds(world.projects), archived = archivedSectionIds(world);
+  const shown = moveUnderCandidates(world.tasks, task, results.map(item => world.tasks[item.id] ?? item), item => !live.has(item.projectId) || (!!item.sectionId && archived.has(item.sectionId)));
   return <Popover anchor={anchor} onClose={onClose} label={t('다른 작업 아래로 옮기기')} className="todo-menu" align="end">
     <div className="todo-menu-search"><input autoFocus value={query} placeholder={t('위에 둘 작업 검색')} aria-label={t('위에 둘 작업 검색')} onChange={event => setQuery(event.target.value)} /></div>
     {error && <p className="todo-error" role="alert">{error}</p>}
@@ -409,25 +412,24 @@ const EVENT_LABELS: Record<TodoEvent['kind'], string> = {
 
 /** What a change touched, by the field names the server records (`detail.fields`). */
 const FIELD_LABELS: Record<string, string> = {
-  content: '제목', description: '설명', priority: '우선순위', dueDate: '날짜', dueTime: '시간', recurrence: '반복', durationMin: '소요 시간', deadlineDate: '마감일',
-  labelIds: '라벨', projectId: '프로젝트', sectionId: '섹션', parentId: '상위 작업', sortKey: '순서', dayOrder: '순서',
+  content: '제목', description: '설명', priority: '우선순위', dueDate: '날짜', dueTime: '시간', recurrence: '반복', durationMin: '소요 시간', deadlineDate: '마감일', labelIds: '라벨',
 };
 
 /** The object particle a Korean word takes: 을 after a final consonant, else 를. */
 const objectParticle = (word: string) => { const code = word.charCodeAt(word.length - 1) - 0xac00; return code >= 0 && code < 11172 && code % 28 ? '을' : '를'; };
 
-/** One line of the activity: what happened, with the fields a change touched when the server named them. */
+/**
+ * One line of the activity: what happened, with the fields an update touched (the server names them) and a move
+ * within a date said as such (its detail is `{ day }`).
+ */
 export function activityText(event: Pick<TodoEvent, 'kind' | 'detail'>): string {
-  const fields = Array.isArray(event.detail.fields) ? [...new Set(event.detail.fields.map(field => FIELD_LABELS[String(field)]).filter(Boolean))] : [];
-  if (!fields.length || (event.kind !== 'updated' && event.kind !== 'moved')) return t(EVENT_LABELS[event.kind]);
-  if (getLanguage() === 'en') return translateList(fields, event.kind);
+  if (event.kind === 'moved' && event.detail.day) return t('순서를 바꿨습니다');
+  const fields = event.kind === 'updated' && Array.isArray(event.detail.fields) ? [...new Set(event.detail.fields.map(field => FIELD_LABELS[String(field)]).filter(Boolean))] : [];
+  if (!fields.length) return t(EVENT_LABELS[event.kind]);
+  if (getLanguage() === 'en') return t('{0}을 고쳤습니다', { 0: fields.map(field => t(field).toLocaleLowerCase()).join(', ') });
   const names = fields.join('·');
-  return event.kind === 'moved' ? t('옮겼습니다 ({0})', { 0: names }) : objectParticle(names) === '을' ? t('{0}을 고쳤습니다', { 0: names }) : t('{0}를 고쳤습니다', { 0: names });
+  return objectParticle(names) === '을' ? t('{0}을 고쳤습니다', { 0: names }) : t('{0}를 고쳤습니다', { 0: names });
 }
-const translateList = (fields: string[], kind: 'updated' | 'moved') => {
-  const names = fields.map(field => t(field).toLocaleLowerCase()).join(', ');
-  return kind === 'moved' ? t('옮겼습니다 ({0})', { 0: names }) : t('{0}을 고쳤습니다', { 0: names });
-};
 
 function Activity({ task, world }: DetailContext) {
   const [open, setOpen] = useState(false);
@@ -527,7 +529,7 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
     {!task || !context ? <div className="todo-detail-empty">{error ? <p className="todo-error" role="alert">{error}</p> : <LoaderCircle className="spin" size={18} />}</div> : <div key={task.id} className="todo-detail-body">
       {/* A wide panel puts the properties in a card on the right; a phone shows them as chips under the title (todo.css). */}
       <div className="todo-detail-heading">
-        <CheckCircle task={task} onComplete={() => actions.complete(task)} onCompleteNext={() => onFollowUp(task, true)} onReopen={() => void actions.reopen(task)} />
+        <CheckCircle task={task} disabled={readOnly} onComplete={() => actions.complete(task)} onCompleteNext={() => onFollowUp(task, true)} onReopen={() => void actions.reopen(task)} />
         <EditableTitle key={task.id} task={task} actions={actions} readOnly={readOnly} />
       </div>
       <Properties {...context} />

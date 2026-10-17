@@ -20,7 +20,7 @@ import { readShortcut, typingIn } from './todo-shortcuts';
 import { httpTransport, localToday, newId, TodoClient, useTodoState } from './todo-store';
 import { isTodoPage, readTodoLocation, todoSearch, viewKey, type TodoLocation, type TodoView } from './todo-url';
 import { isOpen } from './todo-model';
-import { archivedColumns, shapeSections, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
+import { archivedColumns, shapeSections, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
 import { CalendarView } from './calendar/CalendarView';
 import type { TodoLayout } from '../../../shared/todo/types';
 
@@ -93,11 +93,9 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const key = viewKey(view);
   const display = useMemo(() => displays[key] ?? loadDisplay(key, defaultDisplay(view)), [displays, key, view]);
   const readOnly = world.availability.state !== 'ready';
-  // An archived project opens to be read: nothing in it is added, moved, changed or attached to (`locked`).
   const live = useMemo(() => liveProjectIds(world.projects), [world.projects]);
-  // Read only: a task of an archived project or section, wherever it shows (a board, a search, the completed list).
-  const archivedSections = useMemo(() => new Set(world.sections.filter(section => section.archivedAt).map(section => section.id)), [world.sections]);
-  const isLocked = useCallback((item: TodoTask | undefined) => !!item && (!live.has(item.projectId) || (!!item.sectionId && archivedSections.has(item.sectionId))), [live, archivedSections]);
+  // Read only (todo-views `taskLocked`): a task of an archived project or section, wherever it shows.
+  const isLocked = useCallback((item: TodoTask | undefined) => taskLocked(world, item), [world]);
   const lockedTask = useCallback((id: string | null | undefined) => isLocked(id ? world.tasks[id] ?? (world.detail?.task.id === id ? world.detail.task : undefined) : undefined), [world.tasks, world.detail, isLocked]);
 
   useEffect(() => { client.start(); uploads.open(); return () => { uploads.dispose(); client.dispose(); }; }, [client, uploads]);
@@ -109,10 +107,12 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     return () => window.removeEventListener('pointerdown', onPress, true);
   }, []);
   useEffect(() => { client.noticeRevision(revision); }, [client, revision]);
-  // Files let go anywhere that does not take them are ignored, instead of the browser opening them in place of the page.
+  // Files let go anywhere that does not take them are ignored, instead of the browser opening them in place of the page;
+  // a file field (in the settings) takes them itself.
   useEffect(() => {
     const guard = (event: DragEvent) => {
       if (event.defaultPrevented || !event.dataTransfer || ![...event.dataTransfer.types].includes('Files')) return;
+      if (event.target instanceof Element && event.target.closest('input[type=file]')) return;
       event.preventDefault();
       if (event.type === 'dragover') event.dataTransfer.dropEffect = 'none';
     };
@@ -152,6 +152,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const actions = useMemo(() => createActions(client, { openTask }), [client, openTask]);
 
   const project = projectOf(world, view);
+  // An archived project opens to be read: nothing in it is added, moved, changed or attached to.
   const locked = !!project && !live.has(project.id);
   // The search shows completed tasks too when asked, in a column of their own.
   const searchDone = view.kind === 'search' && display.completed;
@@ -180,7 +181,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     const context = { world, today, start, query, searchResults };
     const base = locked && project ? archivedColumns(view, display, context, project.id) : boardColumns(view, display, context);
     if (!project || locked || !base.some(column => column.id === 'section:none')) return { columns: base, archived: 0 };
-    return shapeSections(base, world.sections.filter(item => item.projectId === project.id), { collapse: true, showArchived: showArchivedSections });
+    return shapeSections(base, world.sections.filter(item => item.projectId === project.id), { collapse: true, showArchived: showArchivedSections, tasks: Object.values(world.tasks) });
   }, [view, display, world, today, start, query, searchResults, locked, project, showArchivedSections]);
   const columns = sectionShape.columns;
   // A card names its project where the list is not one project and its column does not already.
@@ -242,9 +243,9 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       const task = current.target();
       const taskAction = ['complete', 'complete-next', 'add-next', 'open'].includes(shortcut.action);
       if (taskAction && !task) return;
-      // An archived project's tasks are only read: keys that would change something do nothing there.
-      // An archived project's page changes nothing; elsewhere only the chosen task's own keys stop at a locked task.
-      if (['add', 'undo'].includes(shortcut.action) && current.locked) return;
+      // An archived project's page adds nothing (undo stays: the server keeps the archive's rules); elsewhere only the
+      // chosen task's own keys stop at a locked task.
+      if (shortcut.action === 'add' && current.locked) return;
       if (['complete', 'complete-next', 'add-next'].includes(shortcut.action) && (current.locked || (task && current.lockedTask(task.id)))) return;
       switch (shortcut.action) {
         case 'add': current.openAdd(); break;
@@ -312,19 +313,22 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   }, []);
 
   const attach = (taskId: string, files: File[]) => actions.attach(uploads, taskId, files);
+  // Nothing changes here: the todos are read-only, or this is an archived project's page.
+  const frozen = readOnly || locked;
+  // Every change from a card checks its own task too (an archived section's, shown in a search or the completed list).
   const card = {
     onOpen: openTask,
-    onComplete: actions.complete,
+    onComplete: (task: TodoTask) => { if (!isLocked(task)) actions.complete(task); },
     onCompleteNext: (task: TodoTask) => followUp(task, true),
-    onReopen: (task: TodoTask) => void actions.reopen(task),
+    onReopen: (task: TodoTask) => { if (!isLocked(task)) void actions.reopen(task); },
     onSelect: setSelectedId,
-    onMenu: readOnly || locked ? undefined : (task: TodoTask, anchor: HTMLElement) => { menuAnchor.current = anchor; setCardMenu({ task, anchor }); },
+    onMenu: frozen ? undefined : (task: TodoTask, anchor: HTMLElement) => { if (!isLocked(task)) { menuAnchor.current = anchor; setCardMenu({ task, anchor }); } },
     // Files dropped on a card go to its task's description.
-    onFiles: readOnly || locked ? undefined : (task: TodoTask, files: File[]) => attach(task.id, files),
-    readOnly: readOnly || locked,
+    onFiles: frozen ? undefined : (task: TodoTask, files: File[]) => { if (!isLocked(task)) attach(task.id, files); },
+    readOnly: frozen,
   };
   const onDrop = (task: TodoTask, column: BoardColumn, afterId: string | null | undefined) => {
-    if (!column.drop || locked) return;
+    if (!column.drop || locked || isLocked(task)) return;
     const ops = dropOps(task, column.drop, manualOrder(display) ? afterId : undefined);
     if (ops.length) client.apply(ops);
   };
@@ -386,7 +390,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     {view.kind !== 'search' && !readOnly && !locked && <button type="button" className="secondary-button" onClick={() => openAdd()}><Plus size={13} />{t('작업 추가')}</button>}</div>;
   else body = <BoardView columns={columns} context={context} manual={manualOrder(display) && !readOnly && !locked} sections={!!project && display.group === 'section' && !readOnly && !locked} mobile={mobile} selectedId={boardChosen}
     card={card} onAdd={column => openAdd({ ...column.preset })} onDrop={onDrop}
-    onDayMove={(task, afterId) => { if (!locked && !isLocked(task)) client.apply([{ op: 'task.move', id: task.id, dayAfterId: afterId }]); }}
+    onDayMove={(task, afterId) => { if (!locked && !isLocked(task)) client.apply([{ op: 'task.move', id: task.id, dayAfterId: afterId }]); }} taskLocked={isLocked}
     onSectionMove={(id, afterId) => client.apply([{ op: 'section.move', id, afterId }])}
     onAddSection={name => project && client.apply([{ op: 'section.create', id: newId(), projectId: project.id, name }])}
     onSectionMenu={(id, anchor) => { if (locked) return; menuAnchor.current = anchor; setSectionRename(null); setSectionMenu(id); }} completed={doneColumn} />;

@@ -73,6 +73,44 @@ test(`a copy holds at most ${MAX_DUPLICATE_TASKS} tasks`, async t => {
   assert.equal(store.revision(), before);
 });
 
+test(`one request copies at most ${MAX_DUPLICATE_TASKS} tasks, however many copies it asks for`, async t => {
+  const { apply, store } = await fixture(t);
+  apply({ op: 'task.create', id: 'big', content: 'Big' });
+  const half = Math.ceil(MAX_DUPLICATE_TASKS / 2);
+  for (let from = 0; from < half - 1; from += 100) apply(...Array.from({ length: Math.min(100, half - 1 - from) }, (_, index): TodoOp => ({ op: 'task.create', id: `c${from + index}`, parentId: 'big', content: 'Child' })));
+  const before = store.revision();
+  assert.throws(() => apply({ op: 'task.duplicate', id: 'big', copyId: 'one' }, { op: 'task.duplicate', id: 'big', copyId: 'two' }, { op: 'task.duplicate', id: 'big', copyId: 'three' }),
+    error => kind(error) === 'invalid' && /500/.test((error as Error).message));
+  assert.equal(store.revision(), before);
+  apply({ op: 'task.duplicate', id: 'big', copyId: 'one' });
+  apply({ op: 'task.duplicate', id: 'big', copyId: 'two' });
+  assert.equal(store.detail('two').subtasks.length, half - 1, 'each request has its own allowance');
+});
+
+test('nothing is put in, under or copied into an archived project or section', async t => {
+  const { apply, store } = await fixture(t);
+  apply(
+    { op: 'project.create', id: 'old', name: 'Old' },
+    { op: 'project.create', id: 'kid', name: 'Kid', parentId: 'old' },
+    { op: 'project.create', id: 'live', name: 'Live' },
+    { op: 'section.create', id: 'shelf', projectId: 'live', name: 'Shelf' },
+    { op: 'task.create', id: 'in-kid', projectId: 'kid', content: 'In kid' },
+    { op: 'task.create', id: 'on-shelf', projectId: 'live', sectionId: 'shelf', content: 'On shelf' },
+    { op: 'task.create', id: 'free', projectId: 'live', content: 'Free' },
+  );
+  apply({ op: 'project.update', id: 'old', patch: { archived: true } }, { op: 'section.update', id: 'shelf', patch: { archived: true } });
+  const before = store.revision();
+  for (const op of [
+    { op: 'task.move', id: 'free', parentId: 'in-kid' },
+    { op: 'task.move', id: 'free', parentId: 'on-shelf' },
+    { op: 'task.move', id: 'free', projectId: 'live', sectionId: 'shelf' },
+    { op: 'task.create', id: 'new', parentId: 'on-shelf', content: 'New' },
+    { op: 'task.duplicate', id: 'on-shelf', copyId: 'copy' },
+    { op: 'task.duplicate', id: 'in-kid', copyId: 'copy' },
+  ] as TodoOp[]) assert.throws(() => apply(op), error => kind(error) === 'invalid' && /보관된/.test((error as Error).message), op.op);
+  assert.equal(store.revision(), before);
+});
+
 test('the overview counts each open task’s sub-tasks, and every answer carries the counts it changed', async t => {
   const { store, apply } = await fixture(t);
   apply(

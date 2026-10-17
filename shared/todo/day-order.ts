@@ -23,15 +23,18 @@ export function dayKey(task: Pick<TodoTask, 'dueDate' | 'dayOrder'>): string | n
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 
 /**
- * The order of a date column: tasks put in order by hand first, in that order (by date first where a column spans
- * several); then timed tasks by time, then by priority, then in their own order.
+ * The order of a date column: by date first (a column of several dates keeps each date together, oldest first, and
+ * putting one date in order never moves another); within a date, tasks put in order by hand first, in that order, then
+ * timed tasks by time, then by priority, then in their own order.
  */
 export function compareDay(a: DayTask, b: DayTask): number {
+  const byDate = compare(a.dueDate ?? '', b.dueDate ?? '');
+  if (byDate) return byDate;
   const first = dayKey(a), second = dayKey(b);
   if (first !== null || second !== null) {
     if (first === null) return 1;
     if (second === null) return -1;
-    const order = compare(a.dueDate!, b.dueDate!) || compare(first, second);
+    const order = compare(first, second);
     if (order) return order;
   }
   return compare(a.dueTime ?? '99', b.dueTime ?? '99') || a.priority - b.priority || compare(a.sortKey, b.sortKey) || compare(a.id, b.id);

@@ -9,6 +9,8 @@ export class TodoContext {
   readonly removedLinks: string[] = [];
   /** Tasks a sub-task moved away from; the parents of touched tasks count as changed too (see TodoChanges.subtaskCounts). */
   readonly parents = new Set<string>();
+  /** Tasks copied so far: one request copies at most MAX_DUPLICATE_TASKS, however many duplicate ops it holds. */
+  copied = 0;
   constructor(readonly db: DatabaseSync, readonly now: string) {}
 
   get<T = Record<string, unknown>>(sql: string, ...params: SQLInputValue[]): T | undefined {
