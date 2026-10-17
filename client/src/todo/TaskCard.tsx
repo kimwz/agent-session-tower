@@ -3,6 +3,7 @@ import { ArrowRight, CalendarDays, Check, ChevronRight, Clock3, Flag, MessageSqu
 import type { TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { isOpen } from './todo-model';
+import { setSubtasksFolded, subtasksFolded } from './todo-prefs';
 import { colorOf, dateLabel, durationLabel, monthDay, recurrenceLabel } from './todo-format';
 import type { CardContext } from './todo-views';
 
@@ -58,14 +59,28 @@ export interface TaskCardProps {
   /** Opens the card's menu from its button. */
   onMenu?: (task: TodoTask, anchor: HTMLElement) => void;
   onSelect?: (id: string) => void;
+  /** What choosing this card chooses: the task, or one of its completions in the completed list. */
+  selectId?: string;
 }
 
-export function TaskCard({ task, context, selected, onOpen, onComplete, onCompleteNext, onReopen, onMenu, onSelect }: TaskCardProps) {
-  const [expanded, setExpanded] = useState(false);
-  const children = (context.children.get(task.id) ?? []).filter(child => isOpen(child) || (expanded && child.completedAt));
+export function TaskCard({ task, context, selected, onOpen, onComplete, onCompleteNext, onReopen, onMenu, onSelect, selectId = task.id }: TaskCardProps) {
+  // Sub-tasks show unless the owner folded them on this card; the fold is remembered (todo-prefs.ts). Completed ones
+  // are in the task's detail.
+  const [folded, setFolded] = useState(() => subtasksFolded(task.id));
+  // A completed card (the completed list) lists none: its sub-tasks are in its detail.
+  const children = task.completedAt ? [] : (context.children.get(task.id) ?? []).filter(child => isOpen(child) && !context.shown?.has(child.id));
   const chips = CARD_META.filter(chip => chip.visible(task, context));
-  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''}`} data-task={task.id} tabIndex={0} role="button" aria-label={task.content}
-    onClick={() => onOpen(task.id)} onFocus={() => onSelect?.(task.id)} onMouseEnter={() => onSelect?.(task.id)}
+  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={task.content}
+    onClick={() => onOpen(task.id)} onFocus={() => onSelect?.(selectId)}
+    onPointerMove={event => {
+      // Only a mouse that moves chooses: cards passing under a still mouse while the arrow keys scroll do not.
+      if (event.pointerType !== 'mouse' || selected) return;
+      onSelect?.(selectId);
+      // With the keyboard on another card (or a button in one), it follows the mouse, so Enter opens the card that shows
+      // chosen. A field or the task's detail keeps the keyboard.
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && !event.currentTarget.contains(active) && active.closest('.todo-card')) event.currentTarget.focus({ preventScroll: true });
+    }}
     onKeyDown={event => { if (event.key === 'Enter' && event.target === event.currentTarget) { event.preventDefault(); onOpen(task.id); } }}>
     <div className="todo-card-main">
       <CheckCircle task={task} onComplete={() => onComplete(task)} onCompleteNext={() => onCompleteNext(task)} onReopen={onReopen && (() => onReopen(task))} />
@@ -77,10 +92,10 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
       {onMenu && <button type="button" className="todo-card-more icon-button" aria-label={t('작업 메뉴')} onClick={event => { event.stopPropagation(); onMenu(task, event.currentTarget); }}><MoreHorizontal size={15} /></button>}
     </div>
     {children.length > 0 && <div className="todo-card-subtasks">
-      <button type="button" className="todo-subtask-toggle" aria-expanded={expanded} onClick={event => { event.stopPropagation(); setExpanded(value => !value); }}>
-        <ChevronRight size={12} />{t('하위 작업 {0}', { 0: children.filter(isOpen).length })}
+      <button type="button" className="todo-subtask-toggle" aria-expanded={!folded} onClick={event => { event.stopPropagation(); setSubtasksFolded(task.id, !folded); setFolded(!folded); }}>
+        <ChevronRight size={12} />{t('하위 작업 {0}', { 0: children.length })}
       </button>
-      {expanded && <ul>{children.map(child => <li key={child.id} className={child.completedAt ? 'done' : ''}>
+      {!folded && <ul>{children.map(child => <li key={child.id}>
         <CheckCircle task={child} size="small" onComplete={() => onComplete(child)} onReopen={onReopen && (() => onReopen(child))} />
         <button type="button" className="todo-subtask-title" onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{child.content}</button>
       </li>)}</ul>}
