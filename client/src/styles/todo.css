@@ -8,7 +8,9 @@
 .page-switch button[aria-pressed="true"] { background:#22334a; color:var(--bright); }
 .sidebar-closed .page-switch { margin-left:0; background:#142030ed; }
 .canvas-only .page-switch { pointer-events:auto; }
-/* Beside an open conversation on a narrow window the header has no room for the words. */
+/* Beside an open conversation on a narrow window the header has no room for the words: the full header (drawer open)
+   below 900px, the compact one below 760px. */
+@media (max-width: 900px) { .has-chat:not(.sidebar-closed) .page-switch span { display:none; } .has-chat:not(.sidebar-closed) .page-switch button { padding:0 8px; } }
 @media (max-width: 760px) { .has-chat .page-switch span { display:none; } .has-chat .page-switch button { padding:0 8px; } }
 
 .todo-workspace { overflow:hidden; }
