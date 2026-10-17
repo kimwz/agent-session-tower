@@ -23,7 +23,7 @@ import { TodoStore } from './todo/store.js';
 import { TodoFiles } from './todo/files.js';
 import { TodoBackup } from './todo/backup.js';
 import { TodoAgents } from './todo/agents.js';
-import { writeTodoMasterGuide } from './master/guide.js';
+import { removeTodoMasterGuide, writeTodoMasterGuide } from './master/guide.js';
 import { DurableRunManager } from './runs/durable-runner.js';
 import { runRunnerWorker } from './runs/worker.js';
 import { runTerminalHost } from './terminals/host.js';
@@ -270,7 +270,7 @@ async function main() {
     // A change that opened or closed todos moves their issue masters at once, and the answer carries them.
     apply: (request: Parameters<TodoStore['apply']>[0]) => {
       const changes = todos.apply(request);
-      const agents = todoAgents.settle();
+      const agents = todoAgents.settle(changes.tasks.map(task => task.id));
       changed();
       return Object.keys(agents).length ? { ...changes, revision: todos.revision(), agents } : changes;
     },
@@ -600,7 +600,7 @@ async function main() {
     createSession: input => backend.createSession!(input),
     uncertain: error => errorDisposition(error) === 'uncertain',
     model: () => resolveModel(stateDir, 'todo.master'),
-    writeGuide: writeTodoMasterGuide,
+    writeGuide: writeTodoMasterGuide, removeGuide: removeTodoMasterGuide,
     startHost: () => master.call('ping'),
     onChange: () => changed(),
   });
@@ -734,7 +734,7 @@ async function main() {
   // Full backups: the worker gives its skills; restores go through each process's own stores (see BackupService.apply).
   const backups = new BackupService({ stateDir, version: APP_VERSION, skills: () => runs.skillsBackup(), triggers: () => runs.triggersBackup(), settings: () => runs.settingsBackup(), restartWorker: () => runs.restartWorker(),
     unavailable: () => runs.supports('backup') ? undefined : '실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 쓸 수 있습니다.',
-    stores: { groups, exclusions, decisions }, master: body => master.call('settings', { body }), todos: todoBackup, onChange: () => { changed(); void todoAgents.schedule(); } });
+    stores: { groups, exclusions, decisions }, master: body => master.call('settings', { body }), todos: todoBackup, onChange: () => { changed(); void todoAgents.recheckAll(); } });
   await backups.start();
   // The terminal and master hosts keep their own code until they restart; what they run is looked at every half
   // minute, never starting one and never keeping one alive (the master host does not count pings as use; the terminal

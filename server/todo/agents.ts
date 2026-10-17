@@ -29,6 +29,11 @@ import type { TodoStore } from './store.js';
 export const TODO_AGENT_START_WAIT_MS = 2 * 60_000;
 /** Passes come this often, and a failed close or reopen of one todo waits this long before it is tried again. */
 const PASS_MS = 60_000;
+/**
+ * Every master is compared with its todo this often (and at start, and after a restore). Between, a change compares
+ * the todos it touched and a pass the masters not closed, so closed ones cost nothing while their todos stay closed.
+ */
+const FULL_CHECK_MS = 60 * 60_000;
 const TITLE_CHARS = 60;
 const COMMENTS = 20;
 const LIST_ITEMS = 50;
@@ -58,6 +63,8 @@ export interface TodoAgentsOptions {
   uncertain(error: unknown): boolean;
   model(): Promise<ResolvedModel>;
   writeGuide(folder: string, taskId: string): Promise<void>;
+  /** Takes the guide away again (and the folder, if nothing else is in it): for a start that came to nothing. */
+  removeGuide(folder: string): Promise<void>;
   /** Makes the master host run, which follows issue masters' work. */
   startHost(): Promise<unknown>;
   /** The rows changed: pages load the todos again. */
@@ -86,6 +93,8 @@ export class TodoAgents {
   private readonly confirmed = new Set<string>();
   /** When closing or reopening a todo's master last failed. */
   private readonly failed = new Map<string, number>();
+  /** When every master was last compared with its todo; 0 asks the next pass to. */
+  private fullCheckAt = 0;
 
   constructor(private readonly options: TodoAgentsOptions) {}
 
@@ -104,16 +113,22 @@ export class TodoAgents {
   }
 
   /**
-   * After a change of todos: moves the masters the change opened or closed at once, so the answer carries them
-   * (TodoChanges.agents), and leaves the sessions to a pass.
+   * After a change of todos: moves the masters of the todos it touched (`taskIds`) that it opened or closed at once, so
+   * the answer carries them (TodoChanges.agents), and leaves the sessions to a pass.
    */
-  settle(): Record<string, TodoAgent | null> {
+  settle(taskIds: readonly string[]): Record<string, TodoAgent | null> {
     let moved: Record<string, TodoAgent | null> = {};
-    try { if (this.options.store.availability().state === 'ready') moved = this.options.store.settleAgents(); }
+    try { if (this.options.store.availability().state === 'ready') moved = this.options.store.settleAgents(taskIds); }
     catch (error) { console.error(`Issue masters were not brought in line with the todos: ${message(error)}`); }
     for (const taskId of Object.keys(moved)) this.confirmed.delete(taskId);
     void this.schedule();
     return moved;
+  }
+
+  /** After the todos were replaced wholesale (a restored backup): the next pass compares every master with its todo. */
+  recheckAll(): Promise<void> {
+    this.fullCheckAt = 0;
+    return this.schedule();
   }
 
   /** A pass after the one running; asked for again before it begins, it is the same pass. */
@@ -150,7 +165,10 @@ export class TodoAgents {
         created = await this.options.createSession({ provider: model.provider, ...(model.model ? { model: model.model } : {}), ...(model.effort ? { effort: model.effort } : {}),
           cwd: folder, prompt, title: `이슈: ${detail.task.content.slice(0, TITLE_CHARS)}` });
       } catch (error) {
-        if (!this.options.uncertain(error) && store.changeAgent(taskId, { state: 'starting', sessionId: undefined }, null)) this.options.onChange();
+        if (!this.options.uncertain(error) && store.changeAgent(taskId, { state: 'starting', sessionId: undefined }, null)) {
+          this.options.onChange();
+          await this.forgetFolder(taskId);
+        }
         throw error;
       }
       const agent = this.bind(taskId, created.session);
@@ -222,7 +240,9 @@ export class TodoAgents {
     // A todo file this build may not change (or cannot open) is left as it is until one that may does.
     const sessions = this.options.sessions();
     if (this.stopped || !sessions || store.availability().state !== 'ready') return;
-    const moved = store.settleAgents();
+    const full = this.now() - this.fullCheckAt >= FULL_CHECK_MS;
+    const moved = store.settleAgents(full ? 'all' : 'open');
+    if (full) this.fullCheckAt = this.now();
     for (const taskId of Object.keys(moved)) this.confirmed.delete(taskId);
     if (Object.keys(moved).length) this.options.onChange();
     const byId = new Map(sessions.map(session => [session.id, session]));
@@ -242,7 +262,7 @@ export class TodoAgents {
       if (this.stopped) return;
       try {
         const folder = folders.get(agent.taskId) ?? [];
-        if (agent.state === 'starting') this.recover(agent, folder);
+        if (agent.state === 'starting') await this.recover(agent, folder);
         else if (agent.state === 'active') await this.keep(agent, folder, byId);
         else if (agent.state === 'closing') await this.closeAgent(agent, folder, byId);
         else await this.tidy(agent, folder, byId);
@@ -284,14 +304,24 @@ export class TodoAgents {
   }
 
   /** A start whose answer was lost: the newest session in the folder is its master; none after a while, and it goes. */
-  private recover(agent: TodoAgent, folder: AgentSession[]): void {
+  private async recover(agent: TodoAgent, folder: AgentSession[]): Promise<void> {
     if (this.starting.has(agent.taskId)) return;
     const found = newestIssueMaster(this.options.stateDir, agent.taskId, folder.filter(session => !session.closed));
     const store = this.options.store;
-    const changed = found ? store.changeAgent(agent.taskId, agent, { state: 'active', sessionId: found.id, provider: found.provider })
-      : this.now() - Date.parse(agent.createdAt) > TODO_AGENT_START_WAIT_MS && store.changeAgent(agent.taskId, agent, null);
-    if (changed && found) this.confirmed.add(agent.taskId);
-    if (changed) this.options.onChange();
+    if (found) {
+      if (!store.changeAgent(agent.taskId, agent, { state: 'active', sessionId: found.id, provider: found.provider })) return;
+      this.confirmed.add(agent.taskId);
+      this.options.onChange();
+    } else if (this.now() - Date.parse(agent.createdAt) > TODO_AGENT_START_WAIT_MS && store.changeAgent(agent.taskId, agent, null)) {
+      this.options.onChange();
+      await this.forgetFolder(agent.taskId);
+    }
+  }
+
+  /** A start that came to nothing leaves no guide behind: only Tower's own files go, and the folder if then empty. */
+  private async forgetFolder(taskId: string): Promise<void> {
+    try { await this.options.removeGuide(todoMasterFolder(this.options.stateDir, taskId)); }
+    catch (error) { console.error(`The guide of a start that came to nothing for todo ${taskId} was not removed: ${message(error)}`); }
   }
 
   /**

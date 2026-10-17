@@ -1,7 +1,8 @@
-import { readdir, rm, rmdir, stat } from 'node:fs/promises';
+import { readdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { TODO_MASTER_TASK_ID } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { removeTodoMasterGuide } from './guide.js';
 import { issueDataDir } from './paths.js';
 
 /** An issue master's follow file is cleared away this long after its session was closed (or went away). */
@@ -40,15 +41,6 @@ async function expired(folder: string, saved: SavedFollow | undefined): Promise<
   return Date.now() - changed >= KEEP_CLOSED_MS;
 }
 
-/**
- * Takes away the guides Tower wrote into an issue master's folder (CLAUDE.md, AGENTS.md), and the folder if nothing
- * else is left in it. Anything else there (a file the master made) stays, with its folder.
- */
-async function removeGuides(folder: string): Promise<void> {
-  for (const name of ['CLAUDE.md', 'AGENTS.md']) await rm(join(folder, name), { force: true });
-  await rmdir(folder).catch((error: NodeJS.ErrnoException) => { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code ?? '')) throw error; });
-}
-
 /** Whether some issue master's data is due to be cleared away, so the web brings the host to do it. */
 export function issueFilesExpired(masterData: string): Promise<boolean> {
   return eachIssueFile(masterData, (_taskId, folder, saved) => expired(folder, saved));
@@ -64,7 +56,7 @@ export async function clearClosedIssueFiles(masterData: string, options: { follo
     if (options.following(taskId)) return;
     if (await expired(folder, saved)) {
       await rm(folder, { recursive: true, force: true });
-      if (options.guides) await removeGuides(options.guides(taskId));
+      if (options.guides) await removeTodoMasterGuide(options.guides(taskId));
     }
     else if (options.markOpen && saved?.version === 1 && typeof saved.closedAt !== 'string') {
       await writePrivateJson(join(folder, 'follow.json'), JSON.stringify({ ...saved, closedAt: new Date().toISOString() }));

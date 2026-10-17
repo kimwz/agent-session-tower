@@ -1,9 +1,11 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
+import { removeTodoMasterGuide, writeTodoMasterGuide } from '../../../server/master/guide.js';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { TowerError } from '../../../shared/errors.js';
 import { MASTER_FOLDER } from '../../../shared/master.js';
 import { TodoRequestSchema, type TodoOp } from '../../../shared/todo/ops.js';
@@ -54,6 +56,7 @@ async function fixture(t: TestContext) {
     uncertain: error => (error as { disposition?: string }).disposition === 'uncertain',
     model: async () => ({ provider: 'claude', model: 'opus', effort: 'high' }),
     writeGuide: async (folder, taskId) => { calls.push(`guide ${taskId} ${folder === todoMasterFolder(dir, taskId)}`); },
+    removeGuide: async folder => { calls.push(`unguide ${basename(folder)}`); },
     startHost: async () => { hosts++; },
     onChange: () => { changes++; },
     now: () => clock.getTime(),
@@ -62,7 +65,7 @@ async function fixture(t: TestContext) {
   // As the web answers a change (server/index.ts): the masters it moved, at the revision that moved them.
   const apply = (...ops: TodoOp[]) => {
     const answer = store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }));
-    const moved = agents.settle();
+    const moved = agents.settle(answer.tasks.map(task => task.id));
     return { ...answer, revision: Object.keys(moved).length ? store.revision() : answer.revision, agents: moved };
   };
   const tick = (ms: number) => { clock = new Date(clock.getTime() + ms); };
@@ -92,7 +95,7 @@ test('the owner starts an issue master: a session in its folder, with its guide,
 });
 
 test('a start is refused for a closed or gone todo and for one that has a master; a refused start leaves nothing, a lost answer is found or given up', async t => {
-  const { store, agents, hooks, session, apply, tick, folder } = await fixture(t);
+  const { store, agents, hooks, calls, session, apply, tick, folder } = await fixture(t);
   apply({ op: 'task.create', id: 'a', content: 'A' }, { op: 'task.create', id: 'b', content: 'B' }, { op: 'task.create', id: 'c', content: 'C' }, { op: 'task.create', id: 'd', content: 'D' });
   apply(complete('d', 'cd'));
   await assert.rejects(agents.begin('d', 'go'), error => kind(error) === 'conflict');
@@ -104,6 +107,8 @@ test('a start is refused for a closed or gone todo and for one that has a master
   hooks.create = async () => { throw new TowerError('unavailable', 'not now', { disposition: 'not-admitted' }); };
   await assert.rejects(agents.begin('b', 'go'), /not now/);
   assert.equal(store.agent('b'), undefined);
+  // The guide it wrote goes with it (only Tower's files, and the folder if then empty).
+  assert.equal(calls.at(-1), 'unguide b');
 
   // The answer was lost: the row waits, and a pass finds the session the start made in the folder.
   hooks.create = async input => { session('late-b', input.cwd); throw new TowerError('unavailable', 'lost', { disposition: 'uncertain' }); };
@@ -116,9 +121,11 @@ test('a start is refused for a closed or gone todo and for one that has a master
   await assert.rejects(agents.begin('c', 'go'), /lost/);
   await agents.schedule();
   assert.equal(store.agent('c')!.state, 'starting');
+  assert.ok(!calls.includes('unguide c'));
   tick(TODO_AGENT_START_WAIT_MS + 1000);
   await agents.schedule();
   assert.equal(store.agent('c'), undefined);
+  assert.equal(calls.at(-1), 'unguide c');
   assert.equal(folder('c').endsWith('/todo-masters/c'), true);
 });
 
@@ -184,30 +191,52 @@ test('a request sent again answers what it did first and moves no master', async
   apply({ op: 'task.create', id: 'a', content: 'A' });
   await agents.begin('a', 'go');
   const request = TodoRequestSchema.parse({ requestId: randomUUID(), ops: [complete('a', 'ca')] });
-  store.apply(request);
-  assert.equal(agents.settle().a?.state, 'closing');
+  const first = store.apply(request);
+  assert.equal(agents.settle(first.tasks.map(task => task.id)).a?.state, 'closing');
   await agents.schedule();
   apply({ op: 'task.uncomplete', id: 'a', completionId: 'ca' });
   await agents.schedule();
   assert.equal(store.agent('a')!.state, 'active');
-  store.apply(request);
-  assert.deepEqual(agents.settle(), {});
+  const again = store.apply(request);
+  assert.deepEqual(agents.settle(again.tasks.map(task => task.id)), {});
   assert.equal(store.agent('a')!.state, 'active');
 });
 
-test('a restored backup keeps the masters (they are not in it) and moves them to what its todos say', async t => {
+test('a restored backup keeps the masters (they are not in it) and moves them to what its todos say, closed ones too', async t => {
   const { store, agents, apply } = await fixture(t);
   apply({ op: 'task.create', id: 'a', content: 'A' }, { op: 'task.create', id: 'b', content: 'B' });
+  await agents.begin('b', 'go');
   apply(complete('a', 'ca'));
   const backup = store.backupData()!;
   assert.equal(Object.keys(backup.tables).some(table => table.startsWith('todo_agent')), false);
   assert.equal((TODO_DATA_TABLES as readonly string[]).includes('todo_agents'), false);
   apply({ op: 'task.uncomplete', id: 'a', completionId: 'ca' });
   await agents.begin('a', 'go');
+  apply(complete('b', 'cb'));
+  await agents.schedule();
+  assert.equal(store.agent('b')!.state, 'closed');
   store.restoreData(backup.schema, backup.tables);
-  assert.equal(store.agent('a')!.state, 'active');
+  await agents.recheckAll();
+  assert.equal(store.agent('a')!.state, 'closed');
+  assert.equal(store.agent('b')!.state, 'active');
+});
+
+test('a pass compares only the masters not closed; a change only the todos it touched; every master now and then', async t => {
+  const { store, agents, apply, tick } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'A' });
+  await agents.begin('a', 'go');
+  apply(complete('a', 'ca'));
   await agents.schedule();
   assert.equal(store.agent('a')!.state, 'closed');
+  // Reopened behind the web's back (an older build, a copy put back): an ordinary pass does not look at closed masters…
+  store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'task.uncomplete', id: 'a', completionId: 'ca' }] }));
+  assert.deepEqual(agents.settle(['other']), {});
+  await agents.schedule();
+  assert.equal(store.agent('a')!.state, 'closed');
+  // …the hourly one does.
+  tick(60 * 60_000);
+  await agents.schedule();
+  assert.equal(store.agent('a')!.state, 'active');
 });
 
 test('a todo reopened while its master is being closed ends open, with its master taken back', async t => {
@@ -311,7 +340,7 @@ test('nothing is decided while the sessions cannot be known', async t => {
   let asked = 0;
   const agents = new TodoAgents({ stateDir: dir, store, sessions: () => undefined, run: () => undefined,
     reopen: async () => { asked++; }, requestArchive: async () => { asked++; }, createSession: async () => { throw new Error('unused'); }, uncertain: () => false,
-    model: async () => ({ provider: 'codex' }), writeGuide: async () => {}, startHost: async () => {}, onChange: () => {} });
+    model: async () => ({ provider: 'codex' }), writeGuide: async () => {}, removeGuide: async () => {}, startHost: async () => {}, onChange: () => {} });
   store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'A' }] }));
   store.changeAgent('a', null, { state: 'active', sessionId: 's', provider: 'codex' });
   await agents.schedule();
@@ -394,7 +423,7 @@ test('after a restart, an open todo\'s master is taken back from retention once,
   sessions.push({ id: 'm', cwd: todoMasterFolder(dir, 'a'), provider: 'claude', status: 'idle', createdAt: '2026-10-17T09:00:00.000Z', isSubagent: false });
   const again = new TodoAgents({ stateDir: dir, store, sessions: () => sessions.map(item => ({ ...item })), run: () => undefined,
     reopen: async id => { calls.push(`reopen ${id}`); return sessions.find(item => item.id === id); }, requestArchive: async ids => { calls.push(`archive ${ids.join(',')}`); },
-    createSession: async () => { throw new Error('unused'); }, uncertain: () => false, model: async () => ({ provider: 'claude' }), writeGuide: async (_folder, taskId) => { calls.push(`guide ${taskId}`); }, startHost: async () => {}, onChange: () => {} });
+    createSession: async () => { throw new Error('unused'); }, uncertain: () => false, model: async () => ({ provider: 'claude' }), writeGuide: async (_folder, taskId) => { calls.push(`guide ${taskId}`); }, removeGuide: async () => {}, startHost: async () => {}, onChange: () => {} });
   t.after(() => again.close());
   await again.schedule();
   await again.schedule();
@@ -514,4 +543,30 @@ test('the first prompt keeps every attachment path, cutting the rest for them, o
   assert.ok(prompt.length <= 32_000, String(prompt.length));
   for (const file of files) assert.ok(prompt.includes(`/state/todo-files/${file.sha256}`), file.name);
   assert.throws(() => todoAgentPrompt('x'.repeat(28_000), many, names, sha256 => `/state/todo-files/${sha256}`), error => kind(error) === 'invalid');
+});
+
+test('taking a guide away leaves every other file, and the folder while anything else is in it', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-todo-guide-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const used = join(dir, 'used'), empty = join(dir, 'empty');
+  await writeTodoMasterGuide(used, 'used');
+  await writeFile(join(used, 'notes.md'), 'mine');
+  await writeTodoMasterGuide(empty, 'empty');
+  await removeTodoMasterGuide(used);
+  await removeTodoMasterGuide(empty);
+  await removeTodoMasterGuide(join(dir, 'never'));
+  assert.deepEqual(await readdir(used), ['notes.md']);
+  await assert.rejects(stat(empty), { code: 'ENOENT' });
+});
+
+test('closed masters are found through indexes, never by reading every master', async t => {
+  const { dir, store } = await fixture(t);
+  store.close();
+  const db = new DatabaseSync(join(dir, 'todos.sqlite'), { readOnly: true });
+  t.after(() => db.close());
+  const plan = (sql: string) => (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all() as { detail: string }[]).map(row => row.detail).join('; ');
+  assert.match(plan("SELECT * FROM todo_agents WHERE state != 'closed'"), /USING INDEX todo_agents_open/);
+  // A scan only of the index of masters not closed, or a search by todo: never a scan of the whole table.
+  assert.match(plan("SELECT a.* FROM todo_agents a LEFT JOIN todo_tasks t ON t.id = a.task_id WHERE a.state != 'closed' AND (a.state IN ('starting', 'active')) != (t.id IS NOT NULL AND t.completed_at IS NULL AND t.deleted_at IS NULL)"), /SCAN a USING INDEX todo_agents_open/);
+  assert.match(plan('SELECT a.* FROM (SELECT DISTINCT task_id FROM todo_agent_sessions) s JOIN todo_agents a ON a.task_id = s.task_id'), /SEARCH a USING INDEX/);
 });
