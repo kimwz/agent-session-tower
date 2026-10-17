@@ -7,7 +7,7 @@ import type { TodoOp, TodoOpName, TodoOpOf, TodoRequest } from '../../shared/tod
 import type { TodoAvailability, TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoRestoreProgress, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { nodeVerified, sqlitePatched } from '../storage/runtime.js';
 import { TodoContext } from './context.js';
-import { todoFilePath } from './files.js';
+import { checkTodoFileRow, todoFilePath } from './files.js';
 import { createComment, deleteComment, updateComment } from './ops/comments.js';
 import { attachFile, checkAttachable, deleteFile, restoreFile, type NewTodoFile } from './ops/files.js';
 import { createLink, deleteLink } from './ops/links.js';
@@ -428,6 +428,8 @@ export class TodoStore {
         }
       }
     }
+    // Contents are found by a row's hash and shown under its name: nothing but what an upload makes goes in.
+    for (const row of tables.todo_files ?? []) checkTodoFileRow(row);
     const before = this.copyAside();
     this.revisionValue = this.transaction(() => {
       // Checked when the transaction commits, so rows go in table by table whatever points at what.

@@ -57,3 +57,25 @@ test('listing follows continuation pages, and a download larger than allowed is 
   const chunked = new S3Client({ endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, bucket: 'bucket', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret' });
   await assert.rejects(chunked.get('big.towerbackup', 32 * 1024), /너무 큽니다/);
 });
+
+test('a listing that is not a whole ListBucketResult is never taken as complete', async t => {
+  let body = '';
+  const server = createServer((_req, res) => { res.writeHead(200, { 'content-type': 'application/xml' }); res.end(body); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const client = new S3Client({ endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, bucket: 'bucket', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret' });
+  const whole = '<?xml version="1.0"?><ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>tower/a</Key><Size>1</Size></Contents></ListBucketResult>';
+  body = whole;
+  assert.deepEqual(await client.scan('tower/'), { items: [{ key: 'tower/a', size: 1, modifiedAt: '' }], complete: true });
+  for (const broken of [
+    '<ListBucketResult><Contents><Key>tower/a</Key></Contents>',
+    '<ListBucketResult><Contents><Key>tower/a</Key></Contents></ListBucketResult>',
+    '<ListBucketResult><IsTruncated>maybe</IsTruncated></ListBucketResult>',
+    '<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Size>1</Size></Contents></ListBucketResult>',
+    '<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>tower/a</Key></ListBucketResult>',
+    '<Error><Code>Odd</Code></Error>',
+  ]) {
+    body = broken;
+    assert.equal((await client.scan('tower/')).complete, false, broken);
+  }
+});

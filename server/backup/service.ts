@@ -155,7 +155,8 @@ export class BackupService {
 
   // ---- Making a backup ---------------------------------------------------------------------------
 
-  private async payload(todos?: TodoBackupSnapshot): Promise<BackupPayload> {
+  /** `saved`: the settings the backup is made with, so a change meanwhile never splits what it records from where it goes. */
+  private async payload(todos?: TodoBackupSnapshot, saved: SavedSettings = this.saved.settings): Promise<BackupPayload> {
     const stateDir = this.options.stateDir;
     const skills = await this.options.skills();
     const triggers = await collectTriggers(this.options.triggers);
@@ -166,7 +167,7 @@ export class BackupService {
     });
     const master = await optional(join(stateDir, 'master', 'settings.json'));
     const voiceKey = await optional(join(stateDir, 'master', 'elevenlabs-key.json'));
-    const { passphrase: _passphrase, ...settings } = this.saved.settings;
+    const { passphrase: _passphrase, ...settings } = saved;
     return {
       version: 1,
       machine: this.saved.machine,
@@ -187,7 +188,7 @@ export class BackupService {
   async export(passphrase: unknown): Promise<{ name: string; text: string }> {
     const secret = checkPassphrase(passphrase);
     const at = this.now();
-    const text = await encryptBackup(await this.payload(this.todoSnapshot()), secret, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
+    const text = await encryptBackup(await this.payload(this.todoSnapshot(), structuredClone(this.saved.settings)), secret, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
     return { name: this.fileName(at), text };
   }
 
@@ -245,12 +246,13 @@ export class BackupService {
       const key = `${settings.remote.prefix}${this.fileName(at)}`;
       const todos = this.todoSnapshot();
       const warnings: string[] = todos || !this.options.todos ? [] : ['할 일 저장소를 읽지 못해 할 일은 백업하지 않았습니다.'];
-      let attachments: { sidecar?: Buffer; listed: boolean } | undefined;
+      let attachments: Awaited<ReturnType<TodoBackup['upload']>> | undefined;
       try {
-        const text = await encryptBackup(await this.payload(todos), settings.passphrase, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
+        const text = await encryptBackup(await this.payload(todos, settings), settings.passphrase, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
         // The attachments, then the list of them, then the backup: a backup in the bucket always has what it names.
         if (todos) {
           attachments = await this.options.todos!.upload(this.objects(client), settings.remote.prefix, todos, key);
+          if (attachments.damaged.length) warnings.push(`이 컴퓨터에서 손상된 첨부 파일 ${attachments.damaged.length}개는 백업하지 않았습니다.`);
           if (attachments.sidecar) await client.put(`${key}${TODO_SIDECAR}`, attachments.sidecar);
         }
         await client.put(key, Buffer.from(text), 'application/octet-stream');

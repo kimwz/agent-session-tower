@@ -253,7 +253,7 @@ async function main() {
   // Opened under the state lock taken above, and closed before it is released.
   const todos = new TodoStore(stateDir);
   const todoFiles = new TodoFiles(stateDir, todos);
-  const todoBackup = new TodoBackup(todos, todoFiles, stateDir, { onChange: () => changed() });
+  const todoBackup = new TodoBackup(todos, todoFiles, { onChange: () => changed() });
   // Only the background service's own install is replaced by an update; an update left unfinished is settled first.
   const updates = new Updates({ stateDir, version: APP_VERSION, port, managed: await managedByService(stateDir, process.argv[1], Boolean(serviceLog)) });
   // Started as the background service, this version writes the service the way it runs it best, for its next start;

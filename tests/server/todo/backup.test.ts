@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -28,16 +28,20 @@ const store = { backupValue: () => undefined, restore: async () => undefined };
 type Bucket = Awaited<ReturnType<typeof fakeBucket>>;
 
 /** What the bucket does differently, for the requests it is asked. */
-interface Faults { failDelete: Set<string>; failList: boolean; truncateList: boolean }
+interface Faults {
+  failDelete: Set<string>; failList: boolean; truncateList: boolean;
+  /** This computer's backups listed as only the newest one, in a reply cut short (no IsTruncated, no end). */
+  partialBackupList?: boolean;
+}
 
-async function computer(t: TestContext, bucket: Bucket, options: { stateDir?: string; host?: string; keep?: number; faults?: Faults; clock?: { now: number } } = {}) {
+async function computer(t: TestContext, bucket: Bucket, options: { stateDir?: string; host?: string; keep?: number; faults?: Faults; clock?: { now: number }; skillsGate?: () => Promise<void> } = {}) {
   const stateDir = options.stateDir ?? await mkdtemp(join(tmpdir(), 'tower-todo-backup-'));
   const clock = options.clock ?? { now: Date.parse('2026-10-17T09:00:00Z') };
   const todos = new TodoStore(stateDir, { now: () => new Date(clock.now) });
   todos.start();
   const files = new TodoFiles(stateDir, todos, { now: () => clock.now });
   await files.start();
-  const backup = new TodoBackup(todos, files, stateDir, { pieceBytes: PIECE });
+  const backup = new TodoBackup(todos, files, { pieceBytes: PIECE });
   const faults = options.faults;
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -47,9 +51,15 @@ async function computer(t: TestContext, bucket: Bucket, options: { stateDir?: st
     if (attachmentList && faults?.failList) return new Response('<Error><Code>AccessDenied</Code><Message>no listing</Message></Error>', { status: 403 });
     const response = await fetch(input, init);
     if (attachmentList && faults?.truncateList) return new Response((await response.text()).replace('<IsTruncated>false</IsTruncated>', '<IsTruncated>true</IsTruncated>'), { status: 200 });
+    const backupList = init?.method === 'GET' && url.searchParams.has('list-type') && (url.searchParams.get('prefix') ?? '').includes('tower-backup-');
+    if (backupList && faults?.partialBackupList) {
+      const keys = [...(await response.text()).matchAll(/<Key>([^<]+)<\/Key>/g)].map(match => match[1]!).sort();
+      const newest = keys.filter(name => name.endsWith('.towerbackup')).pop()!;
+      return new Response(`<ListBucketResult>${keys.filter(name => name.startsWith(newest)).map(name => `<Contents><Key>${name}</Key></Contents>`).join('')}`, { status: 200 });
+    }
     return response;
   };
-  const service = new BackupService({ stateDir, version: '1.140.0', skills: async () => structuredClone(skills), triggers: async () => undefined,
+  const service = new BackupService({ stateDir, version: '1.140.0', skills: async () => { await options.skillsGate?.(); return structuredClone(skills); }, triggers: async () => undefined,
     settings: async () => ({ 'permissions.json': {}, 'slack-automation.json': {}, 'github-automation.json': {} }), restartWorker: async () => true,
     stores: { groups: store, exclusions: store, decisions: store }, todos: backup, fetcher, now: () => clock.now, host: options.host ?? 'studio' });
   await service.start();
@@ -346,4 +356,69 @@ test('todos of a newer schema, or a file of a newer build here, are not restored
   const refused = await b.restore(plain);
   assert.match(refused.errors.join(' '), /^todos: /);
   assert.deepEqual(b.todos.overview().tasks.map(task => task.id), ['mine']);
+});
+
+test('contents damaged on this computer are never uploaded over the good copies in the bucket', async t => {
+  const bucket = await fakeBucket(t);
+  const faults: Faults = { failDelete: new Set(), failList: false, truncateList: false };
+  const a = await computer(t, bucket, { faults });
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const good = Buffer.from('AAAA'.repeat(40));
+  await a.attach('t', good);
+  const first = await a.upload();
+  const pieces = piecesOf(bucket, namespaceOf(a), good);
+  const before = new Map(pieces.map(name => [name, Buffer.from(bucket.objects.get(name)!.body)]));
+  await writeFile(todoFilePath(a.stateDir, sha(good)), Buffer.from('BBBB'.repeat(40)));
+  // Without a listing every attachment would go up again.
+  faults.failList = true;
+  const seen = bucket.seen.length;
+  await a.upload();
+  assert.deepEqual(attachmentPuts(bucket, seen), []);
+  for (const [name, body] of before) assert.deepEqual(bucket.objects.get(name)!.body, body);
+  assert.match((await a.service.overview()).status.lastWarning ?? '', /손상/);
+  faults.failList = false;
+  const b = await computer(t, bucket);
+  await b.restore(first);
+  assert.deepEqual(await content(b, good), good, 'the earlier backup still opens its attachment');
+});
+
+test('a listing of backups cut short never lets the cleanup remove what an unlisted backup needs', async t => {
+  const bucket = await fakeBucket(t);
+  const faults: Faults = { failDelete: new Set(), failList: false, truncateList: false };
+  const a = await computer(t, bucket, { faults });
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const old = Buffer.from('needed by the first backup');
+  const file = await a.attach('t', old);
+  const first = await a.upload();
+  a.apply({ op: 'file.delete', id: file.id });
+  a.clock.now += TODO_RETENTION_MS + HOUR;
+  a.todos.purge(); await a.files.purge();
+  faults.partialBackupList = true;
+  await a.upload();
+  assert.ok(bucket.objects.has(first));
+  assert.equal(piecesOf(bucket, namespaceOf(a), old).length, 1);
+});
+
+test('settings changed while a backup is made do not split where its attachments go from where it says they are', async t => {
+  const bucket = await fakeBucket(t);
+  let hold: Promise<void> | undefined, entered!: () => void;
+  const a = await computer(t, bucket, { skillsGate: () => { if (!hold) return Promise.resolve(); entered(); return hold; } });
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const file = randomBytes(PIECE + 5);
+  await a.attach('t', file);
+  let release!: () => void;
+  hold = new Promise(resolve => { release = resolve; });
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const making = a.upload();
+  await reached;
+  hold = undefined;
+  await a.service.saveSettings({ enabled: false, intervalHours: 24, keep: 14, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: 'elsewhere/', region: 'auto', accessKeyId: 'AKID' } });
+  release();
+  const key = await making;
+  assert.ok(key.startsWith('tower/'));
+  const b = await computer(t, bucket);
+  await b.restore(key);
+  assert.equal((await b.service.overview()).settings.remote.prefix, 'tower/', 'the backup names the bucket it went to');
+  assert.deepEqual(b.todos.overview().restore, { state: 'done', total: 1, missing: 0 });
+  assert.deepEqual(await content(b, file), file);
 });

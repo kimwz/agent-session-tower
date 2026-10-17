@@ -119,11 +119,17 @@ export class S3Client {
     for (let page = 0; page < Math.max(100, Math.ceil(limit / 500)); page++) {
       const response = await this.request('GET', this.url(undefined, { 'list-type': '2', prefix, ...(token ? { 'continuation-token': token } : {}) }));
       const xml = await response.text();
-      for (const match of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
+      // Only a whole result says it is the end: one cut short, or with an entry it cannot read, may leave objects out.
+      const truncated = tag(xml, 'IsTruncated');
+      const entries = [...xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)];
+      const whole = /^\s*(<\?xml[^>]*\?>\s*)?<ListBucketResult[\s>]/.test(xml) && /<\/ListBucketResult>\s*$/.test(xml) && (truncated === 'true' || truncated === 'false')
+        && entries.length === (xml.match(/<Contents>/g) ?? []).length && entries.every(match => tag(match[1]!, 'Key') !== undefined);
+      for (const match of entries) {
         const key = tag(match[1]!, 'Key');
         if (key !== undefined) found.push({ key, size: Number(tag(match[1]!, 'Size') ?? 0), modifiedAt: tag(match[1]!, 'LastModified') ?? '' });
       }
-      more = tag(xml, 'IsTruncated') === 'true';
+      if (!whole) return { items: found, complete: false };
+      more = truncated === 'true';
       token = more ? tag(xml, 'NextContinuationToken') : undefined;
       if (!token || found.length >= limit) break;
     }

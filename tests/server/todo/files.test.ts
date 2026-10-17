@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -247,4 +247,56 @@ test('an attachment opens only while it shows, and as an image only when its byt
   await assert.rejects(files.openFile(image.file.id), (error: unknown) => kind(error) === 'not-found');
   await rm(todoFilePath(dir, fake.file.sha256));
   await assert.rejects(files.openFile(fake.file.id), (error: unknown) => kind(error) === 'not-found');
+});
+
+test('restored file rows must name contents inside the store, and paths are built only from a content hash', async t => {
+  const { dir, apply, store, upload } = await fixture(t);
+  apply({ op: 'task.create', id: 't', content: 'Task' });
+  const kept = await upload('t', Buffer.from('kept'));
+  const tables = store.backupData()!.tables;
+  const row = tables.todo_files![0]!;
+  for (const [field, value] of [['sha256', '../../../package.json'], ['sha256', 'A'.repeat(64)], ['size', -1], ['size', 1.5], ['name', 'a/b'], ['mime', 'not a type'], ['id', 'x/y']] as const) {
+    const bad = { ...tables, todo_files: [{ ...row, [field]: value }] };
+    assert.throws(() => store.restoreData(TODO_SCHEMA_STEP, bad), (error: unknown) => kind(error) === 'invalid', `${field}: ${value}`);
+  }
+  assert.deepEqual(store.detail('t').files.map(file => file.id), [kept.file.id], 'nothing was replaced');
+  assert.throws(() => todoFilePath(dir, '../../../package.json'), (error: unknown) => kind(error) === 'invalid');
+});
+
+test('a cleanup waiting its turn keeps contents an upload moved into place after the cleanup began', async t => {
+  const { dir, apply, store, files } = await fixture(t);
+  apply({ op: 'task.create', id: 't', content: 'Task' });
+  const content = Buffer.from('moved while a cleanup waited');
+  const started = await files.startUpload({ taskId: 't', name: 'a.txt', mimeType: 'text/plain', size: content.length });
+  await files.appendUpload(started.id, 0, once(content));
+  // The cleanup reads the uploads now, then waits for its turn while the upload moves its contents and fails to add its row.
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const turn = files.contentTurnOf.bind(files);
+  let first = true;
+  files.contentTurnOf = <T>(work: () => T | Promise<T>) => {
+    if (!first) return turn(work);
+    first = false;
+    return gate.then(() => turn(work));
+  };
+  const cleaning = files.purge();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const attach = store.attach.bind(store);
+  store.attach = () => { throw new Error('stopped'); };
+  await assert.rejects(files.completeUpload(started.id), /stopped/);
+  store.attach = attach;
+  release();
+  await cleaning;
+  assert.ok(await files.hasContent(sha(content), content.length), 'the upload may still be completed');
+  const done = await files.completeUpload(started.id);
+  assert.equal(done.file.sha256, sha(content));
+  assert.ok((await stat(todoFilePath(dir, sha(content)))).isFile());
+});
+
+test('contents with another link to them are not served', async t => {
+  const { dir, apply, files, upload } = await fixture(t);
+  apply({ op: 'task.create', id: 't', content: 'Task' });
+  const done = await upload('t', Buffer.from('linked elsewhere'));
+  await link(todoFilePath(dir, done.file.sha256), join(dir, 'elsewhere'));
+  await assert.rejects(files.openFile(done.file.id), (error: unknown) => kind(error) === 'not-found');
 });

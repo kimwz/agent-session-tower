@@ -1,9 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
 import { TowerError } from '../../shared/errors.js';
 import type { TodoRestoreProgress } from '../../shared/todo/types.js';
-import { todoFilePath, type TodoFiles } from './files.js';
+import type { TodoFiles } from './files.js';
 import type { TodoStore, TodoTables } from './store.js';
 
 /**
@@ -109,7 +107,7 @@ export class TodoBackup {
   private readonly pieceBytes: number;
   private bringing?: { stop: AbortController; done: Promise<void> };
 
-  constructor(private readonly store: TodoStore, private readonly files: TodoFiles, private readonly stateDir: string, private readonly options: TodoBackupOptions = {}) {
+  constructor(private readonly store: TodoStore, private readonly files: TodoFiles, private readonly options: TodoBackupOptions = {}) {
     this.pieceBytes = options.pieceBytes ?? PIECE_BYTES;
   }
 
@@ -124,11 +122,12 @@ export class TodoBackup {
   /**
    * Uploads the attachments a backup names that its namespace lacks (all of them when the namespace cannot be
    * listed), and answers the list of objects to keep beside the backup `backupKey`, and whether the namespace was
-   * listed in full. Contents missing on this computer are left out.
+   * listed in full. Contents missing on this computer are left out; contents damaged here (not what their hash says)
+   * are left out too, and answered in `damaged`, so the copies already in the bucket stay as they are.
    */
-  async upload(objects: TodoObjectStore, prefix: string, snapshot: TodoBackupSnapshot, backupKey: string): Promise<{ sidecar?: Buffer; listed: boolean }> {
+  async upload(objects: TodoObjectStore, prefix: string, snapshot: TodoBackupSnapshot, backupKey: string): Promise<{ sidecar?: Buffer; listed: boolean; damaged: string[] }> {
     const files = snapshot.part.files;
-    if (!files) return { listed: false };
+    if (!files) return { listed: false, damaged: [] };
     const key = Buffer.from(files.key, 'base64url');
     const base = `${prefix}${TODO_FILES_FOLDER}${files.namespace}/`;
     let present = new Map<string, number>(), listed = false;
@@ -137,22 +136,32 @@ export class TodoBackup {
       present = wholeContents(listing.keys, base);
       listed = listing.complete;
     } catch (error) { console.warn(`Todo attachments in the backup could not be listed; all are uploaded: ${error instanceof Error ? error.message : String(error)}`); }
-    const kept: string[] = [];
+    const kept: string[] = [], damaged: string[] = [];
     for (const [sha256, size] of snapshot.contents) {
       if (present.has(sha256)) { kept.push(sha256); continue; }
       if (!await this.files.hasContent(sha256, size)) continue;
       if (await this.uploadContent(objects, base, key, sha256, size)) kept.push(sha256);
+      else damaged.push(sha256);
     }
     const sidecar = seal(key, `sidecar|${baseName(backupKey)}`, Buffer.from(JSON.stringify({ version: 1, files: [{ namespace: files.namespace, sha256: kept }] })));
-    return { sidecar, listed };
+    return { sidecar, listed, damaged };
   }
 
-  /** Uploads one attachment in sealed pieces; false (and nothing listed for it) when its contents are not what its name says. */
+  /**
+   * Uploads one attachment in sealed pieces. Its contents are checked against their hash before anything is sent:
+   * pieces of damaged contents would replace good ones an earlier backup needs. False when they do not match.
+   */
   private async uploadContent(objects: TodoObjectStore, base: string, key: Buffer, sha256: string, size: number): Promise<boolean> {
     const count = Math.max(1, Math.ceil(size / this.pieceBytes));
-    const handle = await open(todoFilePath(this.stateDir, sha256), constants.O_RDONLY | constants.O_NOFOLLOW);
-    const hash = createHash('sha256');
+    const handle = await this.files.openContent(sha256, size);
     try {
+      const whole = createHash('sha256');
+      for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) whole.update(chunk as Buffer);
+      if (whole.digest('hex') !== sha256) {
+        console.error(`Todo attachment ${sha256} on this computer does not match its name; it was not backed up.`);
+        return false;
+      }
+      const hash = createHash('sha256');
       for (let index = 1; index <= count; index++) {
         const piece = Buffer.alloc(Math.min(this.pieceBytes, size - (index - 1) * this.pieceBytes));
         const { bytesRead } = await handle.read(piece, 0, piece.length, (index - 1) * this.pieceBytes);
@@ -160,10 +169,10 @@ export class TodoBackup {
         hash.update(piece);
         await objects.put(`${base}${pieceName(sha256, index, count)}`, seal(key, `${sha256}|${index}|${count}`, piece));
       }
+      if (hash.digest('hex') === sha256) return true;
+      console.error(`Todo attachment ${sha256} changed while it was backed up; the backup does not count on it.`);
+      return false;
     } finally { await handle.close(); }
-    if (hash.digest('hex') === sha256) return true;
-    console.error(`Todo attachment ${sha256} on this computer does not match its name; the backup does not count on it.`);
-    return false;
   }
 
   /**

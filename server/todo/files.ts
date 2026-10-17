@@ -15,9 +15,13 @@ import type { TodoStore } from './store.js';
  * can be repeated after a failure at any point (the row's id is fixed when the upload begins).
  */
 
-export const todoFilePath = (stateDir: string, sha256: string) => join(stateDir, 'todo-files', sha256);
-
 const SHA256 = /^[0-9a-f]{64}$/;
+
+/** Where contents named by `sha256` are; only an exact content hash names a path, so no row reaches outside the folder. */
+export function todoFilePath(stateDir: string, sha256: string): string {
+  if (typeof sha256 !== 'string' || !SHA256.test(sha256)) throw new TowerError('invalid', '첨부 파일 해시가 올바르지 않습니다.');
+  return join(stateDir, 'todo-files', sha256);
+}
 const UPLOAD_ID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const MIME = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
@@ -54,6 +58,14 @@ function mimeType(value: unknown, name: string): string {
   const mime = normalizeAttachmentMimeType(value, name);
   if (!MIME.test(mime)) throw invalid('첨부 파일 형식이 올바르지 않습니다.');
   return mime;
+}
+
+/** Throws unless a file row (from a backup) is one an upload could have made. */
+export function checkTodoFileRow(row: Record<string, unknown>): void {
+  const wrong = () => new TowerError('invalid', '할 일 백업의 첨부 파일 기록이 올바르지 않습니다.');
+  if (typeof row.id !== 'string' || !ID.test(row.id) || typeof row.sha256 !== 'string' || !SHA256.test(row.sha256)
+    || !Number.isSafeInteger(row.size) || (row.size as number) < 0 || (row.size as number) > TODO_FILE_MAX_BYTES) throw wrong();
+  try { if (mimeType(row.mime, fileName(row.name)) !== row.mime) throw wrong(); } catch { throw wrong(); }
 }
 
 export class TodoFiles {
@@ -212,18 +224,30 @@ export class TodoFiles {
     const notFound = () => new TowerError('not-found', '첨부 파일을 찾을 수 없습니다.');
     const file = ID.test(id) ? this.store.visibleFile(id) : undefined;
     if (!file) throw notFound();
-    const handle = await open(todoFilePath(this.stateDir, file.sha256), constants.O_RDONLY | constants.O_NOFOLLOW).catch(error => {
-      if (['ENOENT', 'ELOOP'].includes((error as NodeJS.ErrnoException).code ?? '')) throw new TowerError('not-found', '이 첨부 파일의 내용이 이 컴퓨터에 없습니다(백업에서 찾지 못함).');
-      throw error;
-    });
+    const handle = await this.openContent(file.sha256, file.size);
     try {
-      const info = await handle.stat();
-      if (!info.isFile() || info.size !== file.size) throw new TowerError('not-found', '이 첨부 파일의 내용이 이 컴퓨터에 없습니다(백업에서 찾지 못함).');
       if (!image) return { file, handle };
       const head = Buffer.alloc(32);
       const { bytesRead } = await handle.read(head, 0, head.length, 0);
       const type = rasterMime(head.subarray(0, bytesRead));
       return { file, handle, ...(type ? { image: type } : {}) };
+    } catch (error) { await handle.close(); throw error; }
+  }
+
+  /**
+   * Opens stored contents to read: a plain file of the expected size with no other link to it (one elsewhere could
+   * change it behind the store's back).
+   */
+  async openContent(sha256: string, size: number): Promise<FileHandle> {
+    const gone = () => new TowerError('not-found', '이 첨부 파일의 내용이 이 컴퓨터에 없습니다(백업에서 찾지 못함).');
+    const handle = await open(todoFilePath(this.stateDir, sha256), constants.O_RDONLY | constants.O_NOFOLLOW).catch(error => {
+      if (['ENOENT', 'ELOOP'].includes((error as NodeJS.ErrnoException).code ?? '')) throw gone();
+      throw error;
+    });
+    try {
+      const info = await handle.stat();
+      if (!info.isFile() || info.nlink !== 1 || info.size !== size) throw gone();
+      return handle;
     } catch (error) { await handle.close(); throw error; }
   }
 
@@ -276,7 +300,6 @@ export class TodoFiles {
     if (!this.ready) return;
     const now = this.now();
     await this.checkDirectory(this.uploads);
-    const pending = new Set<string>();
     for (const id of await readdir(this.uploads)) {
       if (!UPLOAD_ID.test(id) || this.locks.has(id)) continue;
       await this.lock(id, async () => {
@@ -287,18 +310,19 @@ export class TodoFiles {
         const manifest = await this.loadManifest(id).catch(() => undefined);
         const content = await lstat(join(directory, 'content')).catch(absent);
         if (Math.max(info.mtimeMs, content?.mtimeMs ?? 0, manifest?.touched ?? 0) <= now - TODO_UPLOAD_TTL_MS) await rm(directory, { recursive: true, force: true });
-        else if (manifest?.sha256) pending.add(manifest.sha256);
       });
-    }
-    // Uploads under way right now (locked above) may be about to name their contents too.
-    for (const id of this.locks.keys()) {
-      // best-effort: a record not readable now names no contents yet.
-      const manifest = await this.loadManifest(id).catch(() => undefined);
-      if (manifest?.sha256) pending.add(manifest.sha256);
     }
     await this.contentTurnOf(async () => {
       const named = this.store.fileContents();
       if (!named) return;
+      // Read in this turn: contents move into place only in a turn, after their upload's record names them, so an
+      // upload that moved its contents and has yet to add its row is seen here, however it ran while the cleanup began.
+      const pending = new Set<string>();
+      for (const id of await readdir(this.uploads)) {
+        // best-effort: a record not readable now names no contents.
+        const manifest = UPLOAD_ID.test(id) ? await this.loadManifest(id).catch(() => undefined) : undefined;
+        if (manifest?.sha256) pending.add(manifest.sha256);
+      }
       await this.checkDirectory(this.contents);
       for (const name of await readdir(this.contents)) {
         const path = join(this.contents, name);
