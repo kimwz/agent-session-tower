@@ -13,5 +13,13 @@ export function useTodoSensors(keyboard: 'sortable' | 'free' = 'sortable') {
   );
 }
 
-/** What is under the pointer; a keyboard drag has no pointer, so the target nearest the moved item. */
-export const pointerOrNearest: CollisionDetection = args => args.pointerCoordinates ? pointerWithin(args) : closestCenter(args);
+/**
+ * What is under the pointer. A keyboard drag has no pointer: the target under the moved item's center, else the
+ * nearest (a tall time column is never passed over for a nearer small all-day cell).
+ */
+export const pointerOrNearest: CollisionDetection = args => {
+  if (args.pointerCoordinates) return pointerWithin(args);
+  const { left, top, width, height } = args.collisionRect;
+  const under = pointerWithin({ ...args, pointerCoordinates: { x: left + width / 2, y: top + height / 2 } });
+  return under.length ? under : closestCenter(args);
+};

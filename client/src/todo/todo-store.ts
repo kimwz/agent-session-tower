@@ -62,7 +62,7 @@ export interface TodoState {
 }
 
 interface Action { ops: TodoOp[]; undo: TodoOp[] | null; settled?: (ok: boolean) => void; refused?: boolean }
-type Undo = { ops: TodoOp[]; action: Action };
+type Undo = { ops: TodoOp[]; action: Action; used?: boolean };
 
 export const BATCH_MS = 300;
 const MAX_BATCH_OPS = 90;
@@ -251,7 +251,9 @@ export class TodoClient {
 
   private takeBack(undo: Undo): boolean {
     if (this.lastUndo === undo) this.lastUndo = null;
-    if (undo.action.refused) return false;
+    // Taken back once only, whether by ⌘Z or its toast.
+    if (undo.used || undo.action.refused) return false;
+    undo.used = true;
     return this.apply(undo.ops, { undoable: false });
   }
 

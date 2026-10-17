@@ -140,6 +140,8 @@ function Description({ task, client, readOnly }: { task: TodoTask; client: TodoC
   const [value, setValue] = useState(task.description);
   // What is being saved: a refused save opens the editor again with it, instead of losing what was written.
   const saving = useRef<string | null>(null);
+  const open = useRef(editing);
+  open.current = editing;
   useEffect(() => { if (!editing && saving.current === null) setValue(task.description); }, [task.description, editing]);
   const save = () => {
     setEditing(false);
@@ -147,8 +149,10 @@ function Description({ task, client, readOnly }: { task: TodoTask; client: TodoC
     const text = value.slice(0, 16_383);
     saving.current = text;
     void client.applyAndWait([{ op: 'task.update', id: task.id, patch: { description: text } }]).then(saved => {
-      saving.current = null;
-      if (!saved) { setValue(text); setEditing(true); }
+      // A newer save, or the editor opened again, holds newer text that started from this one.
+      const latest = saving.current === text;
+      if (latest) saving.current = null;
+      if (!saved && latest && !open.current) { setValue(text); setEditing(true); }
     });
   };
   if (editing) return <textarea className="todo-description-editor" autoFocus value={value} maxLength={16_383} aria-label={t('설명')} placeholder={t('설명 (Markdown)')}
@@ -259,13 +263,15 @@ function Comments({ task, world, client, readOnly, uploads }: DetailContext) {
   const send = async () => {
     const text = body.trim() || pending.map(file => file.name).join(', ');
     if (!text || sending) return;
-    const id = newId(), attach = pending;
+    const id = newId(), attach = pending, sent = body;
     setSending(true);
-    // The draft stays until the server has the comment, so a refused one can be sent again.
+    // The draft stays until the server has the comment, so a refused one can be sent again; once saved, only what was
+    // sent goes, and what was written or picked meanwhile stays.
     const saved = await client.applyAndWait([{ op: 'comment.create', id, taskId: task.id, body: text.slice(0, 15_000) }]);
     setSending(false);
     if (!saved) return;
-    setBody(''); setPending([]);
+    setBody(current => current === sent ? '' : current);
+    setPending(current => current.filter(file => !attach.includes(file)));
     if (attach.length) uploads.add(attach, { taskId: task.id, commentId: id });
   };
   return <section className="todo-detail-section">

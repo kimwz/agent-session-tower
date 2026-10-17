@@ -371,3 +371,15 @@ test('complete and add next is one call: complete, new labels, the task, then th
   assert.deepEqual(created.labelIds, [(ops.find(op => op.op === 'label.create') as { id: string }).id]);
   assert.deepEqual(ops.at(-1), { op: 'link.create', id: (ops.at(-1) as { id: string }).id, fromTaskId: 'a', toTaskId: id });
 });
+
+test('an undo is used once: a toast pressed after ⌘Z took it back sends nothing', async () => {
+  const { client, transport } = await ready();
+  client.apply([{ op: 'task.delete', id: 'a' }]);
+  const [toast] = client.undoActions();
+  assert.equal(client.undo(), true);
+  client.apply([{ op: 'task.delete', id: 'a' }]);
+  toast.run();
+  assert.ok(client.getState().world.tasks.a.deletedAt, 'the second delete stays');
+  await settle();
+  assert.deepEqual(transport.requests.flatMap(request => request.ops).map(op => op.op), ['task.delete', 'task.restore', 'task.delete']);
+});

@@ -53,8 +53,9 @@ const transformOf = (transform: { x: number; y: number } | null) => transform ? 
  * and a touch held on the check circle completes and adds the next task instead.
  */
 function SortableCard({ task, column, ...props }: { task: TodoTask; column: BoardColumn } & Omit<TaskCardProps, 'task'>) {
-  // A column that stands for no value (overdue, later) takes no drop, but its cards still move to the others.
-  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: cardId(task.id), data: { type: 'task', task, column }, disabled: { draggable: false, droppable: !column.drop } });
+  // A column that stands for no value (overdue, later) stays a target, so a card put back where it was lands on its own
+  // column (which the drop then ignores) rather than on the nearest other one.
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: cardId(task.id), data: { type: 'task', task, column } });
   const style: CSSProperties = { transform: transformOf(transform), transition, opacity: isDragging ? 0.35 : undefined };
   const control = (target: EventTarget) => target instanceof Element && !!target.closest('button, a, input, textarea');
   return <div ref={setNodeRef} style={style} className="todo-sortable" {...attributes} {...listeners} tabIndex={-1} role={undefined}
@@ -65,11 +66,11 @@ function SortableCard({ task, column, ...props }: { task: TodoTask; column: Boar
 }
 
 function Column({ column, board, active, over, children }: { column: BoardColumn; board: BoardProps; active: boolean; over: boolean; children: ReactNode }) {
-  const { setNodeRef } = useDroppable({ id: columnDrop(column.id), data: { type: 'column', column }, disabled: !column.drop });
+  const { setNodeRef } = useDroppable({ id: columnDrop(column.id), data: { type: 'column', column } });
   const sortable = useSortable({ id: sectionDrag(column.sectionId ?? column.id), data: { type: 'section', column }, disabled: !board.sections || !column.sectionId });
   const menu = useRef<HTMLButtonElement>(null);
   const style: CSSProperties = { transform: transformOf(sortable.transform), transition: sortable.transition };
-  return <section ref={sortable.setNodeRef} style={style} className={`todo-column ${column.tone ?? ''} ${over && active ? 'drop-target' : ''} ${sortable.isDragging ? 'dragging' : ''}`} data-column={column.id} aria-label={column.title}>
+  return <section ref={sortable.setNodeRef} style={style} className={`todo-column ${column.tone ?? ''} ${over && active && column.drop ? 'drop-target' : ''} ${sortable.isDragging ? 'dragging' : ''}`} data-column={column.id} aria-label={column.title}>
     <header className="todo-column-head">
       {board.sections && column.sectionId && <button type="button" className="todo-column-grip" aria-label={t('“{0}” 섹션 옮기기', { 0: column.title })} {...sortable.attributes} {...sortable.listeners}><GripVertical size={13} /></button>}
       <h3>{column.title}</h3>
