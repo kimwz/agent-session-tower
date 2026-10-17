@@ -64,6 +64,21 @@ export function inMasterFolder(stateDir: string, cwd: string): boolean {
   if ([join(resolve(stateDir), MASTER_FOLDER), masterFolder(stateDir)].some(folder => path === folder || path.startsWith(`${folder}/`))) return true;
   return [join(resolve(stateDir), TODO_MASTERS_FOLDER), todoMastersFolder(stateDir)].some(folder => path.startsWith(`${folder}/`));
 }
+/** What decides which session in a todo's folder is its issue master. */
+export interface IssueMasterCandidate { id: string; cwd: string; createdAt: string; isSubagent?: boolean; parentId?: string; launchedByAgent?: boolean; node?: string }
+/**
+ * The sessions in a todo's issue-master folder that can be its master: top-level conversations Tower runs there on this
+ * computer, not their sub-agents nor helpers an agent started there (`claude -p`, `codex exec`). The web and the master
+ * host both choose the newest of these, so they always agree on which one is the master.
+ */
+export function issueMasterCandidates<T extends IssueMasterCandidate>(stateDir: string, taskId: string, sessions: readonly T[]): T[] {
+  return sessions.filter(session => !session.node && !session.isSubagent && !session.parentId && !session.launchedByAgent && todoMasterTaskId(stateDir, session.cwd) === taskId);
+}
+/** The newest of `issueMasterCandidates`. */
+export function newestIssueMaster<T extends IssueMasterCandidate>(stateDir: string, taskId: string, sessions: readonly T[]): T | undefined {
+  return issueMasterCandidates(stateDir, taskId, sessions).reduce<T | undefined>((newest, session) => !newest || Date.parse(session.createdAt) > Date.parse(newest.createdAt) ? session : newest, undefined);
+}
+
 /** Sessions marked as the master's (and its subagents'). */
 export function markMaster(sessions: Session[], stateDir: string): Session[] {
   return sessions.map(session => inMasterFolder(stateDir, session.cwd) ? { ...session, master: true } : session);

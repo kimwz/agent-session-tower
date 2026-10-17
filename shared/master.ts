@@ -17,6 +17,12 @@ export const MASTER_FOLDER = 'master-session';
 export const TODO_MASTERS_FOLDER = 'todo-masters';
 /** A todo's id as its folder name: the todo id grammar (`shared/todo/ops.ts`). */
 export const TODO_MASTER_TASK_ID = /^[A-Za-z0-9_-]{1,64}$/;
+/**
+ * Sent by the master host with its own caller secret on an issue master's Tower calls: the todo it works for. Its calls
+ * otherwise go exactly as the main master's do (same powers); the web only uses this to add the sessions it creates to
+ * that todo's family, and trusts it only together with a verified master caller.
+ */
+export const TODO_MASTER_ISSUE_HEADER = 'X-Tower-Issue';
 
 /** ElevenLabs models the master reads aloud with; the first is the default (fast, natural Korean). */
 export const MASTER_TTS_MODELS = ['eleven_v4_turbo', 'eleven_v3_conversational', 'eleven_v3', 'eleven_flash_v2_5'] as const;
