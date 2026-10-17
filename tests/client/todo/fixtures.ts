@@ -14,5 +14,5 @@ export const task = (id: string, patch: Partial<TodoTask> = {}): TodoTask => ({
   deadlineDate: null, labelIds: [], sortKey: id, completedAt: null, createdAt: at, updatedAt: at, deletedAt: null, ...patch,
 });
 export const overview = (tasks: TodoTask[], patch: Partial<TodoOverview> = {}): TodoOverview => ({
-  availability: { state: 'ready' }, revision: 1, projects: [project('inbox', { inbox: true, name: 'Inbox' })], sections: [], labels: [], tasks, links: [], commentCounts: {}, ...patch,
+  availability: { state: 'ready' }, revision: 1, projects: [project('inbox', { inbox: true, name: 'Inbox' })], sections: [], labels: [], tasks, links: [], commentCounts: {}, fileCounts: {}, ...patch,
 });

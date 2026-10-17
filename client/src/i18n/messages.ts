@@ -2666,6 +2666,16 @@ export const english: Record<string, string> = {
   "보관함을 열면 붙여넣은 값과 저장한 시크릿을 사용할 수 있습니다.": "Open the vault to use the pasted value and saved secrets.",
 
   // Todo page
+  "“{0}” 빼기": "Remove “{0}”",
+  "파일을 첨부했습니다": "Attached a file",
+  "백업의 첨부 파일을 받는 중입니다 ({0}개)": "Bringing back the backup’s attachments ({0})",
+  "백업에서 첨부 파일 {0}개를 찾지 못했습니다": "{0} attachments were not found in the backup",
+  "“{0}” 내려받기": "Download “{0}”",
+  "백업에서 찾을 수 없음": "Not found in the backup",
+  "올리는 중": "Uploading",
+  "“{0}” 다시 올리기": "Retry “{0}”",
+  "“{0}” 올리기 취소": "Cancel uploading “{0}”",
+  "“{0}”: 파일 하나는 100MB 이하여야 합니다.": "“{0}”: each file must be 100 MB or smaller.",
   "“{0}”의 다음 반복 (예정)": "Upcoming repeat of “{0}”",
   "“{0}” 섹션 메뉴": "“{0}” section menu",
   "반복 기준": "Repeat by",

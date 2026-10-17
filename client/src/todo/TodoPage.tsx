@@ -12,6 +12,8 @@ import { TaskCard } from './TaskCard';
 import { TaskDetail } from './TaskDetail';
 import { TodoSidebar } from './TodoSidebar';
 import { createActions, type FollowUp } from './todo-actions';
+import { httpUploadIO } from './attachments/upload-io';
+import { TodoUploads } from './attachments/uploads';
 import { longDate, priorityName } from './todo-format';
 import { readShortcut, typingIn } from './todo-shortcuts';
 import { httpTransport, localToday, newId, TodoClient, useTodoState } from './todo-store';
@@ -48,6 +50,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const tokenRef = useRef(token);
   tokenRef.current = token;
   const [client] = useState(() => new TodoClient(httpTransport(() => tokenRef.current)));
+  const [uploads] = useState(() => new TodoUploads(httpUploadIO(() => tokenRef.current), client));
   const state = useTodoState(client);
   const { world } = state;
   const mobile = useMediaQuery('(max-width: 680px)');
@@ -71,7 +74,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const display = displays[key] ?? loadDisplay(key, defaultDisplay(view));
   const readOnly = world.availability.state !== 'ready';
 
-  useEffect(() => { client.start(); return () => client.dispose(); }, [client]);
+  useEffect(() => { client.start(); return () => { uploads.dispose(); client.dispose(); }; }, [client, uploads]);
   useEffect(() => { client.noticeRevision(revision); }, [client, revision]);
   // The local date moves at midnight while the page stays open.
   useEffect(() => { const timer = window.setInterval(() => setToday(localToday()), 60_000); return () => window.clearInterval(timer); }, []);
@@ -263,10 +266,12 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
           {mobile && !readOnly && state.phase === 'ready' && <button type="button" className="todo-tool todo-add-mobile" aria-label={t('작업 추가')} onClick={() => openAdd()}><Plus size={16} /></button>}
         </div>
       </header>
+      {world.restore && world.restore.state !== 'done' && <div className="todo-banner restore" role="status"><TriangleAlert size={13} />
+        {world.restore.state === 'downloading' ? t('백업의 첨부 파일을 받는 중입니다 ({0}개)', { 0: world.restore.total }) : t('백업에서 첨부 파일 {0}개를 찾지 못했습니다', { 0: world.restore.missing })}</div>}
       {world.availability.state === 'read-only' && <div className="todo-banner" role="status"><TriangleAlert size={13} />{t('읽기 전용')}: {world.availability.reason}</div>}
       {body}
     </main>
-    {openTaskId && state.phase === 'ready' && <TaskDetail taskId={openTaskId} world={world} error={state.detailError} today={today} client={client} actions={actions} readOnly={readOnly}
+    {openTaskId && state.phase === 'ready' && <TaskDetail taskId={openTaskId} world={world} error={state.detailError} today={today} client={client} actions={actions} readOnly={readOnly} uploads={uploads}
       onClose={closeTask} onOpen={openTask} onProject={id => goTo(world.projects.find(item => item.id === id)?.inbox ? { kind: 'inbox' } : { kind: 'project', id })} onFollowUp={followUp} />}
     {quick && <QuickAdd world={world} today={today} client={client} preset={quick.preset} follow={quick.follow} onClose={() => setQuick(null)} onAdded={id => setSelectedId(id)} />}
     {cardMenu && <Menu anchor={menuAnchor} label={t('작업 메뉴')} items={cardMenuItems(cardMenu.task)} onClose={() => setCardMenu(null)} align="end" />}

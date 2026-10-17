@@ -1,7 +1,7 @@
 import { nextOccurrence } from '../../../shared/todo/recurrence';
 import { keyBetween } from '../../../shared/todo/sort-key';
 import type { TodoOp, TodoOpOf } from '../../../shared/todo/ops';
-import type { TodoAvailability, TodoChanges, TodoComment, TodoLabel, TodoLink, TodoOverview, TodoProject, TodoSection, TodoTask, TodoTaskDetail } from '../../../shared/todo/types';
+import type { TodoAvailability, TodoChanges, TodoComment, TodoFile, TodoLabel, TodoLink, TodoOverview, TodoProject, TodoRestoreProgress, TodoSection, TodoTask, TodoTaskDetail } from '../../../shared/todo/types';
 
 /**
  * What the Todo page knows: the open overview, every task it has seen (completed and deleted ones too, so undoing a
@@ -17,8 +17,10 @@ export interface TodoWorld {
   tasks: Record<string, TodoTask>;
   links: Record<string, TodoLink>;
   commentCounts: Record<string, number>;
-  /** Attachments per open task, once the server reports them. */
+  /** Attachments per open task. */
   fileCounts: Record<string, number>;
+  /** Bringing back a restored backup's attachments. */
+  restore?: TodoRestoreProgress;
   detail: TodoTaskDetail | null;
 }
 
@@ -31,7 +33,7 @@ export const byOrder = <T extends { sortKey: string; id: string }>(a: T, b: T) =
 export const inboxOf = (world: Pick<TodoWorld, 'projects'>) => world.projects.find(project => project.inbox);
 
 /** A new overview replaces what it covers; completed and deleted tasks the page saw stay known. */
-export function worldFromOverview(overview: TodoOverview & { fileCounts?: Record<string, number> }, previous?: TodoWorld): TodoWorld {
+export function worldFromOverview(overview: TodoOverview, previous?: TodoWorld): TodoWorld {
   const tasks: Record<string, TodoTask> = {};
   for (const task of Object.values(previous?.tasks ?? {})) if (!isOpen(task)) tasks[task.id] = task;
   for (const task of overview.tasks) tasks[task.id] = task;
@@ -39,7 +41,7 @@ export function worldFromOverview(overview: TodoOverview & { fileCounts?: Record
     availability: overview.availability, revision: overview.revision,
     projects: [...overview.projects].sort(byOrder), sections: [...overview.sections].sort(byOrder), labels: [...overview.labels].sort(byOrder),
     tasks, links: Object.fromEntries(overview.links.map(link => [link.id, link])), commentCounts: { ...overview.commentCounts },
-    fileCounts: { ...(overview.fileCounts ?? {}) },
+    fileCounts: { ...(overview.fileCounts ?? {}) }, ...(overview.restore ? { restore: overview.restore } : {}),
     detail: previous?.detail ? syncDetail(previous.detail, tasks) : null,
   };
 }
@@ -85,7 +87,9 @@ function withComments(world: TodoWorld, comments: TodoComment[]): TodoWorld {
   const list = [...map.values()].sort((a, b) => a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0);
   const counts = { ...world.commentCounts };
   if (list.length) counts[detail.task.id] = list.length; else delete counts[detail.task.id];
-  return { ...world, commentCounts: counts, detail: { ...detail, comments: list } };
+  const next = { ...detail, comments: list };
+  // A deleted comment's files stop showing with it.
+  return { ...world, commentCounts: counts, fileCounts: countFromDetail(world.fileCounts, next), detail: next };
 }
 
 function withLinks(world: TodoWorld, links: TodoLink[], removed: string[]): TodoWorld {
@@ -108,8 +112,39 @@ function withLinks(world: TodoWorld, links: TodoLink[], removed: string[]): Todo
   return { ...world, links: map, detail };
 }
 
+/** Files of a task that show: not deleted, and (for a comment's) on a comment that shows. */
+export function visibleFiles(files: readonly TodoFile[], commentIds: ReadonlySet<string>): TodoFile[] {
+  return files.filter(file => !file.deletedAt && (file.commentId === null || commentIds.has(file.commentId)));
+}
+
+/** The open task's attachment count, from its detail: the count the server reports, whatever order answers came in. */
+function countFromDetail(counts: Record<string, number>, detail: TodoTaskDetail): Record<string, number> {
+  const shown = visibleFiles(detail.files, new Set(detail.comments.map(comment => comment.id))).length;
+  const next = { ...counts };
+  if (shown) next[detail.task.id] = shown; else delete next[detail.task.id];
+  return next;
+}
+
+/**
+ * Files added, deleted or restored. The open detail keeps them all (a deleted one with `deletedAt`, to undo); counts
+ * follow what shows, judged from the detail when the file is in it and from the change alone when it is not.
+ */
+function withFiles(world: TodoWorld, files: readonly TodoFile[]): TodoWorld {
+  if (!files.length) return world;
+  const counts = { ...world.fileCounts };
+  let detail = world.detail;
+  for (const file of files) {
+    const before = detail?.files.find(item => item.id === file.id);
+    const shown = before ? !before.deletedAt : !!file.deletedAt;
+    const delta = Number(!file.deletedAt) - Number(shown);
+    if (delta) { const next = (counts[file.taskId] ?? 0) + delta; if (next > 0) counts[file.taskId] = next; else delete counts[file.taskId]; }
+    if (detail && detail.task.id === file.taskId) detail = { ...detail, files: before ? detail.files.map(item => item.id === file.id ? { ...item, ...file } : item) : [...detail.files, file] };
+  }
+  return { ...world, fileCounts: detail ? countFromDetail(counts, detail) : counts, detail };
+}
+
 /** A request's answer: what it changed, as the server now has it. */
-export function mergeChanges(world: TodoWorld, changes: TodoChanges & { files?: unknown[] }): TodoWorld {
+export function mergeChanges(world: TodoWorld, changes: TodoChanges): TodoWorld {
   const tasks = { ...world.tasks };
   for (const task of changes.tasks) tasks[task.id] = task;
   let next: TodoWorld = {
@@ -118,6 +153,7 @@ export function mergeChanges(world: TodoWorld, changes: TodoChanges & { files?: 
   };
   next = withLinks(next, changes.links, changes.removedLinks);
   next = withComments(next, changes.comments);
+  next = withFiles(next, changes.files ?? []);
   return next.detail ? { ...next, detail: syncDetail(next.detail, tasks) } : next;
 }
 
@@ -128,7 +164,7 @@ export function withDetail(world: TodoWorld, detail: TodoTaskDetail | null): Tod
   for (const item of [...detail.previous, ...detail.next]) tasks[item.task.id] = item.task;
   const counts = { ...world.commentCounts };
   if (detail.comments.length) counts[detail.task.id] = detail.comments.length; else delete counts[detail.task.id];
-  return { ...world, tasks, commentCounts: counts, detail };
+  return { ...world, tasks, commentCounts: counts, fileCounts: countFromDetail(world.fileCounts, detail), detail };
 }
 
 /** Siblings of a task: the same project, section and parent. */
@@ -282,6 +318,14 @@ const OPTIMISTIC: { [N in TodoOp['op']]?: (world: TodoWorld, op: TodoOpOf<N>, co
     const comment = world.detail?.comments.find(item => item.id === op.id);
     return comment ? withComments(world, [{ ...comment, body: op.body, updatedAt: now }]) : world;
   },
+  'file.delete': (world, op, { now }) => {
+    const file = world.detail?.files.find(item => item.id === op.id);
+    return file ? withFiles(world, [{ ...file, deletedAt: now }]) : world;
+  },
+  'file.restore': (world, op) => {
+    const file = world.detail?.files.find(item => item.id === op.id);
+    return file ? withFiles(world, [{ ...file, deletedAt: null }]) : world;
+  },
   'comment.delete': (world, op, { now }) => {
     const comment = world.detail?.comments.find(item => item.id === op.id);
     return comment ? withComments(world, [{ ...comment, deletedAt: now }]) : world;
@@ -372,6 +416,8 @@ export function inverseOps(world: TodoWorld, ops: readonly TodoOp[], newId: () =
       case 'label.create': inverse.push({ op: 'label.delete', id: op.id }); break;
       case 'label.delete': inverse.push({ op: 'label.restore', id: op.id }); break;
       case 'comment.create': inverse.push({ op: 'comment.delete', id: op.id }); break;
+      case 'file.delete': inverse.push({ op: 'file.restore', id: op.id }); break;
+      case 'file.restore': inverse.push({ op: 'file.delete', id: op.id }); break;
       case 'comment.delete': inverse.push({ op: 'comment.restore', id: op.id }); break;
       case 'comment.update': {
         const comment = world.detail?.comments.find(item => item.id === op.id);
@@ -391,6 +437,7 @@ export function touchesDetail(detail: TodoTaskDetail | null, changes: TodoChange
   const ids = new Set([detail.task.id, ...detail.subtasks.map(task => task.id)]);
   return changes.tasks.some(task => ids.has(task.id) || (!!task.parentId && ids.has(task.parentId)))
     || changes.comments.some(comment => comment.taskId === detail.task.id)
+    || (changes.files ?? []).some(file => file.taskId === detail.task.id)
     || changes.links.some(link => ids.has(link.fromTaskId) || ids.has(link.toTaskId))
     || changes.removedLinks.some(id => [...detail.previous, ...detail.next].some(item => item.link.id === id));
 }

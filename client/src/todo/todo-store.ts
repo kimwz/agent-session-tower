@@ -61,7 +61,7 @@ export interface TodoState {
   canUndo: boolean;
 }
 
-interface Action { ops: TodoOp[]; undo: TodoOp[] | null }
+interface Action { ops: TodoOp[]; undo: TodoOp[] | null; settled?: (ok: boolean) => void }
 
 export const BATCH_MS = 300;
 const MAX_BATCH_OPS = 90;
@@ -192,18 +192,38 @@ export class TodoClient {
    * Makes a change. It shows at once and is sent with the others of the next moment as one request; the operations of
    * one call are always in the same request, so they apply together or not at all.
    */
-  apply(ops: TodoOp[], options: { undoable?: boolean } = {}): boolean {
+  apply(ops: TodoOp[], options: { undoable?: boolean; settled?: (ok: boolean) => void } = {}): boolean {
     const availability = this.state.world.availability;
     if (availability.state !== 'ready') { this.toast(availability.state === 'read-only' ? t('할 일이 읽기 전용입니다.') : t('할 일을 사용할 수 없습니다.'), 'error'); return false; }
     if (!ops.length) return false;
     const undo = options.undoable === false ? null : inverseOps(this.state.world, ops, newId);
-    const action: Action = { ops, undo };
+    const action: Action = { ops, undo, settled: options.settled };
     this.queue.push(action);
     this.lastUndo = undo ? { ops: undo, action } : options.undoable === false ? this.lastUndo : null;
     this.publish();
     if (this.queue.reduce((count, item) => count + item.ops.length, 0) >= MAX_BATCH_OPS) this.flush();
     else if (!this.timer) this.timer = setTimeout(() => { this.timer = undefined; this.flush(); }, this.options.batchMs ?? BATCH_MS);
     return true;
+  }
+
+  /** Makes a change and answers once the server has it (true) or refused it (false): for work that needs it saved first. */
+  applyAndWait(ops: TodoOp[]): Promise<boolean> {
+    return new Promise(resolve => { if (!this.apply(ops, { settled: resolve })) resolve(false); });
+  }
+
+  /** What another route changed (an upload's completion), taken in as a request's answer is. */
+  receive(changes: TodoChanges) {
+    this.accept(changes, []);
+  }
+
+  private accept(changes: TodoChanges, ops: readonly TodoOp[]) {
+    // One request moves the revision by one: more means another page changed something in between.
+    if (changes.revision > this.base.revision + 1) this.wantRead = true;
+    this.base = mergeChanges(this.base, changes);
+    this.publish();
+    if (this.state.detailId && touchesDetail(this.base.detail, changes)) void this.readDetail(this.state.detailId);
+    if (this.state.completed && ops.some(op => op.op === 'task.complete' || op.op === 'task.uncomplete' || op.op === 'task.delete' || op.op === 'task.restore')) void this.readCompleted(this.state.completed.projectId);
+    this.pump();
   }
 
   /** Takes back the last change. */
@@ -227,13 +247,10 @@ export class TodoClient {
   private async send(batch: Action[], request: TodoRequest, attempt = 0): Promise<void> {
     try {
       const changes = await this.transport.apply(request);
-      // One request moves the revision by one: more means another page changed something in between.
-      if (changes.revision > this.base.revision + 1) this.wantRead = true;
-      this.base = mergeChanges(this.base, changes);
       this.inflight = null;
-      this.publish();
-      if (this.state.detailId && touchesDetail(this.base.detail, changes)) void this.readDetail(this.state.detailId);
-      if (this.state.completed && request.ops.some(op => op.op === 'task.complete' || op.op === 'task.uncomplete' || op.op === 'task.delete' || op.op === 'task.restore')) void this.readCompleted(this.state.completed.projectId);
+      this.accept(changes, request.ops);
+      for (const action of batch) action.settled?.(true);
+      return;
     } catch (error) {
       // A lost answer is asked again with the same request id, which the server answers without applying it twice.
       if (!(error instanceof ApiError) && attempt < 2) {
@@ -244,6 +261,7 @@ export class TodoClient {
       if (this.lastUndo && batch.includes(this.lastUndo.action)) this.lastUndo = null;
       this.publish();
       this.toast(t('변경을 저장하지 못했습니다: {0}', { 0: message(error) }), 'error');
+      for (const action of batch) action.settled?.(false);
       // Another page changed it first, or it is gone: show what is there now.
       if (error instanceof ApiError && (error.status === 409 || error.status === 404)) this.wantRead = true;
     }

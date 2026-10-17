@@ -1,15 +1,18 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ArrowLeft, ArrowRight, CalendarDays, Check, ChevronDown, Clock3, Flag, Hash, History, Link2, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Plus, Tag, Trash2, X } from 'lucide-react';
-import type { TodoEvent, TodoPriority, TodoTask } from '../../../shared/todo/types';
+import { ArrowLeft, ArrowRight, CalendarDays, Check, ChevronDown, Clock3, Flag, Hash, History, Link2, LoaderCircle, MessageSquare, MoreHorizontal, Paperclip, Pencil, Plus, Tag, Trash2, X } from 'lucide-react';
+import type { TodoEvent, TodoFile, TodoPriority, TodoTask } from '../../../shared/todo/types';
 import { relativeTime } from '../common/lib';
 import { translate as t } from '../i18n/i18n';
 import { DatePicker, type DateValue } from './DatePicker';
 import { Menu, Popover, usePopover, type MenuItem } from './Popover';
 import { CheckCircle } from './TaskCard';
 import { TodoMarkdown } from './TodoMarkdown';
+import { AttachButton, AttachmentList, UploadRows, useFileDrop } from './attachments/Attachments';
+import { sizeLabel } from './attachments/upload';
+import { useUploads, type TodoUploads } from './attachments/uploads';
 import type { TodoActions } from './todo-actions';
 import { colorOf, dateLabel, durationLabel, monthDay, priorityName, recurrenceLabel } from './todo-format';
-import { byOrder, isOpen, type TodoWorld } from './todo-model';
+import { byOrder, isOpen, visibleFiles, type TodoWorld } from './todo-model';
 import { newId, type TodoClient } from './todo-store';
 import { projectTree } from './todo-views';
 
@@ -19,7 +22,7 @@ import { projectTree } from './todo-views';
  * through the store, shown at once.
  */
 
-export interface DetailContext { task: TodoTask; world: TodoWorld; today: string; client: TodoClient; actions: TodoActions; readOnly: boolean }
+export interface DetailContext { task: TodoTask; world: TodoWorld; today: string; client: TodoClient; actions: TodoActions; readOnly: boolean; uploads: TodoUploads }
 
 export interface PropertyRow { key: string; label: string; icon: ReactNode; render: (context: DetailContext) => ReactNode }
 
@@ -230,11 +233,28 @@ function CommentEditor({ initial, onSave, onCancel }: { initial: string; onSave:
   </form>;
 }
 
-function Comments({ task, world, client, readOnly }: DetailContext) {
+function Comments({ task, world, client, readOnly, uploads }: DetailContext) {
   const [body, setBody] = useState('');
+  const [pending, setPending] = useState<File[]>([]);
+  const [sending, setSending] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
+  const jobs = useUploads(uploads);
   const comments = world.detail?.task.id === task.id ? world.detail.comments : [];
-  const send = () => { const text = body.trim(); if (!text) return; if (client.apply([{ op: 'comment.create', id: newId(), taskId: task.id, body: text.slice(0, 15_000) }])) setBody(''); };
+  const files = visibleFiles(world.detail?.task.id === task.id ? world.detail.files : [], new Set(comments.map(comment => comment.id)));
+  const add = (picked: File[]) => setPending(previous => [...previous, ...picked]);
+  const drop = useFileDrop(add, readOnly);
+  // A comment's files are uploaded once the comment is saved: the server attaches them to a comment that exists.
+  const send = async () => {
+    const text = body.trim() || pending.map(file => file.name).join(', ');
+    if (!text || sending) return;
+    const id = newId(), attach = pending;
+    setSending(true);
+    const saved = attach.length ? await client.applyAndWait([{ op: 'comment.create', id, taskId: task.id, body: text.slice(0, 15_000) }]) : client.apply([{ op: 'comment.create', id, taskId: task.id, body: text.slice(0, 15_000) }]);
+    setSending(false);
+    if (!saved) return;
+    setBody(''); setPending([]);
+    if (attach.length) uploads.add(attach, { taskId: task.id, commentId: id });
+  };
   return <section className="todo-detail-section">
     <h4><MessageSquare size={13} />{t('댓글')}{comments.length > 0 && <span>{comments.length}</span>}</h4>
     {comments.length > 0 && <ul className="todo-comments">{comments.map(comment => <li key={comment.id}>
@@ -246,18 +266,44 @@ function Comments({ task, world, client, readOnly }: DetailContext) {
       {editing === comment.id
         ? <CommentEditor initial={comment.body} onCancel={() => setEditing(null)} onSave={text => { client.apply([{ op: 'comment.update', id: comment.id, body: text }]); setEditing(null); }} />
         : <TodoMarkdown>{comment.body}</TodoMarkdown>}
+      <AttachmentList files={files.filter(file => file.commentId === comment.id)} onDelete={readOnly ? undefined : file => removeFile(client, file)} />
+      <UploadRows jobs={jobs.filter(job => job.commentId === comment.id)} onCancel={key => uploads.cancel(key)} onRetry={key => uploads.retry(key)} />
     </li>)}</ul>}
-    {!readOnly && <form className="todo-comment-form" onSubmit={event => { event.preventDefault(); send(); }}>
+    {!readOnly && <form className={`todo-comment-form ${drop.over ? 'drop-target' : ''}`} onSubmit={event => { event.preventDefault(); void send(); }} {...drop.handlers}>
       <textarea value={body} rows={body.includes('\n') ? 4 : 2} maxLength={15_000} placeholder={t('댓글 (Markdown)')} aria-label={t('댓글')} onChange={event => setBody(event.target.value)}
-        onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); send(); } }} />
-      {body.trim() && <button type="submit" className="todo-primary">{t('댓글 달기')}</button>}
+        onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }} />
+      {pending.length > 0 && <ul className="todo-pending-files">{pending.map((file, index) => <li key={`${file.name}-${index}`}>
+        <Paperclip size={12} /><span>{file.name}</span><small>{sizeLabel(file.size)}</small>
+        <button type="button" className="icon-button" aria-label={t('“{0}” 빼기', { 0: file.name })} onClick={() => setPending(previous => previous.filter((_, position) => position !== index))}><X size={12} /></button>
+      </li>)}</ul>}
+      <div className="todo-comment-actions">
+        <AttachButton onFiles={add} />
+        <span className="todo-spacer" />
+        {(body.trim() || pending.length > 0) && <button type="submit" className="todo-primary" disabled={sending}>{t('댓글 달기')}</button>}
+      </div>
     </form>}
   </section>;
 }
 
+/** Deleting a file can be undone from its toast (file.restore). */
+function removeFile(client: TodoClient, file: TodoFile) {
+  if (client.apply([{ op: 'file.delete', id: file.id }])) client.toast(t('“{0}” 삭제', { 0: file.name }), 'info', [{ label: t('되돌리기'), run: () => client.undo() }]);
+}
+
+/** The description's attachments: listed under it, added with the button, by dropping files on the description or pasting them. */
+function DescriptionFiles({ task, world, client, readOnly, uploads }: DetailContext) {
+  const jobs = useUploads(uploads).filter(job => job.taskId === task.id && job.commentId === null);
+  const files = (world.detail?.task.id === task.id ? world.detail.files : []).filter(file => file.commentId === null && !file.deletedAt);
+  return <div className="todo-description-files">
+    <AttachmentList files={files} onDelete={readOnly ? undefined : file => removeFile(client, file)} />
+    <UploadRows jobs={jobs} onCancel={key => uploads.cancel(key)} onRetry={key => uploads.retry(key)} />
+    {!readOnly && <AttachButton onFiles={picked => uploads.add(picked, { taskId: task.id })} />}
+  </div>;
+}
+
 const EVENT_LABELS: Record<TodoEvent['kind'], string> = {
   created: '만들었습니다', updated: '고쳤습니다', moved: '옮겼습니다', completed: '완료했습니다', uncompleted: '완료를 취소했습니다', deleted: '지웠습니다', restored: '되살렸습니다',
-  linked: '연결했습니다', unlinked: '연결을 해제했습니다', commented: '댓글을 달았습니다',
+  linked: '연결했습니다', unlinked: '연결을 해제했습니다', commented: '댓글을 달았습니다', attached: '파일을 첨부했습니다',
 };
 
 function Activity({ task, world }: DetailContext) {
@@ -291,20 +337,22 @@ export interface TaskDetailProps {
   client: TodoClient;
   actions: TodoActions;
   readOnly: boolean;
+  uploads: TodoUploads;
   onClose: () => void;
   onOpen: (id: string) => void;
   onProject: (projectId: string) => void;
   onFollowUp: (task: TodoTask, complete: boolean) => void;
 }
 
-export function TaskDetail({ taskId, world, error, today, client, actions, readOnly, onClose, onOpen, onProject, onFollowUp }: TaskDetailProps) {
+export function TaskDetail({ taskId, world, error, today, client, actions, readOnly, uploads, onClose, onOpen, onProject, onFollowUp }: TaskDetailProps) {
   const task = world.tasks[taskId] ?? (world.detail?.task.id === taskId ? world.detail.task : undefined);
   const more = usePopover();
   const panel = useRef<HTMLElement>(null);
   useEffect(() => { panel.current?.focus({ preventScroll: true }); }, [taskId]);
   const project = task && world.projects.find(item => item.id === task.projectId);
   const parent = task?.parentId ? world.tasks[task.parentId] : undefined;
-  const context: DetailContext | undefined = task && { task, world, today, client, actions, readOnly };
+  const context: DetailContext | undefined = task && { task, world, today, client, actions, readOnly, uploads };
+  const drop = useFileDrop(files => task && uploads.add(files, { taskId: task.id }), readOnly || !task);
   return <aside ref={panel} className="todo-detail" aria-label={task ? task.content : t('작업')} tabIndex={-1}>
     <header className="todo-detail-bar">
       <button type="button" className="icon-button todo-detail-back" aria-label={t('닫기')} onClick={onClose}><ArrowLeft size={17} /></button>
@@ -326,7 +374,10 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
         <CheckCircle task={task} onComplete={() => actions.complete(task)} onCompleteNext={() => onFollowUp(task, true)} onReopen={() => void actions.reopen(task)} />
         <EditableTitle key={task.id} task={task} actions={actions} readOnly={readOnly} />
       </div>
-      <Description key={`d-${task.id}`} task={task} actions={actions} readOnly={readOnly} />
+      <div className={`todo-description-area ${drop.over ? 'drop-target' : ''}`} {...drop.handlers}>
+        <Description key={`d-${task.id}`} task={task} actions={actions} readOnly={readOnly} />
+        <DescriptionFiles {...context} />
+      </div>
       <dl className="todo-properties">
         {DETAIL_PROPERTIES.map(row => <div key={row.key} className="todo-property"><dt>{row.icon}{t(row.label)}</dt><dd>{row.render(context)}</dd></div>)}
       </dl>

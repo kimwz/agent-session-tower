@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { TodoRequest } from '../../../shared/todo/ops.js';
-import type { TodoChanges, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../../shared/todo/types.js';
+import type { TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoTask, TodoTaskDetail } from '../../../shared/todo/types.js';
 import { ApiError } from '../../../client/src/common/lib.js';
 import { TodoClient, type TodoTransport } from '../../../client/src/todo/todo-store.js';
-import { applyOps, inverseOps, mergeChanges, worldFromOverview } from '../../../client/src/todo/todo-model.js';
+import { applyOps, inverseOps, mergeChanges, withDetail, worldFromOverview } from '../../../client/src/todo/todo-model.js';
 import { createActions } from '../../../client/src/todo/todo-actions.js';
 import { overview, project, task } from './fixtures.js';
 
-const changes = (revision: number, patch: Partial<TodoChanges> = {}): TodoChanges => ({ revision, projects: [], sections: [], labels: [], tasks: [], links: [], removedLinks: [], comments: [], ...patch });
+const changes = (revision: number, patch: Partial<TodoChanges> = {}): TodoChanges => ({ revision, projects: [], sections: [], labels: [], tasks: [], links: [], removedLinks: [], comments: [], files: [], ...patch });
 const settle = (ms = 15) => new Promise(resolve => setTimeout(resolve, ms));
 
 class FakeTransport implements TodoTransport {
@@ -24,7 +24,7 @@ class FakeTransport implements TodoTransport {
   async detail(id: string): Promise<TodoTaskDetail> {
     this.reads.detail++;
     const completions = (this.completions[id] ?? []).map(completion => ({ id: completion, taskId: id, occurrenceDate: null, completedAt: 'x' }));
-    return { task: this.current.tasks.find(item => item.id === id)!, subtasks: [], comments: [], completions, events: [], previous: [], next: [] };
+    return { task: this.current.tasks.find(item => item.id === id)!, subtasks: [], comments: [], completions, events: [], previous: [], next: [], files: [] };
   }
   async completed(): Promise<TodoCompletedPage> { this.reads.completed++; const next = this.completedPages.shift(); return next ? next() : { items: [] }; }
   async search(): Promise<TodoTask[]> { return []; }
@@ -254,4 +254,51 @@ test('a late answer to an older completed-list load never replaces a newer one',
   await old;
   assert.equal(client.getState().completed?.items.length, 1);
   assert.equal(client.getState().completed?.loading, false);
+});
+
+test('files: an upload’s changes add the file and its count; deleting shows at once and undoes with file.restore', () => {
+  const at = '2026-10-14T00:00:00.000Z';
+  const file = (id: string, patch: Partial<TodoFile> = {}): TodoFile => ({ id, taskId: 'a', commentId: null, name: `${id}.png`, mimeType: 'image/png', size: 10, sha256: 'x'.repeat(64), createdAt: at, deletedAt: null, ...patch });
+  let world = worldFromOverview(overview([task('a')], { fileCounts: { a: 1 }, restore: { state: 'partial', total: 3, missing: 1 } }));
+  assert.deepEqual(world.restore, { state: 'partial', total: 3, missing: 1 });
+  world = withDetail(world, { task: world.tasks.a, subtasks: [], comments: [], completions: [], events: [], previous: [], next: [], files: [file('f1')] });
+  world = mergeChanges(world, changes(2, { files: [file('f2')] }));
+  assert.equal(world.fileCounts.a, 2);
+  assert.deepEqual(world.detail?.files.map(item => item.id), ['f1', 'f2']);
+  const deleted = applyOps(world, [{ op: 'file.delete', id: 'f1' }], { now: at, today: '2026-10-14' });
+  assert.equal(deleted.fileCounts.a, 1);
+  assert.equal(deleted.detail?.files.find(item => item.id === 'f1')?.deletedAt, at);
+  assert.deepEqual(inverseOps(world, [{ op: 'file.delete', id: 'f1' }], () => 'x'), [{ op: 'file.restore', id: 'f1' }]);
+  // A file of a task whose detail is not open still moves the count.
+  const closed = mergeChanges(withDetail(world, null), changes(3, { files: [file('f3', { taskId: 'b' })] }));
+  assert.equal(closed.fileCounts.b, 1);
+});
+
+test('an upload’s answer reaches the page through the store like a request’s', async () => {
+  const { client } = await ready();
+  const at = '2026-10-14T00:00:00.000Z';
+  client.receive(changes(2, { files: [{ id: 'f', taskId: 'a', commentId: null, name: 'n', mimeType: 'text/plain', size: 1, sha256: 'x'.repeat(64), createdAt: at, deletedAt: null }] }));
+  assert.equal(client.getState().world.fileCounts.a, 1);
+  assert.equal(client.getState().world.revision, 2);
+});
+
+test('a change can be waited for: true once saved, false when refused', async () => {
+  const transport = new FakeTransport();
+  const { client } = await ready(transport);
+  assert.equal(await client.applyAndWait([{ op: 'comment.create', id: 'c', taskId: 'a', body: 'x' }]), true);
+  transport.answer = async () => { throw new ApiError('no', 400); };
+  assert.equal(await client.applyAndWait([{ op: 'comment.create', id: 'd', taskId: 'a', body: 'x' }]), false);
+});
+
+test('the open task’s file count follows its detail, so answers arriving out of order cannot skew it', () => {
+  const at = '2026-10-14T00:00:00.000Z';
+  const file = (id: string, commentId: string | null = null): TodoFile => ({ id, taskId: 'a', commentId, name: id, mimeType: 'text/plain', size: 1, sha256: 'x'.repeat(64), createdAt: at, deletedAt: null });
+  // The overview was read before the second upload finished; the detail after.
+  let world = worldFromOverview(overview([task('a')], { fileCounts: { a: 1 } }));
+  world = withDetail(world, { task: world.tasks.a, subtasks: [], comments: [{ id: 'c', taskId: 'a', body: 'x', createdAt: at, updatedAt: at, deletedAt: null }], completions: [], events: [], previous: [], next: [], files: [file('f1'), file('f2'), file('f3', 'c')] });
+  assert.equal(world.fileCounts.a, 3);
+  world = mergeChanges(world, changes(5, { files: [file('f2')] }));
+  assert.equal(world.fileCounts.a, 3);
+  world = applyOps(world, [{ op: 'comment.delete', id: 'c' }], { now: at, today: '2026-10-14' });
+  assert.equal(world.fileCounts.a, 2, 'a deleted comment’s file stops counting');
 });

@@ -201,11 +201,11 @@ select.todo-property-value { border:0; background:none; }
 .todo-flow li:hover .todo-unlink, .todo-unlink:focus-visible { opacity:1; }
 .todo-flow-actions { display:flex; flex-wrap:wrap; gap:4px 14px; }
 .todo-comments { display:flex; flex-direction:column; gap:12px; margin-bottom:10px; }
-.todo-comments li { padding:10px 12px; border:1px solid #1e2937; border-radius:9px; background:#111a26; }
+.todo-comments > li { padding:10px 12px; border:1px solid #1e2937; border-radius:9px; background:#111a26; }
 .todo-comment-meta { display:flex; align-items:center; gap:2px; margin-bottom:4px; color:#6d7c92; font-size:11px; }
 .todo-comment-actions { display:flex; gap:6px; }
 .todo-comment-meta .icon-button { width:22px; height:22px; opacity:0; }
-.todo-comments li:hover .icon-button { opacity:1; }
+.todo-comments > li:hover .todo-comment-meta .icon-button { opacity:1; }
 .todo-comment-form { display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
 .todo-comment-form textarea { width:100%; padding:9px 11px; border:1px solid #2a3546; border-radius:8px; background:#0a111b; color:var(--text); line-height:1.5; resize:vertical; }
 .todo-comment-form textarea:focus { border-color:#3a5476; outline:none; }
@@ -321,6 +321,36 @@ select.todo-property-value { border:0; background:none; }
 .todo-toast > button:not(.icon-button) { flex:none; height:28px; padding:0 8px; border-radius:6px; color:#e6a16f; font-weight:600; max-width:22ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .todo-toast > button:not(.icon-button):hover { background:#24334a; }
 .todo-toast .icon-button { width:26px; height:26px; }
+
+/* Attachments */
+.todo-description-area { border-radius:9px; transition:box-shadow .12s, background .12s; }
+.todo-description-area.drop-target, .todo-comment-form.drop-target { background:#13233a; box-shadow:inset 0 0 0 1px #3e5f8a; }
+.todo-description-files { display:flex; flex-direction:column; gap:8px; margin:2px 0 4px 33px; }
+.todo-files { display:flex; flex-direction:column; gap:8px; }
+.todo-file-thumbs { display:grid; grid-template-columns:repeat(auto-fill, minmax(104px, 1fr)); gap:8px; list-style:none; margin:0; padding:0; }
+.todo-file-thumbs li { position:relative; aspect-ratio:1; overflow:hidden; border:1px solid #243041; border-radius:8px; background:#0e1520; }
+.todo-file-thumbs img { width:100%; height:100%; object-fit:cover; display:block; }
+.todo-file-tools { position:absolute; right:4px; bottom:4px; display:flex; gap:2px; padding:2px; border-radius:7px; background:#0b1018d9; opacity:0; transition:opacity .12s; }
+.todo-file-thumbs li:hover .todo-file-tools, .todo-file-thumbs li:focus-within .todo-file-tools { opacity:1; }
+.todo-file-tools .icon-button { width:24px; height:24px; }
+.todo-file-rows, .todo-uploads, .todo-pending-files { display:flex; flex-direction:column; gap:4px; list-style:none; margin:0; padding:0; }
+.todo-file-rows li, .todo-upload-line, .todo-pending-files li { display:flex; align-items:center; gap:8px; min-height:32px; padding:0 4px 0 10px; border:1px solid #1f2a39; border-radius:8px; background:#111a26; color:#9fb0c5; }
+.todo-file-rows li.missing { color:#c79a74; border-style:dashed; }
+.todo-file-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#d0dbe8; font-size:12.5px; text-decoration:none; }
+a.todo-file-name:hover { text-decoration:underline; }
+.todo-file-size { flex:none; color:#6d7c92; font-size:11px; font-variant-numeric:tabular-nums; }
+.todo-file-rows .icon-button, .todo-upload-line .icon-button, .todo-pending-files .icon-button { width:26px; height:26px; }
+.todo-uploads li { display:flex; flex-direction:column; gap:4px; }
+.todo-uploads progress { width:100%; height:3px; appearance:none; border:0; border-radius:2px; background:#1d2735; overflow:hidden; }
+.todo-uploads progress::-webkit-progress-bar { background:#1d2735; }
+.todo-uploads progress::-webkit-progress-value { background:#5f8fdc; }
+.todo-uploads progress::-moz-progress-bar { background:#5f8fdc; }
+.todo-uploads li.failed .todo-upload-line { border-color:#8c4450; }
+.todo-pending-files li span { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#d0dbe8; font-size:12px; }
+.todo-pending-files small { color:#6d7c92; font-size:11px; }
+.todo-comment-form .todo-comment-actions { align-self:stretch; align-items:center; }
+.todo-comments .todo-files, .todo-comments .todo-uploads { margin-top:8px; }
+.todo-banner.restore { color:#a6b8e8; border-color:#3e5f8a; }
 
 /* Board or calendar */
 .todo-layout-switch button { display:inline-flex; align-items:center; gap:5px; }
@@ -463,6 +493,9 @@ select.todo-property-value { border:0; background:none; }
   .todo-cal-unscheduled > div { flex-direction:row; flex-wrap:wrap; }
   .todo-cal-unscheduled .todo-cal-entry { width:auto; max-width:100%; }
   .todo-layout-switch span { display:none; }
+  .todo-description-files { margin-left:0; }
+  .todo-file-thumbs { grid-template-columns:repeat(3, minmax(0, 1fr)); }
+  .todo-file-tools { opacity:1; }
 }
 @media (hover:none) {
   .todo-card-more, .todo-column-more, .todo-side-more { opacity:1; }
