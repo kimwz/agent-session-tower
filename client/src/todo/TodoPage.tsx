@@ -155,6 +155,9 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const completedItems = display.completed && state.completed ? state.completed.items.filter(({ completion, task }) => view.kind === 'label' ? task.labelIds.includes(view.id) : view.kind === 'today' ? localToday(new Date(completion.completedAt)) === today : true) : [];
   const doneKey = (completionId: string) => `done:${completionId}`;
   const chosenDone = selectedId?.startsWith('done:') ? completedItems.find(item => doneKey(item.completion.id) === selectedId)?.task : undefined;
+  // One card shows chosen: a completion chosen (and opened from there) shows on its row only, never also on the task's card.
+  const doneChosen = !!chosenDone && (!openTaskId || chosenDone.id === openTaskId);
+  const boardChosen = doneChosen ? null : openTaskId ?? selectedId;
   const target = (): TodoTask | undefined => (openTaskId ? world.tasks[openTaskId] : undefined) ?? chosenDone ?? (selectedId ? world.tasks[selectedId] : undefined);
   /** Chooses a card and puts the keyboard on it, so Enter and Space act on the card that shows chosen. */
   const focusFrame = useRef(0);
@@ -203,7 +206,17 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
           // The choice goes on to a card that stays: below, above, or in the next column; never one of its own sub-tasks,
           // which complete with it.
           const under = (id: string) => { for (let item = current.world.tasks[id]; item?.parentId; item = current.world.tasks[item.parentId]) if (item.parentId === task.id) return true; return false; };
-          const neighbour = (['down', 'up', 'right', 'left'] as const).map(direction => moveSelection(current.navColumns, task.id, direction)).find(id => id && id !== task.id && !under(id));
+          const step = (direction: 'down' | 'up' | 'right' | 'left') => {
+            // Past its own sub-tasks, as far as the list goes.
+            for (let id: string | null = task.id, count = 0; count < 500; count++) {
+              const next: string | null = moveSelection(current.navColumns, id, direction);
+              if (!next || next === id) return null;
+              if (next !== task.id && !under(next)) return next;
+              id = next;
+            }
+            return null;
+          };
+          const neighbour = (['down', 'up', 'right', 'left'] as const).map(step).find(Boolean);
           current.actions.complete(task);
           if (!current.openTaskId && neighbour && neighbour !== task.id) current.choose(neighbour);
           break;
@@ -276,7 +289,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       <header className="todo-column-head"><h3>{t('완료됨')}</h3><span className="todo-column-count">{items.length || ''}</span></header>
       <div className="todo-column-cards">
         {items.map(({ completion, task }) => <TaskCard key={completion.id} task={{ ...task, completedAt: task.completedAt ?? completion.completedAt }} context={context} {...card} onMenu={undefined}
-          selectId={doneKey(completion.id)} selected={selectedId === doneKey(completion.id)}
+          selectId={doneKey(completion.id)} selected={doneChosen && selectedId === doneKey(completion.id)}
           onReopen={() => void actions.reopen(task, completion.id)} />)}
         {state.completed.loading && <LoaderCircle className="spin todo-muted" size={16} />}
         {state.completed.error && <p className="todo-error" role="alert">{state.completed.error}</p>}
@@ -301,7 +314,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     onChange={ops => client.apply(ops)} />;
   else if (emptyBoard) body = <div className="todo-state todo-empty"><p>{view.kind === 'today' ? t('오늘 할 일을 모두 끝냈습니다.') : view.kind === 'search' ? (searchResults === null ? t('검색어를 입력하세요.') : t('찾은 작업이 없습니다.')) : t('작업이 없습니다.')}</p>
     {view.kind !== 'search' && !readOnly && <button type="button" className="secondary-button" onClick={() => openAdd()}><Plus size={13} />{t('작업 추가')}</button>}</div>;
-  else body = <BoardView columns={columns} context={context} manual={manualOrder(display) && !readOnly} sections={!!project && display.group === 'section' && !readOnly} mobile={mobile} selectedId={openTaskId ?? selectedId}
+  else body = <BoardView columns={columns} context={context} manual={manualOrder(display) && !readOnly} sections={!!project && display.group === 'section' && !readOnly} mobile={mobile} selectedId={boardChosen}
     card={card} onAdd={column => openAdd({ ...column.preset })} onDrop={onDrop}
     onSectionMove={(id, afterId) => client.apply([{ op: 'section.move', id, afterId }])}
     onAddSection={name => project && client.apply([{ op: 'section.create', id: newId(), projectId: project.id, name }])}
