@@ -150,7 +150,8 @@ test('completing a todo hands its master, its folder and its family to retention
   const reopened = apply({ op: 'task.uncomplete', id: 'a', completionId: 'ca' });
   assert.equal(reopened.agents.a?.state, 'active');
   await agents.schedule();
-  assert.deepEqual(calls, [`reopen ${sessionId}`]);
+  // Its folder is written first: the master host removes a closed issue's files after a while, and a turn needs it.
+  assert.deepEqual(calls, ['guide a true', `reopen ${sessionId}`]);
   assert.ok(sessions.some(item => item.id === sessionId));
   // Reopened while it was still listed (its hand-over not yet carried out), it is taken back all the same.
   calls.length = 0;
@@ -159,7 +160,7 @@ test('completing a todo hands its master, its folder and its family to retention
   assert.deepEqual(calls, [`archive ${sessionId}`]);
   apply({ op: 'task.uncomplete', id: 'a', completionId: 'ca2' });
   await agents.schedule();
-  assert.deepEqual(calls, [`archive ${sessionId}`, `reopen ${sessionId}`]);
+  assert.deepEqual(calls, [`archive ${sessionId}`, 'guide a true', `reopen ${sessionId}`]);
 });
 
 test('a repeating todo closes its master only with its last occurrence; deleting closes it and restoring reopens it', async t => {
@@ -393,11 +394,11 @@ test('after a restart, an open todo\'s master is taken back from retention once,
   sessions.push({ id: 'm', cwd: todoMasterFolder(dir, 'a'), provider: 'claude', status: 'idle', createdAt: '2026-10-17T09:00:00.000Z', isSubagent: false });
   const again = new TodoAgents({ stateDir: dir, store, sessions: () => sessions.map(item => ({ ...item })), run: () => undefined,
     reopen: async id => { calls.push(`reopen ${id}`); return sessions.find(item => item.id === id); }, requestArchive: async ids => { calls.push(`archive ${ids.join(',')}`); },
-    createSession: async () => { throw new Error('unused'); }, uncertain: () => false, model: async () => ({ provider: 'claude' }), writeGuide: async () => {}, startHost: async () => {}, onChange: () => {} });
+    createSession: async () => { throw new Error('unused'); }, uncertain: () => false, model: async () => ({ provider: 'claude' }), writeGuide: async (_folder, taskId) => { calls.push(`guide ${taskId}`); }, startHost: async () => {}, onChange: () => {} });
   t.after(() => again.close());
   await again.schedule();
   await again.schedule();
-  assert.deepEqual(calls, ['reopen m']);
+  assert.deepEqual(calls, ['guide a', 'reopen m']);
 });
 
 test('a closed master\'s family record waits for a session recorded but not listed yet, and for its master\'s own work', async t => {
@@ -417,4 +418,100 @@ test('a closed master\'s family record waits for a session recorded but not list
   master.status = 'idle';
   await agents.schedule();
   assert.deepEqual(store.familyOf('a'), []);
+});
+
+test('a session an issue master makes itself joins its todo\'s family; one made for a closed issue is handed over', async t => {
+  const { store, agents, calls, session, apply } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'A' });
+  await agents.begin('a', 'go');
+  session('made', '/work/one');
+  agents.recordIssueSession('a', 'made');
+  agents.recordIssueSession('missing', 'other');
+  assert.deepEqual(store.familyOf('a').map(member => member.sessionId), ['made']);
+  assert.equal(store.familyTask('other'), undefined);
+  apply(complete('a', 'ca'));
+  await agents.schedule();
+  calls.length = 0;
+  session('after', '/work/two');
+  agents.recordIssueSession('a', 'after');
+  await agents.schedule();
+  assert.deepEqual(calls, ['archive after']);
+});
+
+test('closed issues cost a pass nothing once their family is settled: they are not even read', async t => {
+  const { store, agents, sessions, apply } = await fixture(t);
+  for (const id of ['a', 'b', 'c']) {
+    apply({ op: 'task.create', id, content: id });
+    await agents.begin(id, 'go');
+    apply(complete(id, `c${id}`));
+  }
+  await agents.schedule();
+  // Their masters are moved to compressed storage by retention: no longer listed.
+  sessions.length = 0;
+  await agents.schedule();
+  assert.deepEqual(store.agentsToSettle(), []);
+  assert.deepEqual(['a', 'b', 'c'].map(id => store.agent(id)!.state), ['closed', 'closed', 'closed']);
+});
+
+test('hand-overs go at most 500 at a time, and only those that went count as handed over', async t => {
+  const { store, agents, calls, hooks, session, apply, tick } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'A' });
+  const { sessionId } = await agents.begin('a', 'go');
+  for (let index = 0; index < 1100; index++) { session(`s${index}`, '/work'); store.addFamily(`s${index}`, 'a'); }
+  let refuse = true;
+  hooks.requestArchive = async ids => { if (refuse && ids.includes('s700')) throw new Error('worker busy'); };
+  apply(complete('a', 'ca'));
+  await agents.schedule();
+  const ids = (call: string) => call.slice('archive '.length).split(',');
+  const first = calls.filter(call => call.startsWith('archive')).map(ids);
+  assert.deepEqual(first.map(chunk => chunk.length), [500, 500]);
+  assert.equal(store.agent('a')!.state, 'closing');
+  // A minute later the rest goes, the chunk that went not again.
+  calls.length = 0;
+  refuse = false;
+  tick(61_000);
+  await agents.schedule();
+  const sent = calls.filter(call => call.startsWith('archive')).flatMap(ids);
+  assert.equal(sent.length, 601);
+  assert.equal(new Set([...first[0], ...sent]).size, 1101);
+  assert.ok(first[0].includes(sessionId!));
+  assert.equal(store.agent('a')!.state, 'closed');
+});
+
+test('the folder\'s master is chosen as the master host chooses it: helpers an agent ran there are neither the master nor handed over as extra', async t => {
+  const { store, agents, calls, session, apply, tick, folder } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'A' });
+  const { sessionId } = await agents.begin('a', 'go');
+  tick(1000);
+  session('helper', folder('a'), { launchedByAgent: true });
+  calls.length = 0;
+  await agents.schedule();
+  assert.equal(store.agent('a')!.sessionId, sessionId);
+  assert.deepEqual(calls, []);
+});
+
+test('sessions in the folder of a todo with no master are handed over, unless its start is under way', async t => {
+  const { agents, calls, hooks, session, apply, folder } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'A' }, { op: 'task.create', id: 'b', content: 'B' });
+  session('orphan', folder('gone'));
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  hooks.create = async input => { const made = session('fresh', input.cwd); await held; return { session: made }; };
+  const starting = agents.begin('b', 'go');
+  await new Promise(resolve => setImmediate(resolve));
+  await agents.schedule();
+  assert.deepEqual(calls.filter(call => call.startsWith('archive')), ['archive orphan']);
+  release();
+  await starting;
+  await agents.schedule();
+  assert.deepEqual(calls.filter(call => call.startsWith('archive')), ['archive orphan']);
+});
+
+test('the first prompt keeps every attachment path, cutting the rest for them, or refuses when the paths alone do not fit', () => {
+  const files = Array.from({ length: 80 }, (_, index) => ({ id: `f${index}`, taskId: 't1', commentId: null, name: `file-${index}.png`, mimeType: 'image/png', size: 10, sha256: String(index).padStart(64, '0'), createdAt: '', deletedAt: null }));
+  const many = detail({ description: 'D'.repeat(20_000) }, { files, comments: Array.from({ length: 20 }, (_, index) => comment(index, 'c'.repeat(1000))) });
+  const prompt = todoAgentPrompt('x'.repeat(20_000), many, names, sha256 => `/state/todo-files/${sha256}`);
+  assert.ok(prompt.length <= 32_000, String(prompt.length));
+  for (const file of files) assert.ok(prompt.includes(`/state/todo-files/${file.sha256}`), file.name);
+  assert.throws(() => todoAgentPrompt('x'.repeat(28_000), many, names, sha256 => `/state/todo-files/${sha256}`), error => kind(error) === 'invalid');
 });

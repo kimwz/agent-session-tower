@@ -424,10 +424,11 @@ export class TodoStore {
 
   // ---- Issue masters (server/todo/agents.ts decides when; these keep the rows) -------------------------------------
 
-  /** Every todo's issue master, closed ones included. */
-  agents(): TodoAgent[] {
+  /** Issue masters with something left to settle: those not closed, and closed ones whose family is still recorded. */
+  agentsToSettle(): TodoAgent[] {
     this.readable();
-    return this.all('SELECT * FROM todo_agents ORDER BY created_at, task_id').map(agentOf);
+    return this.all(`SELECT * FROM todo_agents a WHERE a.state != 'closed' OR EXISTS (SELECT 1 FROM todo_agent_sessions s WHERE s.task_id = a.task_id)
+      ORDER BY a.created_at, a.task_id`).map(agentOf);
   }
 
   agent(taskId: string): TodoAgent | undefined {
@@ -451,10 +452,11 @@ export class TodoStore {
   settleAgents(): Record<string, TodoAgent | null> {
     const moved: Record<string, TodoAgent | null> = {};
     this.agentWrite(() => {
-      for (const agent of this.all('SELECT * FROM todo_agents').map(agentOf)) {
+      // Only the masters whose todo says otherwise, found by SQLite alone: closed ones of closed todos cost nothing here.
+      const out = this.all(`SELECT a.* FROM todo_agents a LEFT JOIN todo_tasks t ON t.id = a.task_id
+        WHERE (a.state IN ('starting', 'active')) != (t.id IS NOT NULL AND t.completed_at IS NULL AND t.deleted_at IS NULL)`).map(agentOf);
+      for (const agent of out) {
         const open = this.taskState(agent.taskId) === 'open';
-        const running = agent.state === 'starting' || agent.state === 'active';
-        if (open === running) continue;
         const state: TodoAgentState = !open ? 'closing' : agent.sessionId ? 'active' : 'starting';
         this.run('UPDATE todo_agents SET state = ?, updated_at = ? WHERE task_id = ?', state, this.now(), agent.taskId);
         moved[agent.taskId] = this.agentShown(agent.taskId);

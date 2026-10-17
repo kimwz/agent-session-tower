@@ -16,6 +16,8 @@ export interface TodoBackend {
   apply(request: TodoRequest): TodoChanges;
   /** Starts a todo's issue master with the owner's first message (server/todo/agents.ts). */
   startAgent?(id: string, text: string): Promise<TodoAgent>;
+  /** Records a session an issue master made (POST /api/sessions on its behalf) in its todo's family. */
+  issueSession?(taskId: string, sessionId: string): void;
   /** The sessions of open issue masters' families, with their todo. */
   agentSessions?(): Record<string, { taskId: string; title: string }>;
   /** Attachments; absent where they cannot be kept. */

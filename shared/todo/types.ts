@@ -157,8 +157,8 @@ export type TodoAvailability =
 
 /**
  * A todo's issue master (see shared/master.ts): `starting` until its session is known, `active` while the todo is
- * open, `closing` once the todo is closed (completed for good or deleted) until its sessions are hidden and handed to
- * retention, then `closed`. Reopening the todo makes it `active` again.
+ * open, `closing` once the todo is closed (completed for good or deleted) until its sessions are handed to retention
+ * (which moves them to compressed storage once their work is over; nothing is hidden or stopped), then `closed`. Reopening the todo makes it `active` again.
  */
 export type TodoAgentState = 'starting' | 'active' | 'closing' | 'closed';
 export interface TodoAgent {
