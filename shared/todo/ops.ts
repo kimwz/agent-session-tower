@@ -55,7 +55,14 @@ export const TodoOpSchema = z.discriminatedUnion('op', [
     dueTime: taskFields.dueTime.optional(), recurrence: taskFields.recurrence.optional(), durationMin: taskFields.durationMin.optional(),
     deadlineDate: taskFields.deadlineDate.optional(), labelIds: taskFields.labelIds.optional() }).strict(),
   z.object({ op: z.literal('task.update'), id, patch: z.object(taskFields).partial().strict().refine(patch => Object.keys(patch).length > 0, 'Nothing to change.') }).strict(),
-  z.object({ op: z.literal('task.move'), id, projectId: id.optional(), sectionId: id.nullable().optional(), parentId: id.nullable().optional(), afterId }).strict(),
+  /**
+   * `dayAfterId` puts the task in order among the tasks of its own date instead (after that task, or first for null;
+   * see shared/todo/day-order.ts), and then names nothing else.
+   */
+  z.object({ op: z.literal('task.move'), id, projectId: id.optional(), sectionId: id.nullable().optional(), parentId: id.nullable().optional(), afterId,
+    dayAfterId: id.nullable().optional() }).strict(),
+  /** A copy of the task and its open sub-tasks, right after it; `copyId` names the copy, the server names its sub-tasks. */
+  z.object({ op: z.literal('task.duplicate'), id, copyId: id }).strict(),
   /** `occurrence` is the date the page saw (null for a one-off task): a repeating task whose date moved since is refused, so two pages never complete one occurrence twice. `today` is the page's local date. */
   z.object({ op: z.literal('task.complete'), id, completionId: id, occurrence: date.nullable(), today: date }).strict(),
   z.object({ op: z.literal('task.uncomplete'), id, completionId: id }).strict(),

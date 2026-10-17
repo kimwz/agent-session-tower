@@ -28,7 +28,7 @@ export const taskOf = (row: Row): TodoTask => ({
   content: text(row.content), description: text(row.description), priority: Number(row.priority) as TodoPriority,
   dueDate: maybe(row.due_date), dueTime: maybe(row.due_time), recurrence: row.recurrence ? JSON.parse(text(row.recurrence)) as TodoRecurrence : null,
   durationMin: row.duration_min === null || row.duration_min === undefined ? null : Number(row.duration_min), deadlineDate: maybe(row.deadline_date),
-  labelIds: row.labels ? text(row.labels).split(',').sort() : [], sortKey: text(row.sort_key), completedAt: maybe(row.completed_at), ...stamps(row),
+  labelIds: row.labels ? text(row.labels).split(',').sort() : [], sortKey: text(row.sort_key), dayOrder: maybe(row.day_order), completedAt: maybe(row.completed_at), ...stamps(row),
 });
 
 /** A task's columns with its live labels, for `SELECT ${TASK_COLUMNS} FROM todo_tasks t …`. */

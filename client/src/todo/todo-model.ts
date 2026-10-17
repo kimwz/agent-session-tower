@@ -1,7 +1,8 @@
+import { dayBefore, reorderDay } from '../../../shared/todo/day-order';
 import { nextOccurrence } from '../../../shared/todo/recurrence';
 import { keyBetween } from '../../../shared/todo/sort-key';
 import type { TodoOp, TodoOpOf } from '../../../shared/todo/ops';
-import type { TodoAvailability, TodoChanges, TodoComment, TodoFile, TodoLabel, TodoLink, TodoOverview, TodoProject, TodoRestoreProgress, TodoSection, TodoTask, TodoTaskDetail } from '../../../shared/todo/types';
+import type { TodoAvailability, TodoChanges, TodoComment, TodoFile, TodoLabel, TodoLink, TodoOverview, TodoProject, TodoRestoreProgress, TodoSection, TodoSubtaskCount, TodoTask, TodoTaskDetail } from '../../../shared/todo/types';
 
 /**
  * What the Todo page knows: the open overview, every task it has seen (completed and deleted ones too, so undoing a
@@ -19,13 +20,15 @@ export interface TodoWorld {
   commentCounts: Record<string, number>;
   /** Attachments per open task. */
   fileCounts: Record<string, number>;
+  /** Sub-tasks per task that has any, completed ones counted apart: the overview's, then each answer's. */
+  subtaskCounts: Record<string, TodoSubtaskCount>;
   /** Bringing back a restored backup's attachments. */
   restore?: TodoRestoreProgress;
   detail: TodoTaskDetail | null;
 }
 
 export const emptyWorld = (): TodoWorld => ({
-  availability: { state: 'ready' }, revision: 0, projects: [], sections: [], labels: [], tasks: {}, links: {}, commentCounts: {}, fileCounts: {}, detail: null,
+  availability: { state: 'ready' }, revision: 0, projects: [], sections: [], labels: [], tasks: {}, links: {}, commentCounts: {}, fileCounts: {}, subtaskCounts: {}, detail: null,
 });
 
 export const isOpen = (task: TodoTask | undefined): boolean => !!task && !task.completedAt && !task.deletedAt;
@@ -41,7 +44,7 @@ export function worldFromOverview(overview: TodoOverview, previous?: TodoWorld):
     availability: overview.availability, revision: overview.revision,
     projects: [...overview.projects].sort(byOrder), sections: [...overview.sections].sort(byOrder), labels: [...overview.labels].sort(byOrder),
     tasks, links: Object.fromEntries(overview.links.map(link => [link.id, link])), commentCounts: { ...overview.commentCounts },
-    fileCounts: { ...(overview.fileCounts ?? {}) }, ...(overview.restore ? { restore: overview.restore } : {}),
+    fileCounts: { ...(overview.fileCounts ?? {}) }, subtaskCounts: { ...(overview.subtaskCounts ?? {}) }, ...(overview.restore ? { restore: overview.restore } : {}),
     detail: previous?.detail ? syncDetail(previous.detail, tasks) : null,
   };
 }
@@ -143,12 +146,39 @@ function withFiles(world: TodoWorld, files: readonly TodoFile[]): TodoWorld {
   return { ...world, fileCounts: detail ? countFromDetail(counts, detail) : counts, detail };
 }
 
+/** Counts with `changed` put in; a task with no sub-tasks left has none. */
+function withCounts(counts: Record<string, TodoSubtaskCount>, changed: Record<string, TodoSubtaskCount>): Record<string, TodoSubtaskCount> {
+  const next = { ...counts };
+  for (const [id, count] of Object.entries(changed)) if (count.total > 0) next[id] = count; else delete next[id];
+  return next;
+}
+
+/** What a task adds to its parent's count: nothing deleted, one to the total, and one to the done ones when completed. */
+const share = (task: TodoTask | undefined) => !task?.parentId || task.deletedAt ? null : { parentId: task.parentId, done: task.completedAt ? 1 : 0 };
+
+/** The counts after an immediate change, from how each task it changed counted before and counts now. */
+function shiftCounts(before: TodoWorld, after: TodoWorld): Record<string, TodoSubtaskCount> {
+  const changed: Record<string, TodoSubtaskCount> = {};
+  const add = (task: TodoTask | undefined, sign: 1 | -1) => {
+    const item = share(task);
+    if (!item) return;
+    const count = changed[item.parentId] ??= { ...(after.subtaskCounts[item.parentId] ?? { done: 0, total: 0 }) };
+    count.total += sign; count.done += sign * item.done;
+  };
+  for (const [id, task] of Object.entries(after.tasks)) {
+    if (before.tasks[id] === task) continue;
+    add(before.tasks[id], -1);
+    add(task, 1);
+  }
+  return Object.keys(changed).length ? withCounts(after.subtaskCounts, changed) : after.subtaskCounts;
+}
+
 /** A request's answer: what it changed, as the server now has it. */
 export function mergeChanges(world: TodoWorld, changes: TodoChanges): TodoWorld {
   const tasks = { ...world.tasks };
   for (const task of changes.tasks) tasks[task.id] = task;
   let next: TodoWorld = {
-    ...world, revision: Math.max(world.revision, changes.revision),
+    ...world, revision: Math.max(world.revision, changes.revision), subtaskCounts: changes.subtaskCounts ? withCounts(world.subtaskCounts, changes.subtaskCounts) : world.subtaskCounts,
     projects: upsert(world.projects, changes.projects), sections: upsert(world.sections, changes.sections), labels: upsert(world.labels, changes.labels), tasks,
   };
   next = withLinks(next, changes.links, changes.removedLinks);
@@ -207,6 +237,9 @@ function descendants(world: TodoWorld, id: string): TodoTask[] {
   return result;
 }
 
+/** The open tasks of a date, which the server puts in order together (shared/todo/day-order.ts). */
+const dayTasks = (world: TodoWorld, date: string) => Object.values(world.tasks).filter(task => isOpen(task) && task.dueDate === date);
+
 export interface ApplyContext { now: string; today: string }
 
 function patchTask(world: TodoWorld, id: string, patch: Partial<TodoTask>): TodoWorld {
@@ -223,7 +256,7 @@ const OPTIMISTIC: { [N in TodoOp['op']]?: (world: TodoWorld, op: TodoOpOf<N>, co
     const task: TodoTask = {
       id: op.id, ...place, content: op.content, description: op.description ?? '', priority: op.priority ?? 4, dueDate: op.dueDate ?? null,
       dueTime: op.dueDate ? op.dueTime ?? null : null, recurrence: op.dueDate ? op.recurrence ?? null : null, durationMin: op.durationMin ?? null,
-      deadlineDate: op.deadlineDate ?? null, labelIds: op.labelIds ?? [], sortKey: placeKey(siblingsOf(world, place), op.afterId), completedAt: null,
+      deadlineDate: op.deadlineDate ?? null, labelIds: op.labelIds ?? [], sortKey: placeKey(siblingsOf(world, place), op.afterId), dayOrder: null, completedAt: null,
       createdAt: now, updatedAt: now, deletedAt: null,
     };
     return { ...world, tasks: { ...world.tasks, [task.id]: task } };
@@ -239,6 +272,14 @@ const OPTIMISTIC: { [N in TodoOp['op']]?: (world: TodoWorld, op: TodoOpOf<N>, co
   'task.move': (world, op, { now }) => {
     const task = world.tasks[op.id];
     if (!task) return world;
+    if (op.dayAfterId !== undefined) {
+      if (!isOpen(task) || !task.dueDate) return world;
+      let next = world;
+      for (const item of reorderDay(dayTasks(world, task.dueDate), op.id, op.dayAfterId)) {
+        if (next.tasks[item.id]?.dayOrder !== item.dayOrder) next = patchTask(next, item.id, { dayOrder: item.dayOrder, ...(item.id === op.id ? { updatedAt: now } : {}) });
+      }
+      return next;
+    }
     const parent = op.parentId ? world.tasks[op.parentId] : undefined;
     const moved = op.parentId !== undefined || op.projectId !== undefined || op.sectionId !== undefined;
     const projectId = parent?.projectId ?? (moved ? op.projectId ?? task.projectId : task.projectId);
@@ -339,7 +380,9 @@ export function applyOps(world: TodoWorld, ops: readonly TodoOp[], context: Appl
     const apply = OPTIMISTIC[op.op] as ((world: TodoWorld, op: TodoOp, context: ApplyContext) => TodoWorld) | undefined;
     if (apply) next = apply(next, op, context);
   }
-  return next.detail && next !== world ? { ...next, detail: syncDetail(next.detail, next.tasks) } : next;
+  if (next === world) return next;
+  next = { ...next, subtaskCounts: shiftCounts(world, next) };
+  return next.detail ? { ...next, detail: syncDetail(next.detail, next.tasks) } : next;
 }
 
 const taskFieldsOf = (task: TodoTask, fields: string[]) => Object.fromEntries(fields.map(field => [field, task[field as keyof TodoTask]]));
@@ -365,10 +408,16 @@ export function inverseOps(world: TodoWorld, ops: readonly TodoOp[], newId: () =
       case 'task.move': {
         const task = world.tasks[op.id];
         if (!task) return null;
+        if (op.dayAfterId !== undefined) {
+          if (!task.dueDate) return null;
+          inverse.push({ op: 'task.move', id: op.id, dayAfterId: dayBefore(dayTasks(world, task.dueDate), op.id) });
+          break;
+        }
         inverse.push(task.parentId ? { op: 'task.move', id: op.id, parentId: task.parentId, afterId: previousSibling(world, op.id) }
           : { op: 'task.move', id: op.id, projectId: task.projectId, sectionId: task.sectionId, parentId: null, afterId: previousSibling(world, op.id) });
         break;
       }
+      case 'task.duplicate': inverse.push({ op: 'task.delete', id: op.copyId }); break;
       case 'task.complete': inverse.push({ op: 'task.uncomplete', id: op.id, completionId: op.completionId }); break;
       case 'task.delete': inverse.push({ op: 'task.restore', id: op.id }); break;
       case 'task.restore': inverse.push({ op: 'task.delete', id: op.id }); break;

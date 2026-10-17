@@ -17,7 +17,10 @@ import type { BoardColumn, CardContext } from './todo-views';
 export interface BoardProps {
   columns: BoardColumn[];
   context: CardContext;
-  /** Cards can be put in order within a column. */
+  /**
+   * Cards can be put in order within a column: siblings in a section column, the tasks of one date in a date column
+   * (`onDrop` then gets the card before the drop, and `dropOps` makes it a move within that date).
+   */
   manual: boolean;
   /** Section columns can be put in order and a section added. */
   sections: boolean;
