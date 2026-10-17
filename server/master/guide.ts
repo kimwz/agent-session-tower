@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, rmdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { issueRequest } from '../../shared/issues.js';
@@ -79,9 +79,21 @@ export function writeTodoMasterGuide(folder: string, taskId: string): Promise<vo
 /** Writes the guide into the master's folder, as both CLAUDE.md and AGENTS.md, when it changed. */
 export function writeMasterGuide(folder: string): Promise<void> { return writeGuide(folder, masterGuide()); }
 
+/** The files a guide is written to; only these are ever removed again. */
+const GUIDE_FILES = ['CLAUDE.md', 'AGENTS.md'];
+
+/**
+ * Takes away the guides Tower wrote into an issue master's folder, and the folder if nothing else is left in it.
+ * Anything else there (a file the master made) stays, with its folder.
+ */
+export async function removeTodoMasterGuide(folder: string): Promise<void> {
+  for (const name of GUIDE_FILES) await rm(join(folder, name), { force: true });
+  await rmdir(folder).catch((error: NodeJS.ErrnoException) => { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code ?? '')) throw error; });
+}
+
 async function writeGuide(folder: string, guide: string): Promise<void> {
   await mkdir(folder, { recursive: true, mode: 0o700 });
-  for (const name of ['CLAUDE.md', 'AGENTS.md']) {
+  for (const name of GUIDE_FILES) {
     const path = join(folder, name);
     if (await readFile(path, 'utf8').catch(() => undefined) === guide) continue;
     await writeFile(path, guide, { mode: 0o600 });

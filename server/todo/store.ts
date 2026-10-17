@@ -424,11 +424,15 @@ export class TodoStore {
 
   // ---- Issue masters (server/todo/agents.ts decides when; these keep the rows) -------------------------------------
 
-  /** Issue masters with something left to settle: those not closed, and closed ones whose family is still recorded. */
+  /**
+   * Issue masters with something left to settle: those not closed, and closed ones whose family is still recorded.
+   * Both come from indexes, so closed masters without a family are never visited.
+   */
   agentsToSettle(): TodoAgent[] {
     this.readable();
-    return this.all(`SELECT * FROM todo_agents a WHERE a.state != 'closed' OR EXISTS (SELECT 1 FROM todo_agent_sessions s WHERE s.task_id = a.task_id)
-      ORDER BY a.created_at, a.task_id`).map(agentOf);
+    return this.all(`SELECT * FROM todo_agents WHERE state != 'closed'
+      UNION SELECT a.* FROM (SELECT DISTINCT task_id FROM todo_agent_sessions) s JOIN todo_agents a ON a.task_id = s.task_id
+      ORDER BY created_at, task_id`).map(agentOf);
   }
 
   agent(taskId: string): TodoAgent | undefined {
@@ -445,17 +449,29 @@ export class TodoStore {
   }
 
   /**
-   * Moves each issue master to where its todo now says: one of a todo closed or gone that runs (`starting`, `active`)
-   * is `closing`; one of an open todo that was closing or closed runs again (`active`, or `starting` when it never had
-   * a session). Answers the masters it moved, as TodoChanges.agents.
+   * Moves issue masters to where their todos now say: one of a todo closed or gone that runs (`starting`, `active`) is
+   * `closing`; one of an open todo that was closing or closed runs again (`active`, or `starting` when it never had a
+   * session). `scope` is which masters to look at: the todos a change touched, those not closed (every pass), or
+   * all of them (at start, after a restore, and now and then). Answers the masters it moved, as TodoChanges.agents.
    */
-  settleAgents(): Record<string, TodoAgent | null> {
+  settleAgents(scope: 'all' | 'open' | readonly string[] = 'all'): Record<string, TodoAgent | null> {
     const moved: Record<string, TodoAgent | null> = {};
+    // A master whose state says otherwise than its todo (the todo is open exactly when the master runs or starts).
+    const differs = `(a.state IN ('starting', 'active')) != (t.id IS NOT NULL AND t.completed_at IS NULL AND t.deleted_at IS NULL)`;
+    const from = 'SELECT a.* FROM todo_agents a LEFT JOIN todo_tasks t ON t.id = a.task_id';
+    const found = (): TodoAgent[] => {
+      if (scope === 'all') return this.all(`${from} WHERE ${differs}`).map(agentOf);
+      if (scope === 'open') return this.all(`${from} WHERE a.state != 'closed' AND ${differs}`).map(agentOf);
+      const rows: TodoAgent[] = [];
+      for (let at = 0; at < scope.length; at += 500) {
+        const ids = scope.slice(at, at + 500);
+        rows.push(...this.all(`${from} WHERE a.task_id IN (${ids.map(() => '?').join(', ')}) AND ${differs}`, ...ids).map(agentOf));
+      }
+      return rows;
+    };
+    if (scope !== 'all' && scope !== 'open' && !scope.length) return moved;
     this.agentWrite(() => {
-      // Only the masters whose todo says otherwise, found by SQLite alone: closed ones of closed todos cost nothing here.
-      const out = this.all(`SELECT a.* FROM todo_agents a LEFT JOIN todo_tasks t ON t.id = a.task_id
-        WHERE (a.state IN ('starting', 'active')) != (t.id IS NOT NULL AND t.completed_at IS NULL AND t.deleted_at IS NULL)`).map(agentOf);
-      for (const agent of out) {
+      for (const agent of found()) {
         const open = this.taskState(agent.taskId) === 'open';
         const state: TodoAgentState = !open ? 'closing' : agent.sessionId ? 'active' : 'starting';
         this.run('UPDATE todo_agents SET state = ?, updated_at = ? WHERE task_id = ?', state, this.now(), agent.taskId);

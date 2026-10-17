@@ -98,6 +98,8 @@ export const TODO_SCHEMA: readonly TodoSchemaStep[] = [
     ) STRICT;
     CREATE TABLE todo_agent_sessions (session_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, created_at TEXT NOT NULL) STRICT;
     CREATE INDEX todo_agent_sessions_task ON todo_agent_sessions(task_id);
+    -- The masters a pass looks at: closed ones (one per todo ever worked on) are never scanned.
+    CREATE INDEX todo_agents_open ON todo_agents(state) WHERE state != 'closed';
   ` },
 ];
 
