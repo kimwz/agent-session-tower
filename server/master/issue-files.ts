@@ -1,4 +1,4 @@
-import { readdir, rm, stat } from 'node:fs/promises';
+import { readdir, rm, rmdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { TODO_MASTER_TASK_ID } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -40,6 +40,15 @@ async function expired(folder: string, saved: SavedFollow | undefined): Promise<
   return Date.now() - changed >= KEEP_CLOSED_MS;
 }
 
+/**
+ * Takes away the guides Tower wrote into an issue master's folder (CLAUDE.md, AGENTS.md), and the folder if nothing
+ * else is left in it. Anything else there (a file the master made) stays, with its folder.
+ */
+async function removeGuides(folder: string): Promise<void> {
+  for (const name of ['CLAUDE.md', 'AGENTS.md']) await rm(join(folder, name), { force: true });
+  await rmdir(folder).catch((error: NodeJS.ErrnoException) => { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code ?? '')) throw error; });
+}
+
 /** Whether some issue master's data is due to be cleared away, so the web brings the host to do it. */
 export function issueFilesExpired(masterData: string): Promise<boolean> {
   return eachIssueFile(masterData, (_taskId, folder, saved) => expired(folder, saved));
@@ -50,10 +59,13 @@ export function issueFilesExpired(masterData: string): Promise<boolean> {
  * is opened meanwhile; it leaves alone the todos it follows (`following`), and marks a file still open whose session
  * is gone (`markOpen`), which is then cleared away 30 days on.
  */
-export async function clearClosedIssueFiles(masterData: string, options: { following: (taskId: string) => boolean; markOpen?: boolean }): Promise<void> {
+export async function clearClosedIssueFiles(masterData: string, options: { following: (taskId: string) => boolean; markOpen?: boolean; guides?: (taskId: string) => string }): Promise<void> {
   await eachIssueFile(masterData, async (taskId, folder, saved) => {
     if (options.following(taskId)) return;
-    if (await expired(folder, saved)) await rm(folder, { recursive: true, force: true });
+    if (await expired(folder, saved)) {
+      await rm(folder, { recursive: true, force: true });
+      if (options.guides) await removeGuides(options.guides(taskId));
+    }
     else if (options.markOpen && saved?.version === 1 && typeof saved.closedAt !== 'string') {
       await writePrivateJson(join(folder, 'follow.json'), JSON.stringify({ ...saved, closedAt: new Date().toISOString() }));
     }

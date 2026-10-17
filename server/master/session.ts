@@ -68,6 +68,8 @@ export interface Followed {
   reportAt?: string;
   /** A spoken request's key (from its client message ID), so the same request is sent once. */
   key?: string;
+  /** Work sent to another master's session: reported when its turn ends, but what that master hands out is its own. */
+  master?: true;
   /** Spoken or report runs that share one turn (steered into it) are read aloud once, as that turn's answer. */
   turn?: string;
   spoke?: true;
@@ -396,7 +398,8 @@ export class MasterSession {
     // Work sent to the master session itself is its own conversation, not work handed out.
     if (!target.node && found.sessionId === this.binding()?.sessionId) return;
     if (this.file.followed.some(item => (found.runId && item.runId === found.runId) || (found.jobId && item.jobId === found.jobId))) return;
-    this.add({ id: randomUUID(), kind: 'delegated', title, ...found, ...(target.node ? { node: target.node } : {}), ...(value.run?.delegation ? { rootRunId: value.run.delegation.rootRunId } : {}), ...(prompt ? { prompt } : {}), createdAt: new Date().toISOString(), state: 'running' });
+    const master = !target.node && !!found.sessionId && Boolean(this.options.otherMaster?.session(found.sessionId));
+    this.add({ id: randomUUID(), kind: 'delegated', title, ...found, ...(target.node ? { node: target.node } : {}), ...(master ? { master: true as const } : {}), ...(value.run?.delegation ? { rootRunId: value.run.delegation.rootRunId } : {}), ...(prompt ? { prompt } : {}), createdAt: new Date().toISOString(), state: 'running' });
     await this.save();
     this.options.onChange?.();
   }
@@ -465,14 +468,20 @@ export class MasterSession {
     // Another master's turns are reported when they end, but what they hand out is that master's (its nearest master).
     const runs = new Map((snapshot.runs ?? []).map(run => [run.id, run]));
     const otherSession = (id: string | undefined) => !!id && id !== binding.sessionId && Boolean(this.options.otherMaster?.session(id));
+    // Work sent to another master is marked so for good: the boundary holds after that master's session is gone too.
+    for (const item of this.file.followed) {
+      if (item.kind === 'delegated' && !item.node && !item.master && otherSession(item.sessionId)) { item.master = true; changed = true; }
+    }
     const own = new Set(this.file.masterRuns);
+    const boundary = new Set(this.file.followed.filter(item => item.master).flatMap(item => [item.runId, item.currentRunId, item.turn].filter((id): id is string => !!id)));
     const otherRun = (id: string) => {
       if (own.has(id)) return false;
+      if (boundary.has(id)) return true;
       const run = runs.get(id);
       return run ? otherSession(run.sessionId) : Boolean(this.options.otherMaster?.run(id));
     };
     // Another master's turns, and first callers that were another master's, never call on this master's behalf.
-    const callers = new Set([...this.file.masterRuns, ...this.file.followed.filter(item => item.kind === 'delegated' && !item.node && !otherSession(item.sessionId))
+    const callers = new Set([...this.file.masterRuns, ...this.file.followed.filter(item => item.kind === 'delegated' && !item.node && !item.master && !otherSession(item.sessionId))
       .flatMap(item => [item.runId, item.currentRunId, item.rootRunId, item.turn].filter((id): id is string => !!id && !otherRun(id)))]);
     const ours = (item: Pick<Run, 'origin' | 'delegation'>) => {
       if (!item.delegation) return item.origin?.kind === 'agent' && !!item.origin.runId && callers.has(item.origin.runId);
@@ -508,7 +517,7 @@ export class MasterSession {
     for (const run of snapshot.runs ?? []) {
       // Tower's continuation after a forced update carries on a run already followed; it is not new work.
       if (run.scheduled?.resume === 'update' || run.scheduled?.resume === 'permission' || run.permissionNotice || run.permissionRequestIds?.length || run.updateWrapUp || !ours(run) || !after(run.createdAt) || run.sessionId === binding.sessionId || this.file.followed.some(item => item.runId === run.id)) continue;
-      this.add({ id: randomUUID(), kind: 'delegated', title: truncate(run.prompt, 80), ...(run.delegation ? { rootRunId: run.delegation.rootRunId } : run.origin?.runId ? { rootRunId: run.origin.runId } : {}), runId: run.id, sessionId: run.sessionId, prompt: run.prompt, createdAt: run.createdAt, state: 'running' });
+      this.add({ id: randomUUID(), kind: 'delegated', title: truncate(run.prompt, 80), ...(run.delegation ? { rootRunId: run.delegation.rootRunId } : run.origin?.runId ? { rootRunId: run.origin.runId } : {}), runId: run.id, sessionId: run.sessionId, ...(otherSession(run.sessionId) ? { master: true as const } : {}), prompt: run.prompt, createdAt: run.createdAt, state: 'running' });
       changed = true;
     }
     return changed;

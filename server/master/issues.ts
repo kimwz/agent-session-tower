@@ -1,10 +1,9 @@
 import { mkdir } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { TODO_MASTERS_FOLDER, type MasterBinding } from '../../shared/master.js';
+import { TODO_MASTER_ISSUE_HEADER, TODO_MASTERS_FOLDER, type MasterBinding } from '../../shared/master.js';
 import type { Session, Snapshot } from '../../shared/types.js';
-import { CALLER_CAPABILITY_HEADER } from '../runs/session-mcp.js';
-import { todoMasterTaskId } from '../runs/subscription.js';
+import { newestIssueMaster, todoMasterTaskId } from '../runs/subscription.js';
 import { clearClosedIssueFiles } from './issue-files.js';
 import type { LiveState } from '../tower-tools/live-state.js';
 import type { ReadDatabase } from '../tower-tools/read-db.js';
@@ -90,15 +89,15 @@ export class IssueMasters {
   }
 
   /**
-   * A tool call from an issue master's session, with its turn's reporting credential: Tower records the work it starts
-   * as that turn's, and the issue master follows it. A call the host cannot place yet still goes; the master finds what
-   * it started once it follows that session.
+   * A tool call from an issue master's session. It goes as the main master's calls do, with the same powers, and names
+   * its todo so Tower counts what it starts in that todo's family; the issue master follows that work as the main master
+   * does. A call the host cannot place yet still goes, unfollowed.
    */
-  async call(taskId: string, name: string, args: Record<string, unknown>, capability: string): Promise<unknown> {
+  async call(taskId: string, name: string, args: Record<string, unknown>): Promise<unknown> {
     if (!this.instances.has(taskId)) await this.refresh();
     const tools = this.instances.get(taskId)?.tools ?? (this.untracked ??= new MasterTools({ tower: this.options.tower, live: this.options.live, ...(this.options.readDb ? { readDb: this.options.readDb } : {}),
       scope: 'untracked', screen: this.options.screen, started: async () => {}, delegated: () => ({ name: 'delegated', columns: ['id', 'title', 'state', 'session_id', 'node', 'created_at', 'report', 'outcome'], rows: [] }) }));
-    return tools.call(name, args, { [CALLER_CAPABILITY_HEADER]: capability });
+    return tools.call(name, args, { [TODO_MASTER_ISSUE_HEADER]: taskId });
   }
 
   /** One look at Tower's sessions: issue masters to follow, to let go of, and old files to clear away. */
@@ -113,13 +112,17 @@ export class IssueMasters {
     const snapshot = await this.options.live.fresh();
     // While Tower is still reading sessions, one missing from it may only not be read yet.
     if (!snapshot || snapshot.scanning) return;
-    const open = new Map<string, Session>();
+    // Each todo's master is chosen by the rule the web uses (`newestIssueMaster`), among its open sessions; a folder
+    // named through a link is given as the state directory names it.
+    const folders = new Map<string, Session[]>();
     for (const session of snapshot.sessions) {
-      if (session.closed || session.node || session.isSubagent || session.parentId || session.launchedByAgent) continue;
-      const taskId = this.issueOf(session.cwd);
-      if (!taskId) continue;
-      const newest = open.get(taskId);
-      if (!newest || Date.parse(session.createdAt) > Date.parse(newest.createdAt)) open.set(taskId, session);
+      const taskId = session.closed ? undefined : this.issueOf(session.cwd);
+      if (taskId) folders.set(taskId, [...folders.get(taskId) ?? [], { ...session, cwd: join(this.options.stateDir, TODO_MASTERS_FOLDER, taskId) }]);
+    }
+    const open = new Map<string, Session>();
+    for (const [taskId, sessions] of folders) {
+      const master = newestIssueMaster(this.options.stateDir, taskId, sessions);
+      if (master) open.set(taskId, master);
     }
     for (const [taskId, entry] of [...this.instances]) {
       if (open.has(taskId) || this.closed) continue;
@@ -129,13 +132,13 @@ export class IssueMasters {
     for (const [taskId, session] of open) {
       if (this.closed) return;
       const known = this.instances.get(taskId);
-      // Only the newest session of a todo is its master; Tower hides the others.
+      // Only the newest session of a todo is its master; the web hands the others to retention.
       if (known) { if (known.binding.sessionId !== session.id) { known.binding = bindingOf(session); this.rebind(); } continue; }
       await this.open(taskId, session, snapshot);
     }
     if (Date.now() - this.sweptAt >= SWEEP_MS) {
       this.sweptAt = Date.now();
-      await clearClosedIssueFiles(this.options.dataDir, { following: taskId => this.instances.has(taskId), markOpen: true });
+      await clearClosedIssueFiles(this.options.dataDir, { following: taskId => this.instances.has(taskId), markOpen: true, guides: taskId => join(this.options.stateDir, TODO_MASTERS_FOLDER, taskId) });
     }
   }
 
@@ -161,10 +164,12 @@ export class IssueMasters {
     this.rebind();
   }
 
-  /** An issue master let go of: its turns and session no longer count as a master's (unless its folder still says so). */
+  /**
+   * An issue master let go of. Its turns stay known as a master's (at most as many as one master keeps), so work it
+   * handed out is never taken for another master's once its session is gone from the snapshot.
+   */
   private forget(entry: IssueMaster): void {
     this.instances.delete(entry.taskId);
-    for (const id of entry.session.ownRuns()) this.turnsOf(entry.taskId).delete(id);
     this.rebind();
   }
   private rebind(): void { this.bound = new Set([...this.instances.values()].map(entry => entry.binding.sessionId)); }
