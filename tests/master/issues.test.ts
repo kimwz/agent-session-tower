@@ -422,6 +422,10 @@ test('work sent to an issue master stays that master\'s boundary after its sessi
   // B's session goes cold (out of the snapshot) and a new host knows nothing of B's turns.
   h.sessions.splice(h.sessions.indexOf(b), 1);
   h.runs.splice(h.runs.indexOf(asked), 1);
+  // Let go of, B's turns are forgotten by the host (it keeps only masters it follows); the boundary is in the main master's file.
+  await h.issues().refresh();
+  assert.equal(h.issues().size(), 0);
+  assert.equal(h.issues().masterRun(asked.id), false);
   await h.issues().close();
   await h.reopen().refresh();
   h.turn('codex:b-child', 'B handed this on', { parentRunId: asked.id, rootRunId: asked.id });

@@ -165,11 +165,12 @@ export class IssueMasters {
   }
 
   /**
-   * An issue master let go of. Its turns stay known as a master's (at most as many as one master keeps), so work it
-   * handed out is never taken for another master's once its session is gone from the snapshot.
+   * An issue master let go of: its turns are forgotten here, so the map holds only masters followed now. Work other
+   * masters sent it keeps its boundary through their own follow files (`Followed.master`).
    */
   private forget(entry: IssueMaster): void {
     this.instances.delete(entry.taskId);
+    for (const id of entry.session.ownRuns()) this.turnsOf(entry.taskId).delete(id);
     this.rebind();
   }
   private rebind(): void { this.bound = new Set([...this.instances.values()].map(entry => entry.binding.sessionId)); }
