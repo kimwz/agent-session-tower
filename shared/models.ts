@@ -62,6 +62,7 @@ export const BUILTIN_ROLES = [
   { id: 'voice.firstReply', kind: 'auto', label: '음성 첫 답변', description: '음성으로 말하면 바로 짧게 답합니다.', providers: ['claude'], initial: { provider: 'claude', claude: { model: 'haiku', effort: EFFORT_OFF }, codex: {} } },
   { id: 'master.session', kind: 'start', label: '마스터 에이전트', description: '마스터 에이전트를 시작할 때 씁니다.', initial: cliDefault('claude') },
   { id: 'master.heartbeat', kind: 'auto', label: '마스터 heartbeat', description: '기본값은 master.session의 제공자·모델·추론 강도 전체를 매 점검마다 따릅니다. 현재 대화에서 고른 모델과는 별개입니다. 전용 제공자를 고르면 빈 모델·강도는 그 CLI 기본값입니다.', follow: true, initial: { provider: 'follow', claude: {}, codex: {} } },
+  { id: 'todo.master', kind: 'start', label: '이슈 마스터', description: '할 일의 채팅에 첫 메시지를 보내면 그 할 일 전용 마스터를 이 모델로 시작합니다.', initial: cliDefault('claude') },
   { id: 'master.worker', kind: 'start', label: '마스터 작업 에이전트', description: '마스터가 새 작업 세션을 열 때 생략한 모델 선택에 적용됩니다. 기존 세션은 유지합니다.', initial: { provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol' } } },
   { id: 'issues.register', kind: 'start', label: '이슈 등록', description: '폴더의 이슈 버튼으로 이슈를 등록할 때 씁니다.', initial: cliDefault('claude') },
   { id: 'chat.new', kind: 'default', label: '새 채팅', description: '새 세션을 만들 때 미리 선택됩니다.', initial: cliDefault('claude') },

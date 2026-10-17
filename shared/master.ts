@@ -9,6 +9,14 @@ import type { Provider, SessionStatus } from './types.js';
 
 /** The master's folder under Tower's state directory: the session runs there, with its guide files. */
 export const MASTER_FOLDER = 'master-session';
+/**
+ * Issue masters: one per todo the owner started a chat on, in `<state>/todo-masters/<taskId>`. Each is a master of its
+ * own (the same tools and powers, its own conversation and followed work), kept beside the main master's folder so
+ * neither reads the other's guide.
+ */
+export const TODO_MASTERS_FOLDER = 'todo-masters';
+/** A todo's id as its folder name: the todo id grammar (`shared/todo/ops.ts`). */
+export const TODO_MASTER_TASK_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 /** ElevenLabs models the master reads aloud with; the first is the default (fast, natural Korean). */
 export const MASTER_TTS_MODELS = ['eleven_v4_turbo', 'eleven_v3_conversational', 'eleven_v3', 'eleven_flash_v2_5'] as const;

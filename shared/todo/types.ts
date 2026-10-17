@@ -155,6 +155,21 @@ export type TodoAvailability =
   | { state: 'read-only'; reason: string }
   | { state: 'unavailable'; reason: string };
 
+/**
+ * A todo's issue master (see shared/master.ts): `starting` until its session is known, `active` while the todo is
+ * open, `closing` once the todo is closed (completed for good or deleted) until its sessions are hidden and handed to
+ * retention, then `closed`. Reopening the todo makes it `active` again.
+ */
+export type TodoAgentState = 'starting' | 'active' | 'closing' | 'closed';
+export interface TodoAgent {
+  taskId: string;
+  sessionId?: string;
+  provider: 'claude' | 'codex';
+  state: TodoAgentState;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** Everything open, for the Todo page. Archived projects are included; deleted things are not. */
 export interface TodoOverview {
   availability: TodoAvailability;
@@ -172,6 +187,8 @@ export interface TodoOverview {
   fileCounts: Record<string, number>;
   /** Sub-tasks per open task that has any. */
   subtaskCounts: Record<string, TodoSubtaskCount>;
+  /** Issue masters of todos that are not `closed`, by todo id. Absent from older servers. */
+  agents?: Record<string, TodoAgent>;
   /** Present after a backup was restored here, while and after its attachments are brought back. */
   restore?: TodoRestoreProgress;
 }
@@ -191,6 +208,8 @@ export interface TodoChanges {
   files: TodoFile[];
   /** The sub-task counts now of every task whose sub-tasks the request changed; `total` 0 when none is left. */
   subtaskCounts?: Record<string, TodoSubtaskCount>;
+  /** Issue masters that changed, by todo id; null once one is `closed` or gone. */
+  agents?: Record<string, TodoAgent | null>;
 }
 
 export interface TodoTaskDetail {

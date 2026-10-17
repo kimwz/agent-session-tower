@@ -38,10 +38,10 @@ test('every role starts with what its call used before the roles existed', () =>
   assert.deepEqual(table()['sessions.compactor'], { provider: 'claude', model: 'claude-haiku-5-5' });
   assert.deepEqual(resolveRole(settings, 'sessions.compactor', { provider: 'codex' }), { provider: 'claude', model: 'claude-haiku-5-5' });
   // Forms and starts that passed no model keep the CLI's default, on the provider each form preselected.
-  for (const id of ['master.session', 'issues.register', 'chat.new', 'autoPrompt.new', 'publicAgents.new']) assert.deepEqual(table()[id], { provider: 'claude' }, id);
+  for (const id of ['master.session', 'todo.master', 'issues.register', 'chat.new', 'autoPrompt.new', 'publicAgents.new']) assert.deepEqual(table()[id], { provider: 'claude' }, id);
   for (const id of ['triggers.new', 'slack.newRule', 'github.newRule']) assert.deepEqual(table()[id], { provider: 'codex' }, id);
   assert.deepEqual(table()['master.heartbeat'], table()['master.session']);
-  assert.equal(BUILTIN_ROLES.length, follow.length + 16, 'a new role gets a line here');
+  assert.equal(BUILTIN_ROLES.length, follow.length + 17, 'a new role gets a line here');
 });
 
 test('saved settings are read leniently, submitted ones strictly', () => {
