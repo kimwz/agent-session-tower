@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { S3Client, endpointUrl, signV4, unsafeKey } from '../../../server/backup/s3.js';
+import { S3Client, endpointUrl, listPage, signV4, unsafeKey } from '../../../server/backup/s3.js';
 import { fakeBucket } from '../../helpers/s3.js';
 
 test('requests are signed as AWS Signature Version 4 describes (the S3 GET object example)', () => {
@@ -91,4 +91,67 @@ test('a listing that is not a whole ListBucketResult is never taken as complete'
     body = broken;
     assert.equal((await client.scan('tower/')).complete, false, broken);
   }
+});
+
+test('only a listing understood whole is complete: other names, CDATA, broken or nested parts are not', () => {
+  const page = (inner: string) => `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/" xmlns:s="urn:x">${inner}</ListBucketResult>`;
+  for (const [what, xml] of [
+    ['a prefixed entry', page('<IsTruncated>false</IsTruncated><Contents><Key>tower/a</Key></Contents><s:Contents><s:Key>tower/old</s:Key></s:Contents>')],
+    ['a prefixed document', '<s:ListBucketResult xmlns:s="http://s3.amazonaws.com/doc/2006-03-01/"><s:IsTruncated>false</s:IsTruncated><s:Contents><s:Key>tower/old</s:Key></s:Contents></s:ListBucketResult>'],
+    ['a CDATA key', page('<IsTruncated>false</IsTruncated><Contents><Key><![CDATA[tower/a]]></Key></Contents>')],
+    ['an unterminated prefixed entry', page('<IsTruncated>false</IsTruncated><Contents><Key>tower/a</Key></Contents><s:Contents')],
+    ['IsTruncated nested in another element', page('<Name><IsTruncated>false</IsTruncated></Name><Contents><Key>tower/a</Key></Contents>')],
+    ['two IsTruncated', page('<IsTruncated>false</IsTruncated><IsTruncated>true</IsTruncated>')],
+    ['an entry with two keys', page('<IsTruncated>false</IsTruncated><Contents><Key>tower/a</Key><Key>tower/b</Key></Contents>')],
+    ['a doctype', `<!DOCTYPE x>${page('<IsTruncated>false</IsTruncated>')}`],
+    ['a processing instruction', page('<?pi x?><IsTruncated>false</IsTruncated>')],
+    ['a stray <', page('<IsTruncated>false</IsTruncated><Contents><Key>tower/a < b</Key></Contents>')],
+    ['an unknown entity', page('<IsTruncated>false</IsTruncated><Contents><Key>tower/&nbsp;</Key></Contents>')],
+    ['a mismatched end', page('<IsTruncated>false</IsTruncated><Contents><Key>tower/a</Size></Contents>')],
+    ['text after the root', `${page('<IsTruncated>false</IsTruncated>')}trailing`],
+    ['another root', `${page('<IsTruncated>false</IsTruncated>')}<ListBucketResult/>`],
+  ] as const) assert.equal(listPage(xml).whole, false, what);
+
+  // Well-formed in other ways: a space before an end tag's close, entities, a comment after the root.
+  const spaced = listPage(`${page('<IsTruncated>false</IsTruncated><Contents ><Key>tower/a &amp; b</Key ></Contents ><Contents><Key>tower/&#233;</Key><Size>3</Size></Contents>')}\n<!-- proxy -->\n`);
+  assert.deepEqual(spaced, { items: [{ key: 'tower/a & b', size: 0, modifiedAt: '' }, { key: 'tower/é', size: 3, modifiedAt: '' }], whole: true, truncated: false });
+});
+
+test('the AWS and R2 example listings are complete, across continuation pages', async t => {
+  const aws = `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <Name>bucket</Name>
+    <Prefix>tower/</Prefix>
+    <KeyCount>2</KeyCount>
+    <MaxKeys>2</MaxKeys>
+    <IsTruncated>true</IsTruncated>
+    <NextContinuationToken>1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=</NextContinuationToken>
+    <Contents>
+        <Key>tower/a.towerbackup</Key>
+        <LastModified>2026-09-30T00:00:00.000Z</LastModified>
+        <ETag>&quot;fba9dede5f27731c9771645a39863328&quot;</ETag>
+        <Size>434234</Size>
+        <StorageClass>STANDARD</StorageClass>
+        <Owner><ID>75aa57f09aa0c8caeab4f8c24e99d10f8e7faeebf76c078efc7c6caea54ba06a</ID><DisplayName>owner</DisplayName></Owner>
+    </Contents>
+    <Contents>
+        <Key>tower/b.towerbackup</Key>
+        <LastModified>2026-09-30T00:00:01.000Z</LastModified>
+        <ETag>"599bab3ed2c697f1d26842727561fd94"</ETag>
+        <Size>1</Size>
+        <StorageClass>STANDARD</StorageClass>
+    </Contents>
+    <CommonPrefixes><Prefix>tower/x/</Prefix></CommonPrefixes>
+</ListBucketResult>`;
+  // Cloudflare R2's answer: one line, the same elements in its own order.
+  const r2 = '<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>bucket</Name><Contents><Key>tower/c.towerbackup</Key><Size>3</Size><LastModified>2026-09-30T00:00:02.000Z</LastModified><ETag>"abc"</ETag><StorageClass>STANDARD</StorageClass></Contents><IsTruncated>false</IsTruncated><MaxKeys>1000</MaxKeys><KeyCount>1</KeyCount><ContinuationToken>1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=</ContinuationToken><Prefix>tower/</Prefix></ListBucketResult>';
+  const server = createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/xml' }); res.end(new URL(req.url!, 'http://x').searchParams.has('continuation-token') ? r2 : aws); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const client = new S3Client({ endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, bucket: 'bucket', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret' });
+  const listing = await client.scan('tower/');
+  assert.equal(listing.complete, true);
+  assert.deepEqual(listing.items.map(item => [item.key, item.size, item.modifiedAt]), [
+    ['tower/a.towerbackup', 434234, '2026-09-30T00:00:00.000Z'], ['tower/b.towerbackup', 1, '2026-09-30T00:00:01.000Z'], ['tower/c.towerbackup', 3, '2026-09-30T00:00:02.000Z']]);
+  assert.deepEqual((await client.list('tower/')).map(item => item.key), ['tower/a.towerbackup', 'tower/b.towerbackup', 'tower/c.towerbackup']);
 });
