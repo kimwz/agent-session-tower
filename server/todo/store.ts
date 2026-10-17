@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { TowerError } from '../../shared/errors.js';
 import type { TodoOp, TodoOpName, TodoOpOf, TodoRequest } from '../../shared/todo/ops.js';
-import type { TodoAvailability, TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoRestoreProgress, TodoSubtaskCount, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import type { TodoAgent, TodoAgentState, TodoAvailability, TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoRestoreProgress, TodoSubtaskCount, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { nodeVerified, sqlitePatched } from '../storage/runtime.js';
 import { TodoContext } from './context.js';
 import { checkTodoFileRow, todoFilePath, usableContent } from './files.js';
@@ -13,7 +13,7 @@ import { attachFile, checkAttachable, deleteFile, restoreFile, type NewTodoFile 
 import { createLink, deleteLink } from './ops/links.js';
 import { MAX_PROJECT_LEVELS, createLabel, createProject, createSection, deleteLabel, deleteProject, deleteSection, moveLabel, moveProject, moveSection, restoreLabel, restoreProject, restoreSection, updateLabel, updateProject, updateSection } from './ops/projects.js';
 import { MAX_TASK_DEPTH, completeTask, createTask, deleteTask, duplicateTask, moveTask, restoreTask, uncompleteTask, updateTask } from './ops/tasks.js';
-import { TASK_COLUMNS, VISIBLE_FILE, commentOf, completionOf, eventOf, fileOf, labelOf, linkOf, projectOf, sectionOf, taskOf } from './rows.js';
+import { TASK_COLUMNS, VISIBLE_FILE, agentOf, commentOf, completionOf, eventOf, fileOf, labelOf, linkOf, projectOf, sectionOf, taskOf } from './rows.js';
 import { TODO_DATA_TABLES, TODO_SCHEMA, TODO_SCHEMA_STEP, minWriterAt } from './schema.js';
 
 /** The completed list's page cursor: the last completion's time and row. */
@@ -225,7 +225,9 @@ export class TodoStore {
       projects: this.all('SELECT * FROM todo_projects WHERE deleted_at IS NULL ORDER BY sort_key').map(projectOf),
       sections: this.all('SELECT * FROM todo_sections WHERE deleted_at IS NULL ORDER BY sort_key').map(sectionOf),
       labels: this.all('SELECT * FROM todo_labels WHERE deleted_at IS NULL ORDER BY sort_key').map(labelOf),
-      tasks, links, commentCounts, fileCounts, subtaskCounts: this.subtaskCounts(), ...(this.restoreProgress ? { restore: { ...this.restoreProgress } } : {}),
+      tasks, links, commentCounts, fileCounts, subtaskCounts: this.subtaskCounts(),
+      agents: Object.fromEntries(this.all("SELECT * FROM todo_agents WHERE state != 'closed'").map(agentOf).map(agent => [agent.taskId, agent])),
+      ...(this.restoreProgress ? { restore: { ...this.restoreProgress } } : {}),
     };
   }
 
@@ -413,8 +415,135 @@ export class TodoStore {
           this.run(`DELETE FROM ${table} WHERE deleted_at IS NOT NULL AND deleted_at < ?`, cutoff);
         }
         this.run('DELETE FROM todo_requests WHERE at < ?', new Date(now.getTime() - REQUEST_RETENTION_MS).toISOString());
+        // An issue master goes with its task, once its sessions are handed over (closed); otherwise later.
+        this.run("DELETE FROM todo_agents WHERE state = 'closed' AND NOT EXISTS (SELECT 1 FROM todo_tasks t WHERE t.id = todo_agents.task_id)");
+        this.run('DELETE FROM todo_agent_sessions WHERE NOT EXISTS (SELECT 1 FROM todo_agents a WHERE a.task_id = todo_agent_sessions.task_id)');
       });
     } catch (error) { console.error(`Todo cleanup failed: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+
+  // ---- Issue masters (server/todo/agents.ts decides when; these keep the rows) -------------------------------------
+
+  /** Every todo's issue master, closed ones included. */
+  agents(): TodoAgent[] {
+    this.readable();
+    return this.all('SELECT * FROM todo_agents ORDER BY created_at, task_id').map(agentOf);
+  }
+
+  agent(taskId: string): TodoAgent | undefined {
+    this.readable();
+    const row = this.get('SELECT * FROM todo_agents WHERE task_id = ?', taskId);
+    return row ? agentOf(row) : undefined;
+  }
+
+  /** Where a todo stands for its issue master: open, closed for good (completed, or deleted), or removed for good. */
+  taskState(taskId: string): 'open' | 'closed' | 'gone' {
+    this.readable();
+    const row = this.get<{ completed_at: string | null; deleted_at: string | null }>('SELECT completed_at, deleted_at FROM todo_tasks WHERE id = ?', taskId);
+    return !row ? 'gone' : row.completed_at || row.deleted_at ? 'closed' : 'open';
+  }
+
+  /**
+   * Moves each issue master to where its todo now says: one of a todo closed or gone that runs (`starting`, `active`)
+   * is `closing`; one of an open todo that was closing or closed runs again (`active`, or `starting` when it never had
+   * a session). Answers the masters it moved, as TodoChanges.agents.
+   */
+  settleAgents(): Record<string, TodoAgent | null> {
+    const moved: Record<string, TodoAgent | null> = {};
+    this.agentWrite(() => {
+      for (const agent of this.all('SELECT * FROM todo_agents').map(agentOf)) {
+        const open = this.taskState(agent.taskId) === 'open';
+        const running = agent.state === 'starting' || agent.state === 'active';
+        if (open === running) continue;
+        const state: TodoAgentState = !open ? 'closing' : agent.sessionId ? 'active' : 'starting';
+        this.run('UPDATE todo_agents SET state = ?, updated_at = ? WHERE task_id = ?', state, this.now(), agent.taskId);
+        moved[agent.taskId] = this.agentShown(agent.taskId);
+      }
+      return Object.keys(moved).length > 0;
+    });
+    return moved;
+  }
+
+  /**
+   * Changes a todo's issue master only while it is still `expected` (its state and session; null: there is none), to
+   * `next` (null removes it). Answers whether it did: the caller read the row before waiting on something else.
+   */
+  changeAgent(taskId: string, expected: Pick<TodoAgent, 'state' | 'sessionId'> | null, next: Pick<TodoAgent, 'state' | 'sessionId' | 'provider'> | null): boolean {
+    return this.agentWrite(() => {
+      const row = this.get('SELECT * FROM todo_agents WHERE task_id = ?', taskId);
+      const current = row ? agentOf(row) : undefined;
+      if (expected ? current?.state !== expected.state || current.sessionId !== expected.sessionId : current) return false;
+      if (!next) this.run('DELETE FROM todo_agents WHERE task_id = ?', taskId);
+      else if (!current) {
+        this.run('INSERT INTO todo_agents (task_id, session_id, provider, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+          taskId, next.sessionId ?? null, next.provider, next.state, this.now(), this.now());
+      } else this.run('UPDATE todo_agents SET session_id = ?, provider = ?, state = ?, updated_at = ? WHERE task_id = ?', next.sessionId ?? null, next.provider, next.state, this.now(), taskId);
+      return true;
+    });
+  }
+
+  /** The sessions a todo's issue master started (directly or through them), as recorded, and when. */
+  familyOf(taskId: string): { sessionId: string; createdAt: string }[] {
+    this.readable();
+    return this.all<{ session_id: string; created_at: string }>('SELECT session_id, created_at FROM todo_agent_sessions WHERE task_id = ? ORDER BY created_at, session_id', taskId)
+      .map(row => ({ sessionId: row.session_id, createdAt: row.created_at }));
+  }
+
+  /** Whether any issue master is not closed yet, so the master host has one to follow or a close to see through. */
+  hasOpenAgents(): boolean {
+    if (!this.db || this.state.state === 'unavailable') return false;
+    return Boolean(this.get("SELECT 1 FROM todo_agents WHERE state != 'closed' LIMIT 1"));
+  }
+
+  /** The todo whose issue master's family a session is in. */
+  familyTask(sessionId: string): string | undefined {
+    this.readable();
+    return this.get<{ task_id: string }>('SELECT task_id FROM todo_agent_sessions WHERE session_id = ?', sessionId)?.task_id;
+  }
+
+  /** Records a session in a todo's issue master's family; one already recorded keeps its todo. */
+  addFamily(sessionId: string, taskId: string): void {
+    this.agentWrite(() => {
+      if (this.get('SELECT 1 FROM todo_agent_sessions WHERE session_id = ?', sessionId)) return false;
+      this.run('INSERT INTO todo_agent_sessions (session_id, task_id, created_at) VALUES (?, ?, ?)', sessionId, taskId, this.now());
+      return true;
+    });
+  }
+
+  removeFamily(taskId: string): void {
+    this.agentWrite(() => {
+      if (!this.get('SELECT 1 FROM todo_agent_sessions WHERE task_id = ?', taskId)) return false;
+      this.run('DELETE FROM todo_agent_sessions WHERE task_id = ?', taskId);
+      return true;
+    });
+  }
+
+  /** The sessions of open issue masters' families (the master's own included), with their todo, for badges. */
+  agentSessions(): Record<string, { taskId: string; title: string }> {
+    this.readable();
+    const rows = this.all<{ session_id: string; task_id: string; content: string }>(`SELECT a.session_id, a.task_id, t.content FROM todo_agents a JOIN todo_tasks t ON t.id = a.task_id
+      WHERE a.state IN ('starting', 'active') AND a.session_id IS NOT NULL
+      UNION ALL SELECT s.session_id, s.task_id, t.content FROM todo_agent_sessions s JOIN todo_agents a ON a.task_id = s.task_id AND a.state IN ('starting', 'active') JOIN todo_tasks t ON t.id = s.task_id`);
+    return Object.fromEntries(rows.map(row => [row.session_id, { taskId: row.task_id, title: row.content }]));
+  }
+
+  /** A master as pages see it: closed ones are left out (TodoChanges.agents). */
+  private agentShown(taskId: string): TodoAgent | null {
+    const row = this.get('SELECT * FROM todo_agents WHERE task_id = ?', taskId);
+    const agent = row ? agentOf(row) : undefined;
+    return agent && agent.state !== 'closed' ? agent : null;
+  }
+
+  /** One write of issue masters' rows; a change moves the revision, so open pages load again. */
+  private agentWrite(work: () => boolean): boolean {
+    this.writable();
+    let revision: number | undefined;
+    this.transaction(() => {
+      if (Number(this.meta('min_writer') ?? 1) > TODO_SCHEMA_STEP) throw new TowerError('locked', '더 새로운 Tower가 바꾼 할 일 저장소입니다.');
+      if (work()) revision = this.nextRevision();
+    });
+    if (revision !== undefined) this.revisionValue = Math.max(this.revisionValue, revision);
+    return revision !== undefined;
   }
 
   // ---- Backup ---------------------------------------------------------------------------------------

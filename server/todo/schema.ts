@@ -88,13 +88,25 @@ export const TODO_SCHEMA: readonly TodoSchemaStep[] = [
   // A task's place among the tasks of its date (shared/todo/day-order.ts). It names the date it belongs to, so an
   // older build that changes a date without knowing it leaves nothing wrong behind.
   { sql: 'ALTER TABLE todo_tasks ADD COLUMN day_order TEXT;' },
+  // Issue masters (server/todo/agents.ts): one per todo the owner started a chat on, and the sessions each started
+  // (its family). Session ids belong to this computer, so neither table is in backups, and neither points at a task:
+  // a task removed for good takes its closed issue master with it (purge), whatever an older build did meanwhile.
+  { sql: `
+    CREATE TABLE todo_agents (
+      task_id TEXT PRIMARY KEY, session_id TEXT, provider TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('starting', 'active', 'closing', 'closed')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE todo_agent_sessions (session_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, created_at TEXT NOT NULL) STRICT;
+    CREATE INDEX todo_agent_sessions_task ON todo_agent_sessions(task_id);
+  ` },
 ];
 
 export const TODO_SCHEMA_STEP = TODO_SCHEMA.length;
 
 /**
- * The tables a backup holds, parents before children: everything but the file's own bookkeeping (`todo_meta`) and
- * request answers (`todo_requests`), which stay with the file they belong to.
+ * The tables a backup holds, parents before children: everything but the file's own bookkeeping (`todo_meta`), request
+ * answers (`todo_requests`) and issue masters (`todo_agents`, `todo_agent_sessions`), which stay with the file they
+ * belong to.
  */
 export const TODO_DATA_TABLES = ['todo_projects', 'todo_sections', 'todo_labels', 'todo_tasks', 'todo_task_labels', 'todo_links', 'todo_comments',
   'todo_completions', 'todo_events', 'todo_files'] as const;

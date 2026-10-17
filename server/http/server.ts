@@ -759,7 +759,12 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
           return json(res, 200, { job: await backend.cancelAutoPrompt(id) });
         }
       }
-      if (await todoRoute(req, res, url, path, backend.todos, json)) return;
+      // Starting an issue master is the owner's own act, decided as for the secret vault's screens: a page (it names its
+      // origin) of the signed-in owner, or of this computer where no sign-in is asked, and nothing that names the master,
+      // a local agent, a calling turn or the todo tools' key, whether or not it proves it.
+      const ownerPage = Boolean(origin) && (identity.local || Boolean(auth?.session(sessionId, identity.ip))) && req.headers['x-tower-master'] === undefined
+        && req.headers['x-tower-agent'] === undefined && req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] === undefined && !/^\s*TodoKey\b/i.test(req.headers.authorization ?? '');
+      if (await todoRoute(req, res, url, path, backend.todos, json, ownerPage)) return;
       if (req.method === 'POST' && path === '/api/groups') {
         const patch = normalizeProjectGroupPatch(await readJson(req));
         if (!backend.setGroup) return json(res, 503, { error: '폴더 그룹을 저장할 수 없습니다.' });
