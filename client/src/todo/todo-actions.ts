@@ -4,7 +4,8 @@ import type { TodoPriority, TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { dateLabel } from './todo-format';
 import { isOpen } from './todo-model';
-import type { TodoClient } from './todo-store';
+import { newId, type TodoClient } from './todo-store';
+import { readTodoLocation, todoSearch } from './todo-url';
 
 /**
  * The page's actions as operations. Each call is one request, so a compound action ("complete and add the next")
@@ -15,6 +16,17 @@ export { completeOp, createTaskOps, quickAddOps, type FollowUp, type QuickAddDra
 
 export interface ActionHost {
   openTask: (id: string) => void;
+}
+
+/**
+ * `task.duplicate` copies a task and its open sub-tasks right after it in one request; the server makes the copies'
+ * ids below the copy, so it is sent as it is and shown from the answer.
+ */
+type DuplicateOp = { op: 'task.duplicate'; id: string; copyId: string };
+
+/** The address that opens `id` on the Todo page, in the list shown now. */
+export function taskLink(place: Pick<Location, 'origin' | 'pathname' | 'search'>, id: string): string {
+  return `${place.origin}${place.pathname}${todoSearch(place.search, { ...readTodoLocation(place.search), task: id })}`;
 }
 
 export function createActions(client: TodoClient, host: ActionHost) {
@@ -48,6 +60,27 @@ export function createActions(client: TodoClient, host: ActionHost) {
     priority(task: TodoTask, priority: TodoPriority) { if (task.priority !== priority) client.apply([{ op: 'task.update', id: task.id, patch: { priority } }]); },
     date(task: TodoTask, dueDate: string | null) { if (task.dueDate !== dueDate) client.apply([{ op: 'task.update', id: task.id, patch: { dueDate } }]); },
     update(task: TodoTask, patch: Extract<TodoOp, { op: 'task.update' }>['patch']) { client.apply([{ op: 'task.update', id: task.id, patch }]); },
+    duplicate(task: TodoTask) {
+      const copyId = newId();
+      const op: DuplicateOp = { op: 'task.duplicate', id: task.id, copyId };
+      if (client.apply([op as unknown as TodoOp])) client.toast(t('“{0}” 복제', { 0: task.content }), 'info', [...client.undoActions(), { label: t('열기'), run: () => host.openTask(copyId) }]);
+    },
+    async copyLink(task: TodoTask, place: Pick<Location, 'origin' | 'pathname' | 'search'> = window.location, clipboard: Pick<Clipboard, 'writeText'> | undefined = navigator.clipboard) {
+      try {
+        if (!clipboard) throw new Error('no clipboard');
+        await clipboard.writeText(taskLink(place, task.id));
+        client.toast(t('링크를 복사했습니다.'));
+      } catch {
+        // An insecure address or a refused permission: the address bar still has the link once the task is open.
+        client.toast(t('링크를 복사하지 못했습니다.'), 'error');
+      }
+    },
+    /** Files for a task's description, from a card or Quick Add: they show in its detail, which the toast opens. */
+    attach(uploads: { add: (files: File[], target: { taskId: string }) => void }, taskId: string, files: File[]) {
+      if (!files.length) return;
+      uploads.add(files, { taskId });
+      client.toast(t('파일 {0}개를 올리는 중', { 0: files.length }), 'info', [{ label: t('열기'), run: () => host.openTask(taskId) }]);
+    },
   };
 }
 export type TodoActions = ReturnType<typeof createActions>;
