@@ -83,37 +83,32 @@ test('a subagent request is honoured on its own, even under a parent that stays'
   assert.equal(candidates.length, 1); assert.equal(candidates[0].rootId, 'master'); assert.equal(candidates[0].ids.length, 3);
 });
 
-test('a descendant reopened or restored on its own after the request holds the family back until requested again', () => {
+test('a descendant reopened after the request holds the family back until requested again', () => {
   const master = record('master', undefined, requested({ archiveRequestedAt: iso(now - 3 * hour) }));
   const child = record('child', 'master', { reopenedAt: iso(now - 2 * hour) });
   assert.deepEqual(selectRetention(observation([master, child])).deferred, [{ id: 'master', reason: 'reopened-descendant' }]);
-  child.reopenedAt = undefined; child.restoredAt = iso(now - 2 * hour);
+  // The parent restored on its own later and its next turn ending does not take the reopened child.
+  master.restoredAt = iso(now - hour); master.latestTaskEndedAt = iso(now - 30 * 60_000);
   assert.deepEqual(selectRetention(observation([master, child])).deferred, [{ id: 'master', reason: 'reopened-descendant' }]);
-  // Restored together with the parent is the same family coming back, not a separate reopen.
-  master.restoredAt = child.restoredAt; master.latestTaskEndedAt = iso(now - hour);
+  // A restore alone is not a reopen.
+  child.reopenedAt = undefined; child.restoredAt = iso(now - hour);
   assert.equal(selectRetention(observation([master, child])).candidates.length, 1);
   // A reopen before the request, or a request on the descendant since its reopen, lets the family go.
-  delete master.restoredAt; delete child.restoredAt; child.reopenedAt = iso(now - 4 * hour);
+  child.reopenedAt = iso(now - 4 * hour);
   assert.equal(selectRetention(observation([master, child])).candidates.length, 1);
   child.reopenedAt = iso(now - 2 * hour); Object.assign(child, requested({ archiveRequestedAt: iso(now - hour) }));
   assert.deepEqual(selectRetention(observation([master, child])).candidates[0].ids.sort(), ['child', 'master']);
 });
 
-test('a requested family over the cycle budget leaves in batches, deepest members first and the parent last', () => {
-  const master = record('master', undefined, requested());
-  const children = Array.from({ length: 120 }, (_, i) => record(`c${String(i).padStart(3, '0')}`, 'master'));
-  const grandchildren = Array.from({ length: 30 }, (_, i) => record(`g${i}`, 'c000'));
-  let hot = [master, ...children, ...grandchildren];
-  const first = selectRetention(observation(hot)).candidates;
-  assert.equal(first.length, 1); assert.equal(first[0].rootId, 'master'); assert.equal(first[0].ids.length, 100);
-  assert.ok(grandchildren.every(record => first[0].ids.includes(record.session.id))); assert.ok(!first[0].ids.includes('master'));
-  // One working member anywhere holds every batch back.
-  children[119].session.status = 'working';
-  assert.deepEqual(selectRetention(observation(hot)).deferred, [{ id: 'master', reason: 'protected' }]);
-  children[119].session.status = 'completed';
-  hot = hot.filter(record => !first[0].ids.includes(record.session.id));
-  const second = selectRetention(observation(hot)).candidates;
-  assert.equal(second[0].ids.length, 51); assert.ok(second[0].ids.includes('master'));
+test('a requested family is one explicit candidate, also over the budget and beyond the parent limit', () => {
+  const parents = Array.from({ length: 21 }, (_, i) => record(`p${String(i).padStart(2, '0')}`, undefined, { projectKey: 'project', lastActivityAt: iso(now - (i + 30) * day), latestTaskEndedAt: iso(now - (i + 30) * day) }));
+  const children = Array.from({ length: 150 }, (_, i) => record(`c${i}`, 'p20', { lastActivityAt: iso(now - 80 * day), latestTaskEndedAt: iso(now - 80 * day) }));
+  Object.assign(parents[20], requested());
+  const candidates = selectRetention(observation([...parents, ...children])).candidates;
+  assert.equal(candidates.length, 1); assert.equal(candidates[0].reason, 'explicit-archive'); assert.equal(candidates[0].ids.length, 151);
+  // Without the request the parent limit claims the same family, as before.
+  delete parents[20].archiveWhenIdle;
+  assert.equal(selectRetention(observation([...parents, ...children])).candidates[0].reason, 'parent-limit');
 });
 
 test('helpers a master launched are their own requests, and parent limits keep counting other parents', () => {
@@ -180,7 +175,7 @@ test('a request survives a service restart, archives the master with its subagen
     await service.restoreSession('master'); await service.cancelArchiveRequest('master');
     assert.equal(await readFile(join(native, 'master.jsonl'), 'utf8'), 'master transcript\n');
     assert.equal(await readFile(join(native, 'child.jsonl'), 'utf8'), 'child transcript\n');
-    assert.equal(store.policy('master')?.archiveWhenIdle, undefined); assert.ok(store.policy('master')?.restoredAt); assert.ok(store.policy('master')?.reopenedAt);
+    assert.equal(store.policy('master')?.archiveWhenIdle, undefined); assert.ok(store.policy('master')?.restoredAt);
     hot = true;
     summary = await service.cycle(); assert.equal(summary.candidates, 0);
   } finally { await service.quiesce(); }
@@ -203,19 +198,61 @@ test('a restore without reopening keeps the request; cancelling clears it durabl
   } finally { await service.quiesce(); }
 }));
 
-test('a family of 151 sessions leaves over two cycles, the parent with the last batch', async () => fixture(async path => {
+test('a requested 21st parent with 150 descendants leaves in one cycle despite the budget', async () => fixture(async path => {
   const native = join(path, 'native'), originals = join(path, 'originals'), root = join(path, 'state'); await mkdir(native); await mkdir(originals);
-  const ids = ['master', ...Array.from({ length: 150 }, (_, i) => `c${i}`)];
-  for (const id of ids) await writeFile(join(native, `${id}.jsonl`), `${id}\n`);
+  const parents = Array.from({ length: 21 }, (_, i) => `p${String(i).padStart(2, '0')}`), children = Array.from({ length: 150 }, (_, i) => `c${i}`);
+  for (const id of [...parents, ...children]) await writeFile(join(native, `${id}.jsonl`), `${id}\n`);
   const adapter = movingAdapter(native, originals);
+  const records = () => [...parents.map((id, i) => record(id, undefined, { projectKey: 'project', lastActivityAt: iso(now - (i + 30) * day), latestTaskEndedAt: iso(now - (i + 30) * day) })),
+    ...children.map(id => record(id, 'p20', { lastActivityAt: iso(now - 80 * day), latestTaskEndedAt: iso(now - 80 * day) }))].filter(record => !adapter.moved.includes(record.session.id));
+  const store = new RetentionStore(root, { storage: actualStorage(root) }); await store.start(now - 30 * day);
+  const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'bundles'), [native], [originals]), adapter, onError: () => {}, observe: async () => observation(records()) });
+  await service.start();
+  try {
+    // Unrequested, the over-budget parent-limit family keeps its old skip.
+    assert.equal((await service.cycle()).deferredReasons?.['session-budget'], 1); assert.equal(adapter.moved.length, 0);
+    await service.requestArchive(['p20']);
+    const summary = await service.cycle(); assert.equal(adapter.moved.length, 151); assert.ok(adapter.moved.includes('p20')); assert.equal(summary.archivedMembers, 151);
+  } finally { await service.quiesce(); }
+}));
+
+test('a sibling starting work while its requested family is being reserved stops the move before any original leaves', async () => fixture(async path => {
+  const native = join(path, 'native'), originals = join(path, 'originals'), root = join(path, 'state'); await mkdir(native); await mkdir(originals);
+  for (const id of ['master', 'a', 'b']) await writeFile(join(native, `${id}.jsonl`), `${id}\n`);
+  let busy = false;
+  const adapter = movingAdapter(native, originals, async () => { busy = true; });
   const store = new RetentionStore(root, { storage: actualStorage(root) }); await store.start(now - 30 * day);
   const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'bundles'), [native], [originals]), adapter, onError: () => {},
-    observe: async () => observation(ids.filter(id => !adapter.moved.includes(id)).map(id => id === 'master' ? record('master') : record(id, 'master'))) });
+    observe: async () => { const b = record('b', 'master'); if (busy) { b.session.status = 'working'; b.latestTaskEndedAt = undefined; } return observation([record('master'), record('a', 'master'), b]); } });
   await service.start();
   try {
     await service.requestArchive(['master']);
-    let summary = await service.cycle(); assert.equal(adapter.moved.length, 100); assert.ok(!adapter.moved.includes('master')); assert.equal(summary.archivedMembers, 100); assert.equal(summary.deferredReasons?.['session-budget'], 1);
-    summary = await service.cycle(); assert.equal(adapter.moved.length, 151); assert.ok(adapter.moved.includes('master')); assert.equal(summary.archivedMembers, 151);
+    await service.cycle();
+    assert.deepEqual(adapter.moved, []); assert.equal(store.list()[0].phase, 'conflict');
+    assert.equal(await readFile(join(native, 'a.jsonl'), 'utf8'), 'a\n');
+  } finally { await service.quiesce(); }
+}));
+
+test('policy rows stay bounded: plain reopens write nothing and rows that carry nothing are pruned', async () => fixture(async path => {
+  const root = join(path, 'state'); const store = new RetentionStore(root, { storage: actualStorage(root) }); await store.start(now - 30 * day);
+  let hot = [record('master'), record('child', 'master'), record('other')];
+  const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'bundles'), []), onError: () => {}, now: () => now, observe: async () => observation(hot),
+    adapter: { capability: () => ({ status: 'blocked', reason: 'fixture' }), files: async () => [], reserve: async () => undefined, inspectCold: async members => ({ complete: true, members, issues: [] }) } });
+  await service.start();
+  try {
+    for (let i = 0; i < 1000; i++) await service.cancelArchiveRequest(`plain-${i}`);
+    assert.equal(store.policyList().length, 0);
+    await service.cycle(); // learns the family links
+    hot = hot.map(record => record.session.id === 'master' ? { ...record, latestTaskEndedAt: undefined, inactiveSince: undefined } : record); // keep it waiting
+    await service.requestArchive(['master', 'gone']);
+    await service.cancelArchiveRequest('child'); assert.equal(store.policy('child')?.reopenedAt, iso(now));
+    await service.cancelArchiveRequest('other'); assert.equal(store.policy('other'), undefined);
+    await service.cycle();
+    // The request for a session that no longer exists is dropped; the reopen under a live request stays.
+    assert.deepEqual(store.policyList().map(policy => policy.id).sort(), ['child', 'master']);
+    await service.cancelArchiveRequest('master'); await service.cycle();
+    assert.deepEqual(store.policyList(), []);
+    const reopened = new RetentionStore(root, { storage: actualStorage(root) }); await reopened.start(); assert.deepEqual(reopened.policyList(), []);
   } finally { await service.quiesce(); }
 }));
 

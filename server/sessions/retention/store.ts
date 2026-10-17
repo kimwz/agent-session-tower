@@ -45,6 +45,15 @@ export class RetentionStore {
     this.policies = new Map((policies || []).map(policy => [policy.id, policy]));
   }
   policy(id: string): RetentionPolicyState | undefined { const policy = this.policies.get(id); return policy ? structuredClone(policy) : undefined; }
+  policyList(): RetentionPolicyState[] { return structuredClone([...this.policies.values()]); }
+  async removePolicies(ids: string[]): Promise<void> {
+    const inputs = [...new Set(ids)];
+    return this.enqueue(async () => {
+      const changes = inputs.filter(id => this.policies.has(id)).map(id => ({ ...this.change('policy', id, this.policies.get(id), this.policies.get(id)), remove: true }));
+      await this.requiredRepository().update(changes);
+      for (const change of changes) this.policies.delete(change.id);
+    });
+  }
   async setPolicy(policy: RetentionPolicyState): Promise<void> {
     const input = structuredClone(policy);
     return this.enqueue(async () => {

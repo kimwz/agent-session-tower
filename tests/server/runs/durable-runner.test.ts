@@ -275,8 +275,7 @@ test('reopening cancels the canonical archive request before visibility changes 
   await f.retentionStore.put(entry);
   await client.setClosed(f.session.id, true);
   await client.setClosed(alias, false);
-  const { reopenedAt, ...policy } = f.retentionStore.policy(f.session.id)!;
-  assert.ok(reopenedAt); assert.deepEqual(policy, { id: f.session.id, archivedAt: undefined, archiveRevision: 5, restoredAt });
+  assert.deepEqual(f.retentionStore.policy(f.session.id), { id: f.session.id, archivedAt: undefined, archiveRevision: 5, restoredAt });
   assert.equal(f.retentionStore.policy(alias), undefined);
   assert.deepEqual(f.retentionStore.get(entry.id), entry);
   assert.equal(Boolean(client.applyClosed(f.session).closed), false);

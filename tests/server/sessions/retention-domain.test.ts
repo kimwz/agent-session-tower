@@ -265,7 +265,7 @@ test('journal mutations publish only after durable writes and retry from committ
   await store.setPolicy(initial);
   const existing = { id: 'existing', candidate: { rootId: 'child', ids: ['child'], reason: 'child-expired' as const, revisions: {} }, phase: 'blocked-provider' as const, updatedAt: new Date(now).toISOString() };
   await store.put(existing);
-  const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'cold'), []), adapter: { inspectCold: async members => ({ complete: true, members, issues: [] }), capability: () => ({ status: 'blocked' as const }), reserve: async () => undefined, files: async () => [], restore: async () => [] }, observe: async () => observation([]), onError: () => {}, now: () => now });
+  const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'cold'), []), adapter: { inspectCold: async members => ({ complete: true, members, issues: [] }), capability: () => ({ status: 'blocked' as const }), reserve: async () => undefined, files: async () => [], restore: async () => [] }, observe: async () => observation([]), onError: () => {} });
   holdActualStorage(path, true);
   try {
     await assert.rejects(service.cancelArchiveRequest('child'), /fixture SQL write held/);
@@ -277,7 +277,7 @@ test('journal mutations publish only after durable writes and retry from committ
   await service.cancelArchiveRequest('child');
   await Promise.all([store.put({ ...existing, id: 'new' }), store.removeMetadata(['existing']), store.setPolicy({ id: 'other', archiveRevision: 1 })]);
   const reloaded = new RetentionStore(root, { storage: actualStorage(root) }); await reloaded.start();
-  assert.deepEqual(reloaded.policy('child'), { id: 'child', archiveRevision: 3, restoredAt: initial.restoredAt, reopenedAt: new Date(now).toISOString() });
+  assert.deepEqual(reloaded.policy('child'), { id: 'child', archiveRevision: 3, restoredAt: initial.restoredAt });
   assert.equal(reloaded.policy('other')?.archiveRevision, 1);
   assert.equal(reloaded.get('existing'), undefined); assert.equal(reloaded.get('failed'), undefined); assert.equal(reloaded.get('new')?.id, 'new');
   assert.deepEqual(reloaded.list(), store.list());
