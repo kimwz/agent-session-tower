@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.145.0] - 2026-10-17
+## [1.145.0] - 2026-10-18
 
 - **할 일마다 이슈 마스터 채팅.** 할 일 상세에 "상세 | 채팅" 탭이 생겼습니다. 채팅에 첫 메시지를 보내면 그 할 일 전용 마스터가 시작됩니다. 메인 마스터와 같은 도구·권한을 가진 별도 대화이며, 할 일의 설명·하위작업·댓글·첨부 파일을 먼저 읽고 일을 시작합니다. 결과는 할 일 댓글로 남기고, 완료 처리는 소유자가 합니다.
 - **카드에서 바로 보기.** 보드 카드 오른쪽에 이슈 마스터 아이콘이 보입니다. 캔버스와 같은 provider 아이콘과 컨텍스트 사용률 링이며, 작업 중이면 색이 들어옵니다. 마스터가 없는 카드는 마우스를 올리면 채팅 아이콘이 나타납니다. 캔버스에서는 이슈 마스터가 만든 세션에 할 일 이름 배지가 붙습니다.
