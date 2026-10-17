@@ -16,6 +16,8 @@ export interface RetentionRecord {
   inactiveSince?: string;
   archivedAt?: string;
   archiveRevision?: number;
+  /** Archive once the session settles, whatever its kind (a closed issue's family, masters included). */
+  archiveWhenIdle?: boolean;
   restoredAt?: string;
 }
 export interface RetentionObservation {
@@ -123,9 +125,36 @@ export function selectRetention(observation: RetentionObservation): RetentionSel
     }
   }
   const assigned = new Set(result.candidates.flatMap(candidate => candidate.ids));
+  // A requested archive waits for its session to settle, not to age: a turn running at the request
+  // finishes first, and activity after the request does not withdraw it (only reopening does).
+  // Without a recorded end, a day of unchanged native state counts as settled.
+  const depth = (id: string): number => { let count = 0; const seen = new Set<string>(); for (let node = nodes.get(id); node?.parentId && !seen.has(node.id); node = nodes.get(node.parentId)) { seen.add(node.id); count++; } return count; };
+  // A subagent's request lapses while an ancestor it belongs to is kept, so reopening a parent
+  // (which cancels only the parent's request) keeps its whole family.
+  const ancestorKept = (id: string): boolean => {
+    const seen = new Set<string>();
+    for (let node = nodes.get(id); node?.isSubagent && node.parentId && !seen.has(node.id); node = nodes.get(node.parentId)) {
+      seen.add(node.id); const parent = records.get(node.parentId);
+      if (parent && !parent.archiveWhenIdle) return true;
+    }
+    return false;
+  };
+  const requested = observation.records.filter(record => record.archiveWhenIdle && !ancestorKept(record.session.id));
+  const requestedIds = new Set(requested.map(record => record.session.id));
+  // Ancestors first, so a requested family leaves as one operation rather than child by child.
+  requested.sort((a, b) => depth(a.session.id) - depth(b.session.id));
+  for (const record of requested) {
+    const id = record.session.id;
+    if (assigned.has(id)) continue;
+    // An end before a restore is the one that was archived; a restored session needs a new end or a quiet day.
+    const ended = time(record.latestTaskEndedAt), inactive = time(record.inactiveSince);
+    if (!(ended && ended >= time(record.restoredAt)) && !(inactive && observation.now >= inactive + DAY)) { result.deferred.push({ id, reason: 'awaiting-idle' }); continue; }
+    const ids = descendants(id).filter(member => !assigned.has(member));
+    if (emit(id, 'explicit-archive', ids)) for (const member of ids) assigned.add(member);
+  }
   for (const record of observation.records) {
     const { session } = record;
-    if (record.kind === 'parent' || assigned.has(session.id)) continue;
+    if (record.kind === 'parent' || assigned.has(session.id) || requestedIds.has(session.id)) continue;
     const end = Math.max(time(record.latestTaskEndedAt), time(record.restoredAt));
     const observed = end || time(record.inactiveSince);
     if (!observed) { result.deferred.push({ id: session.id, reason: 'unproven-inactivity' }); continue; }

@@ -282,6 +282,24 @@ test('reopening cancels the canonical archive request before visibility changes 
   assert.equal(f.starts(), 0);
 });
 
+test('an archive request names 1 to 500 sessions, records each under its canonical ID, and reopening cancels it', async t => {
+  const f = await fixture(true, true); t.after(f.cleanup);
+  const client = await f.connect();
+  const alias = 'codex:request-alias';
+  f.sessions.get = id => id === alias || id === f.session.id ? { ...f.session } : undefined;
+  for (const invalid of [undefined, 'one', [], [''], [7], ['x'.repeat(4097)], Array.from({ length: 501 }, (_, i) => `s${i}`)]) {
+    await assert.rejects(client.retention('requestArchive', invalid as string[]), /Invalid retention archive request/);
+  }
+  assert.deepEqual(await client.retention('requestArchive', [alias, 'cold-session']), { requested: 2 });
+  assert.equal(f.retentionStore.policy(f.session.id)?.archiveWhenIdle, true);
+  assert.equal(f.retentionStore.policy(alias), undefined);
+  assert.equal(f.retentionStore.policy('cold-session')?.archiveWhenIdle, true);
+  await client.setClosed(f.session.id, true);
+  await client.setClosed(alias, false);
+  assert.deepEqual(f.retentionStore.policy(f.session.id), { id: f.session.id, archivedAt: undefined, archiveRevision: 2 });
+  assert.equal(f.starts(), 0);
+});
+
 test('reopening does not claim success or change visibility when archive cancellation fails or retention initialization is unavailable', async t => {
   const f = await fixture(true, true); t.after(f.cleanup);
   const client = await f.connect(); await client.setClosed(f.session.id, true);

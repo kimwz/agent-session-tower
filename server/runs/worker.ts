@@ -332,6 +332,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
           }
           return { ...await service.cycle(), temporary: temporaryOverview() };
         }
+        if (action === 'requestArchive') {
+          if (!Array.isArray(value) || !value.length || value.length > 500 || value.some(id => typeof id !== 'string' || !id || id.length > 4096)) throw new TowerError('invalid', 'Invalid retention archive request.');
+          return service.requestArchive((value as string[]).map(id => options.runs.getSession(id)?.id ?? id));
+        }
         if (typeof value !== 'string' || !value || value.length > 4096) throw new TowerError('invalid', 'Invalid retention target.');
         if (action === 'archive') return service.archiveSession(value);
         if (action === 'backup') return service.backup(value);
@@ -345,7 +349,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'setClosed': {
         if (!options.closedSessions) throw new TowerError('unavailable', 'Session closure is unavailable.');
         if (typeof args[0] !== 'string' || typeof args[1] !== 'boolean') throw new TowerError('invalid', 'Invalid session closure request.');
-        if (!args[1] && options.retention) await options.retention.service.restoreSession(args[0]);
+        // Cancel before restoring, so a restored session never sits with its archive request still standing.
+        if (!args[1] && options.retention) { await options.retention.service.cancelArchiveRequest(args[0]); await options.retention.service.restoreSession(args[0]); }
         const session = options.runs.getSession(args[0]);
         if (!session) return undefined;
         if (!args[1]) {
