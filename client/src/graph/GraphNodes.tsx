@@ -1,7 +1,7 @@
 import { translate as t, useI18n } from '../i18n/i18n';
 import { memo, useId } from 'react';
 import { Handle, Position, useViewport, type Node, type NodeProps } from '@xyflow/react';
-import { ArrowUpRight, Check, Clock, GitBranch, Monitor, Radio, Sparkles } from 'lucide-react';
+import { ArrowUpRight, Check, Clock, GitBranch, ListTodo, Monitor, Radio, Sparkles } from 'lucide-react';
 import type { ProviderHealth, Session, SystemStatus } from '../../../shared/types';
 import type { NodeStatus } from '../../../shared/link';
 import { localPart } from '../remote/scope';
@@ -16,7 +16,9 @@ import { SystemRings } from './SystemRings';
 
 export type AgentData = { session: Session; selected: boolean; unread: boolean; onSelect: (id: string) => void;
   /** Its computer is out of reach: the card shows the last state seen. */
-  stale?: boolean };
+  stale?: boolean;
+  /** The title of the todo whose issue master made this session. */
+  todo?: string };
 export type ProjectData = ProjectGroupHeaderData & { onAutoPrompt: (cwd?: string) => void; stale?: boolean };
 /** How a joined computer is doing, shown on its host node. */
 export type HostLink = { status: NodeStatus; live: boolean; version?: string;
@@ -49,6 +51,7 @@ export const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentD
     <button ref={peek.anchor} {...peek.rowProps} className={`agent-card ${session.provider} ${session.status} ${data.selected ? 'selected' : ''} ${data.unread ? 'has-unread' : ''}${data.stale ? ' is-stale' : ''}`} onClick={() => { peek.dismiss(); data.onSelect(session.id); }} aria-describedby={contextDescriptionId} aria-label={`${t("{0}: {1}, {2}{3}. 대화 열기", { 0: providerLabels[session.provider], 1: sessionTitle(session), 2: outcome ? `${state.label}, ${outcomeLabels[outcome]}` : state.label, 3: data.unread ? t(", 새 활동") : t(", 확인함") })}${data.stale ? ` ${t("(마지막으로 본 상태)")}` : ''}`}>
       {session.status === 'working' && !data.stale && <span className="agent-activity-border" aria-hidden="true" />}
       {data.unread && <i className="unread-dot" title={t("새 활동")} aria-hidden="true" />}
+      {data.todo && <span className="agent-todo-badge" title={t('할 일: {0}', { 0: data.todo })}><ListTodo size={10} aria-hidden="true" /><span>{data.todo}</span></span>}
       {outcome && <span className="agent-card-flags"><span className={`agent-outcome ${outcome}`}><i />{outcomeLabels[outcome]}</span></span>}
       <div className="agent-card-top"><SessionContextIcon provider={session.provider} usage={session.contextUsage} descriptionId={contextDescriptionId} />{session.isSubagent && <span className="subagent-mark" title={t("하위 에이전트")}><GitBranch size={12} /></span>}</div>
       <div className="agent-card-title" title={sessionTitle(session)}>{sessionTitle(session)}</div>

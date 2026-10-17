@@ -1,7 +1,17 @@
-import { useRef, useState, type ReactNode } from 'react';
-import { ArrowRight, CalendarDays, Check, ChevronRight, Clock3, Flag, MessageSquare, MoreHorizontal, Paperclip, Repeat } from 'lucide-react';
-import type { TodoTask } from '../../../shared/todo/types';
+import { useContext, useId, useRef, useState, type ReactNode } from 'react';
+import { ArrowRight, CalendarDays, Check, ChevronRight, Clock3, Flag, MessageCircle, MessageSquare, MoreHorizontal, Paperclip, Repeat } from 'lucide-react';
+import type { TodoAgent, TodoTask } from '../../../shared/todo/types';
+import { statusLabels } from '../common/lib';
 import { translate as t } from '../i18n/i18n';
+import { SessionContextIcon } from '../sessions/SessionContextIcon';
+import { agentLook, TodoAgentContext } from './todo-agents';
+
+const stop = (event: { stopPropagation(): void }) => event.stopPropagation();
+/**
+ * A control on a card keeps its presses to itself: the board drags a card from a mouse press (MouseSensor), a held
+ * touch (TouchSensor) or a pointer press, so each of them stops at the control.
+ */
+export const OWN_PRESS = { onPointerDown: stop, onMouseDown: stop, onTouchStart: stop } as const;
 import { useFileDrop } from './attachments/Attachments';
 import { isOpen, type TodoWorld } from './todo-model';
 import { setSubtasksFolded, subtasksFolded } from './todo-prefs';
@@ -57,6 +67,21 @@ export function CheckCircle({ task, onComplete, onCompleteNext, onReopen, size =
   </button>;
 }
 
+/**
+ * A todo's issue master as the chat header shows a session: the provider's orb in its context ring, in colour while it
+ * works and grey otherwise, with a dot when something waits for the owner.
+ */
+export function AgentIcon({ agent }: { agent: TodoAgent }) {
+  const { session } = useContext(TodoAgentContext);
+  const description = useId();
+  const look = agentLook(agent, agent.sessionId ? session(agent.sessionId) : undefined);
+  const label = `${t('이슈 마스터')} · ${statusLabels[look.status]}`;
+  return <span className={`chat-context-icon todo-agent-icon ${look.status}`}>
+    <SessionContextIcon provider={look.provider} usage={look.usage} descriptionId={description} compact label={label} />
+    {look.flag && <i className={`todo-agent-flag ${look.flag}`} aria-hidden="true" />}
+  </span>;
+}
+
 export interface TaskCardProps {
   task: TodoTask;
   context: CardContext;
@@ -74,15 +99,18 @@ export interface TaskCardProps {
   onFiles?: (task: TodoTask, files: File[]) => void;
   /** Shown only (an archived project): nothing on it changes the task. */
   readOnly?: boolean;
+  /** Opens the task's issue chat. */
+  onChat?: (id: string) => void;
 }
 
-export function TaskCard({ task, context, selected, onOpen, onComplete, onCompleteNext, onReopen, onMenu, onSelect, selectId = task.id, onFiles, readOnly }: TaskCardProps) {
+export function TaskCard({ task, context, selected, onOpen, onComplete, onCompleteNext, onReopen, onMenu, onSelect, selectId = task.id, onFiles, readOnly, onChat }: TaskCardProps) {
   // Sub-tasks show unless the owner folded them on this card; the fold is remembered (todo-prefs.ts). Completed ones
   // are in the task's detail.
   const [folded, setFolded] = useState(() => subtasksFolded(task.id));
   // A completed card (the completed list) lists none: its sub-tasks are in its detail.
   const children = task.completedAt ? [] : (context.children.get(task.id) ?? []).filter(child => isOpen(child) && !context.shown?.has(child.id));
   const chips = CARD_META.filter(chip => chip.visible(task, context));
+  const agent = context.world.agents[task.id];
   // A file dragged from the computer is not a card being dragged (dnd-kit follows the pointer, not HTML drag events).
   // A paste is the detail's: a card taking one would attach files to whichever card the keyboard is on.
   const drop = useFileDrop(files => onFiles?.(task, files), !onFiles || readOnly || !!task.completedAt);
@@ -108,6 +136,11 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
         {task.description && <span className="todo-card-description">{plain(task.description)}</span>}
         {chips.length > 0 && <div className="todo-meta">{chips.map(chip => <span key={chip.key} className="todo-meta-item">{chip.render(task, context)}</span>)}</div>}
       </div>
+      {/* With an issue master, its state; without, a way to start one, offered to a mouse over the card (a phone has the detail's chat). */}
+      {onChat && (agent || (!readOnly && !task.completedAt)) && <button type="button" className={`todo-card-chat icon-button ${agent ? 'active' : ''}`} aria-label={t('이슈 채팅')} title={t('이슈 채팅')}
+        {...OWN_PRESS} onClick={event => { event.stopPropagation(); onChat(task.id); }}>
+        {agent ? <AgentIcon agent={agent} /> : <MessageCircle size={14} />}
+      </button>}
       {onMenu && !readOnly && <button type="button" className="todo-card-more icon-button" aria-label={t('작업 메뉴')} onClick={event => { event.stopPropagation(); onMenu(task, event.currentTarget); }}><MoreHorizontal size={15} /></button>}
     </div>
     {(children.length > 0 || (!task.completedAt && (context.world.subtaskCounts[task.id]?.total ?? 0) > 0)) && <div className="todo-card-subtasks">

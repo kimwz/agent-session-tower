@@ -10,7 +10,7 @@ import { DisplayMenu, loadDisplay, saveDisplay } from './DisplayMenu';
 import { Menu, Popover, type MenuItem } from './Popover';
 import { QuickAdd, type QuickAddPreset } from './QuickAdd';
 import { TaskCard } from './TaskCard';
-import { shareItems, TaskDetail } from './TaskDetail';
+import { shareItems, TaskDetail, type DetailTab } from './TaskDetail';
 import { TodoSidebar } from './TodoSidebar';
 import { createActions, type FollowUp } from './todo-actions';
 import { httpUploadIO } from './attachments/upload-io';
@@ -56,6 +56,9 @@ const archivedHolder = (projects: readonly TodoProject[], project: TodoProject) 
   return current?.archivedAt ? current : undefined;
 };
 
+/** The detail's tab, kept while the page stays loaded (switching to the canvas and back included). */
+let shownTab: DetailTab = 'detail';
+
 function SectionRename({ anchor, name, onSave, onClose }: { anchor: RefObject<HTMLElement | null>; name: string; onSave: (name: string) => void; onClose: () => void }) {
   const [value, setValue] = useState(name);
   const save = (event: FormEvent) => { event.preventDefault(); if (value.trim() && value.trim() !== name) onSave(value.trim()); onClose(); };
@@ -86,6 +89,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   // Renaming opens after the menu closes, so the menu's closing never undoes it.
   const [sectionRename, setSectionRename] = useState<string | null>(null);
   const [showArchivedSections, setShowArchivedSections] = useState(false);
+  const [detailTab, setDetailTab] = useState<DetailTab>(shownTab);
+  const chooseTab = useCallback((tab: DetailTab) => { shownTab = tab; setDetailTab(tab); }, []);
   const searchRef = useRef<HTMLInputElement>(null);
   const menuAnchor = useRef<HTMLElement | null>(null);
   const chord = useRef(false);
@@ -142,6 +147,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   useEffect(() => { setShowArchivedSections(false); }, [key]);
 
   const openTask = useCallback((id: string) => navigate({ task: id }), [navigate]);
+  const openChat = useCallback((id: string) => { chooseTab('chat'); navigate({ task: id }); }, [chooseTab, navigate]);
   const closeTask = useCallback(() => navigate({ task: null }), [navigate]);
   const goTo = useCallback((next: TodoView, text?: string) => {
     // A project opens in the layout it was last shown in.
@@ -328,6 +334,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     // Files dropped on a card go to its task's description.
     onFiles: frozen ? undefined : (task: TodoTask, files: File[]) => { if (!isLocked(task)) attach(task.id, files); },
     readOnly: frozen,
+    onChat: openChat,
   };
   const onDrop = (task: TodoTask, column: BoardColumn, afterId: string | null | undefined) => {
     if (!column.drop || locked || isLocked(task)) return;
@@ -436,7 +443,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       {body}
     </main>
     {openTaskId && state.phase === 'ready' && <TaskDetail taskId={openTaskId} world={world} error={state.detailError} today={today} client={client} actions={actions} readOnly={readOnly || lockedTask(openTaskId)} uploads={uploads}
-      onClose={closeTask} onOpen={openTask} onProject={id => goTo(world.projects.find(item => item.id === id)?.inbox ? { kind: 'inbox' } : { kind: 'project', id })} onFollowUp={followUp} />}
+      onClose={closeTask} onOpen={openTask} onProject={id => goTo(world.projects.find(item => item.id === id)?.inbox ? { kind: 'inbox' } : { kind: 'project', id })} onFollowUp={followUp}
+      tab={detailTab} onTab={chooseTab} />}
     {quick && <QuickAdd world={world} today={today} client={client} preset={quick.preset} follow={quick.follow} attach={attach} onClose={() => setQuick(null)} onAdded={id => setSelectedId(id)} />}
     {cardMenu && <Menu anchor={menuAnchor} label={t('작업 메뉴')} items={cardMenuItems(cardMenu.task)} onClose={() => setCardMenu(null)} align="end" />}
     {sectionMenu && section && <Menu anchor={menuAnchor} label={t('섹션 메뉴')} onClose={() => setSectionMenu(null)} items={[

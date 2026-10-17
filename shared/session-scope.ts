@@ -14,6 +14,8 @@ export interface SessionScope {
   closed: boolean;
   /** The opened session: its whole family is sent. */
   focus?: string;
+  /** Every open master session (the master's and the todos' issue masters): the Todo page shows how each is doing. */
+  masters?: true;
 }
 
 /** What a page shows about all of this computer's sessions, including those it was not sent. */
@@ -33,23 +35,24 @@ export function temporaryFolder(cwd: string): boolean {
   return /^\/(?:private\/)?tmp(?:\/|$)/.test(cwd);
 }
 
-function scopeFrom(days: unknown, closed: unknown, focus: unknown): SessionScope {
+function scopeFrom(days: unknown, closed: unknown, focus: unknown, masters: unknown): SessionScope {
   const count = typeof days === 'number' ? days : typeof days === 'string' && days !== '' ? Number(days) : NaN;
   return {
     ...(Number.isFinite(count) && count > 0 && count <= MAX_DAYS ? { days: count } : {}),
     closed: closed === true || closed === '1',
     ...(typeof focus === 'string' && focus && focus.length <= MAX_FOCUS ? { focus } : {}),
+    ...(masters === true || masters === '1' ? { masters: true as const } : {}),
   };
 }
 
 /** The scope a request names with `scoped=1`; undefined for requests that want every session. */
 export function scopeFromParams(params: URLSearchParams): SessionScope | undefined {
-  return params.get('scoped') === '1' ? scopeFrom(params.get('days'), params.get('closed'), params.get('focus')) : undefined;
+  return params.get('scoped') === '1' ? scopeFrom(params.get('days'), params.get('closed'), params.get('focus'), params.get('masters')) : undefined;
 }
 
 export function scopeFromBody(value: unknown): SessionScope {
   const body = value && typeof value === 'object' ? value as Record<string, unknown> : {};
-  return scopeFrom(body.days, body.closed, body.focus);
+  return scopeFrom(body.days, body.closed, body.focus, body.masters);
 }
 
 export function scopeParams(scope: SessionScope): string {
@@ -57,11 +60,12 @@ export function scopeParams(scope: SessionScope): string {
   if (scope.days !== undefined) params.set('days', String(scope.days));
   if (scope.closed) params.set('closed', '1');
   if (scope.focus) params.set('focus', scope.focus);
+  if (scope.masters) params.set('masters', '1');
   return params.toString();
 }
 
 export function sameScope(a: SessionScope, b: SessionScope): boolean {
-  return a.days === b.days && a.closed === b.closed && a.focus === b.focus;
+  return a.days === b.days && a.closed === b.closed && a.focus === b.focus && !!a.masters === !!b.masters;
 }
 
 const ACTIVE_RUN = new Set<Run['status']>(['running', 'queued']);
@@ -85,7 +89,8 @@ function aliasIndex(sessions: Session[]): Map<string, Session> {
  * scope is done once, so one snapshot serves every page:
  * - open main sessions inside the time window (the list's own rule), and with `closed` every closed main session;
  * - sessions a running or queued turn or an unsettled Auto Prompt job names, with their ancestors;
- * - the whole family of the focused session.
+ * - the whole family of the focused session;
+ * - with `masters`, every open master session (not its subagents).
  * A family root whose unsent members are busy carries `familyActive`.
  *
  * With them go the records the page uses: every running or queued turn, the turns of the sessions it holds, and
@@ -99,6 +104,7 @@ export function pageSelector(snapshot: Pick<Snapshot, 'sessions' | 'runs' | 'aut
   const { byId, roots } = familyIndex(sessions);
   const aliases = aliasIndex(sessions);
   const mains = sessions.filter(session => roots.get(session.id) === session.id && !session.launchedByAgent && !session.master);
+  const masters = sessions.filter(session => roots.get(session.id) === session.id && session.master && !session.closed);
   const busy = new Set<string>();
   for (const run of snapshot.runs) if (ACTIVE_RUN.has(run.status)) { const session = aliases.get(run.sessionId); if (session) busy.add(session.id); }
   const named = new Set(busy);
@@ -129,6 +135,7 @@ export function pageSelector(snapshot: Pick<Snapshot, 'sessions' | 'runs' | 'aut
       const shown = session.closed ? scope.closed : session.creationPending || listShows(session, cutoff);
       if (shown) kept.add(session.id);
     }
+    if (scope.masters) for (const session of masters) kept.add(session.id);
     const focused = scope.focus ? aliases.get(scope.focus) : undefined;
     const focusRoot = focused ? roots.get(focused.id) : undefined;
     const result: Session[] = [];

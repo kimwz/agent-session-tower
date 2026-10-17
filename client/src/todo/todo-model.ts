@@ -2,7 +2,7 @@ import { dayBefore, reorderDay } from '../../../shared/todo/day-order';
 import { nextOccurrence } from '../../../shared/todo/recurrence';
 import { keyBetween } from '../../../shared/todo/sort-key';
 import type { TodoOp, TodoOpOf } from '../../../shared/todo/ops';
-import type { TodoAvailability, TodoChanges, TodoComment, TodoFile, TodoLabel, TodoLink, TodoOverview, TodoProject, TodoRestoreProgress, TodoSection, TodoSubtaskCount, TodoTask, TodoTaskDetail } from '../../../shared/todo/types';
+import type { TodoAgent, TodoAvailability, TodoChanges, TodoComment, TodoFile, TodoLabel, TodoLink, TodoOverview, TodoProject, TodoRestoreProgress, TodoSection, TodoSubtaskCount, TodoTask, TodoTaskDetail } from '../../../shared/todo/types';
 
 /**
  * What the Todo page knows: the open overview, every task it has seen (completed and deleted ones too, so undoing a
@@ -22,13 +22,15 @@ export interface TodoWorld {
   fileCounts: Record<string, number>;
   /** Sub-tasks per task that has any, completed ones counted apart: the overview's, then each answer's. */
   subtaskCounts: Record<string, TodoSubtaskCount>;
+  /** Issue masters of todos, by todo id: those not `closed` (`TodoOverview.agents`). */
+  agents: Record<string, TodoAgent>;
   /** Bringing back a restored backup's attachments. */
   restore?: TodoRestoreProgress;
   detail: TodoTaskDetail | null;
 }
 
 export const emptyWorld = (): TodoWorld => ({
-  availability: { state: 'ready' }, revision: 0, projects: [], sections: [], labels: [], tasks: {}, links: {}, commentCounts: {}, fileCounts: {}, subtaskCounts: {}, detail: null,
+  availability: { state: 'ready' }, revision: 0, projects: [], sections: [], labels: [], tasks: {}, links: {}, commentCounts: {}, fileCounts: {}, subtaskCounts: {}, agents: {}, detail: null,
 });
 
 export const isOpen = (task: TodoTask | undefined): boolean => !!task && !task.completedAt && !task.deletedAt;
@@ -44,7 +46,7 @@ export function worldFromOverview(overview: TodoOverview, previous?: TodoWorld):
     availability: overview.availability, revision: overview.revision,
     projects: [...overview.projects].sort(byOrder), sections: [...overview.sections].sort(byOrder), labels: [...overview.labels].sort(byOrder),
     tasks, links: Object.fromEntries(overview.links.map(link => [link.id, link])), commentCounts: { ...overview.commentCounts },
-    fileCounts: { ...(overview.fileCounts ?? {}) }, subtaskCounts: { ...(overview.subtaskCounts ?? {}) }, ...(overview.restore ? { restore: overview.restore } : {}),
+    fileCounts: { ...(overview.fileCounts ?? {}) }, subtaskCounts: { ...(overview.subtaskCounts ?? {}) }, agents: { ...(overview.agents ?? {}) }, ...(overview.restore ? { restore: overview.restore } : {}),
     detail: previous?.detail ? syncDetail(previous.detail, tasks) : null,
   };
 }
@@ -180,11 +182,19 @@ export function mergeChanges(world: TodoWorld, changes: TodoChanges): TodoWorld 
   let next: TodoWorld = {
     ...world, revision: Math.max(world.revision, changes.revision), subtaskCounts: changes.subtaskCounts ? withCounts(world.subtaskCounts, changes.subtaskCounts) : world.subtaskCounts,
     projects: upsert(world.projects, changes.projects), sections: upsert(world.sections, changes.sections), labels: upsert(world.labels, changes.labels), tasks,
+    agents: changes.agents ? withAgents(world.agents, changes.agents) : world.agents,
   };
   next = withLinks(next, changes.links, changes.removedLinks);
   next = withComments(next, changes.comments);
   next = withFiles(next, changes.files ?? []);
   return next.detail ? { ...next, detail: syncDetail(next.detail, tasks) } : next;
+}
+
+/** Issue masters that changed; null is one that is `closed` or gone. */
+export function withAgents(agents: Record<string, TodoAgent>, changed: Record<string, TodoAgent | null>): Record<string, TodoAgent> {
+  const next = { ...agents };
+  for (const [taskId, agent] of Object.entries(changed)) if (agent && agent.state !== 'closed') next[taskId] = agent; else delete next[taskId];
+  return next;
 }
 
 export function withDetail(world: TodoWorld, detail: TodoTaskDetail | null): TodoWorld {
