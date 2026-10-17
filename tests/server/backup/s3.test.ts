@@ -67,6 +67,13 @@ test('a listing that is not a whole ListBucketResult is never taken as complete'
   const whole = '<?xml version="1.0"?><ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>tower/a</Key><Size>1</Size></Contents></ListBucketResult>';
   body = whole;
   assert.deepEqual(await client.scan('tower/'), { items: [{ key: 'tower/a', size: 1, modifiedAt: '' }], complete: true });
+  // A namespace on the root and a comment after it are well-formed.
+  body = '<?xml version="1.0" encoding="UTF-8"?>\n<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>bucket</Name><IsTruncated>false</IsTruncated><Contents><Key>tower/a</Key><Size>1</Size></Contents></ListBucketResult>\n<!-- served by a proxy -->\n';
+  assert.deepEqual(await client.scan('tower/'), { items: [{ key: 'tower/a', size: 1, modifiedAt: '' }], complete: true });
+  // An entry written with a space before its end is an entry like any other, never skipped.
+  body = '<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>tower/a</Key></Contents><Contents ><Key>tower/old</Key></Contents></ListBucketResult>';
+  assert.deepEqual((await client.scan('tower/')).items.map(item => item.key), ['tower/a', 'tower/old']);
+  assert.equal((await client.scan('tower/')).complete, true);
   for (const broken of [
     '<ListBucketResult><Contents><Key>tower/a</Key></Contents>',
     '<ListBucketResult><Contents><Key>tower/a</Key></Contents></ListBucketResult>',
@@ -74,6 +81,12 @@ test('a listing that is not a whole ListBucketResult is never taken as complete'
     '<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Size>1</Size></Contents></ListBucketResult>',
     '<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>tower/a</Key></ListBucketResult>',
     '<Error><Code>Odd</Code></Error>',
+    // An entry the parser would skip: empty, written with a space, or broken off.
+    '<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>tower/a</Key></Contents><Contents/></ListBucketResult>',
+    '<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>tower/a</Key></Contents><Contents</ListBucketResult>',
+    '<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key></Key></Contents></ListBucketResult>',
+    '<ListBucketResult><Contents><Key>tower/a</Key><IsTruncated>false</IsTruncated></Contents></ListBucketResult>',
+    '<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult><ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>',
   ]) {
     body = broken;
     assert.equal((await client.scan('tower/')).complete, false, broken);

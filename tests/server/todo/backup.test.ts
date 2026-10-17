@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -421,4 +421,19 @@ test('settings changed while a backup is made do not split where its attachments
   assert.equal((await b.service.overview()).settings.remote.prefix, 'tower/', 'the backup names the bucket it went to');
   assert.deepEqual(b.todos.overview().restore, { state: 'done', total: 1, missing: 0 });
   assert.deepEqual(await content(b, file), file);
+});
+
+test('local contents with another link to them are brought back from the backup instead of counted as there', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const file = Buffer.from('linked from elsewhere on this computer');
+  const attached = await a.attach('t', file);
+  const key = await a.upload();
+  await link(todoFilePath(a.stateDir, sha(file)), join(a.stateDir, 'elsewhere'));
+  await a.restore(key);
+  assert.deepEqual(a.todos.overview().restore, { state: 'done', total: 1, missing: 0 });
+  const opened = await a.files.openFile(attached.id);
+  await opened.handle.close();
+  assert.equal((await stat(todoFilePath(a.stateDir, sha(file)))).nlink, 1);
 });

@@ -254,7 +254,8 @@ export class TodoFiles {
   // ---- Contents brought back by a restore --------------------------------------------------------------
 
   hasContent(sha256: string, size: number): Promise<boolean> {
-    return lstat(todoFilePath(this.stateDir, sha256)).then(info => info.isFile() && !info.isSymbolicLink() && info.size === size, error => absent(error) ?? false);
+    // The same test openContent makes: contents it would refuse are not there, and are brought back or stored again.
+    return lstat(todoFilePath(this.stateDir, sha256)).then(info => info.isFile() && !info.isSymbolicLink() && info.nlink === 1 && info.size === size, error => absent(error) ?? false);
   }
 
   /** Writes contents from elsewhere, keeping them only when they are exactly `sha256`. */

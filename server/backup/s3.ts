@@ -47,6 +47,29 @@ export function endpointUrl(value: string): URL {
 const xmlText = (value: string) => value.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code))).replace(/&amp;/g, '&');
 const tag = (xml: string, name: string) => { const found = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(xml); return found ? xmlText(found[1]!) : undefined; };
 
+/**
+ * One page of a ListObjectsV2 answer. `whole` only when it is provably all of the page: one ListBucketResult root
+ * (an XML declaration before it and comments around it allowed), a direct IsTruncated of true or false, and every
+ * `<Contents` an entry with a key. An entry this cannot read (empty, written another way, broken off) makes it not whole.
+ */
+export function listPage(xml: string): { items: RemoteBackup[]; whole: boolean; truncated: boolean; token?: string } {
+  const root = /^<ListBucketResult(?:\s[^>]*)?>([\s\S]*)<\/ListBucketResult>$/.exec(xml.replace(/<!--[\s\S]*?-->/g, '').replace(/^\s*<\?xml[^>]*\?>/, '').trim());
+  const inner = root?.[1];
+  if (inner === undefined || /<\/?ListBucketResult\b/.test(inner)) return { items: [], whole: false, truncated: false };
+  const items: RemoteBackup[] = [];
+  let unread = false;
+  const rest = inner.replace(/<Contents(?:\s[^>]*)?>([\s\S]*?)<\/Contents>/g, (_entry, body: string) => {
+    const key = tag(body, 'Key');
+    if (!key || /<Contents\b/.test(body)) unread = true;
+    else items.push({ key, size: Number(tag(body, 'Size') ?? 0), modifiedAt: tag(body, 'LastModified') ?? '' });
+    return '';
+  });
+  const truncated = [...rest.matchAll(/<IsTruncated>([\s\S]*?)<\/IsTruncated>/g)].map(match => match[1]);
+  const whole = !unread && !/<\/?Contents\b/.test(rest) && truncated.length === 1 && (truncated[0] === 'true' || truncated[0] === 'false');
+  const more = whole && truncated[0] === 'true';
+  return { items, whole, truncated: more, ...(more ? { token: tag(rest, 'NextContinuationToken') } : {}) };
+}
+
 export class S3Client {
   private readonly base: URL;
   /** `signal` stops every request under way (Tower shutting down). */
@@ -118,19 +141,12 @@ export class S3Client {
     // A store that keeps saying there is more without giving any is not followed forever.
     for (let page = 0; page < Math.max(100, Math.ceil(limit / 500)); page++) {
       const response = await this.request('GET', this.url(undefined, { 'list-type': '2', prefix, ...(token ? { 'continuation-token': token } : {}) }));
-      const xml = await response.text();
-      // Only a whole result says it is the end: one cut short, or with an entry it cannot read, may leave objects out.
-      const truncated = tag(xml, 'IsTruncated');
-      const entries = [...xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)];
-      const whole = /^\s*(<\?xml[^>]*\?>\s*)?<ListBucketResult[\s>]/.test(xml) && /<\/ListBucketResult>\s*$/.test(xml) && (truncated === 'true' || truncated === 'false')
-        && entries.length === (xml.match(/<Contents>/g) ?? []).length && entries.every(match => tag(match[1]!, 'Key') !== undefined);
-      for (const match of entries) {
-        const key = tag(match[1]!, 'Key');
-        if (key !== undefined) found.push({ key, size: Number(tag(match[1]!, 'Size') ?? 0), modifiedAt: tag(match[1]!, 'LastModified') ?? '' });
-      }
-      if (!whole) return { items: found, complete: false };
-      more = truncated === 'true';
-      token = more ? tag(xml, 'NextContinuationToken') : undefined;
+      const listed = listPage(await response.text());
+      found.push(...listed.items);
+      // Only a page read whole says where the listing ends; any other may have left objects out.
+      if (!listed.whole) return { items: found, complete: false };
+      more = listed.truncated;
+      token = listed.token;
       if (!token || found.length >= limit) break;
     }
     return { items: found, complete: !more };
