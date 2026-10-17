@@ -149,22 +149,26 @@ const xml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;'
 /** npx and npm put their own and every parent folder's node_modules/.bin first; the service keeps the user's own PATH. */
 const userPath = (path = '/usr/bin:/bin') => path.split(':').filter(entry => entry.startsWith('/') && !/(^|\/)node_modules\/\.bin$|node-gyp-bin|\/_npx\//.test(entry));
 
+/** How the service runs Tower. `publicUrls` are the tunnel or proxy origins it answers besides loopback (`--public-url`). */
+export interface ServiceOptions { port: number; node?: string; environment?: NodeJS.ProcessEnv; publicUrls?: string[] }
+
 /**
  * What the service starts, and with which environment: the user's PATH without npx's folders (only absolute folders),
  * who the user is (a service started by systemd has no login shell or name of its own), and Tower's own variables.
  */
-function serviceCommand(stateDir: string, options: { port: number; node?: string; environment?: NodeJS.ProcessEnv }) {
+function serviceCommand(stateDir: string, options: ServiceOptions) {
   const paths = runtimePaths(stateDir);
   const env = options.environment ?? process.env;
   const path = userPath(env.PATH).join(':');
   const variables: Record<string, string> = { PATH: path || '/usr/bin:/bin', HOME: env.HOME ?? homedir(), TOWER_SERVICE_LOG: join(paths.logs, 'tower.log') };
   for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'LANG', 'SHELL', 'USER', 'LOGNAME', 'TOWER_AUTO_UPDATE']) if (env[key]) variables[key] = env[key]!;
-  const argumentsList = [options.node ?? process.execPath, entryPoint(paths.current), 'run', '--no-open', '--port', String(options.port), '--state-dir', stateDir];
+  const argumentsList = [options.node ?? process.execPath, entryPoint(paths.current), 'run', '--no-open', '--port', String(options.port), '--state-dir', stateDir,
+    ...(options.publicUrls ?? []).flatMap(url => ['--public-url', url])];
   return { argumentsList, variables, log: join(paths.logs, 'tower.log') };
 }
 
 /** The launchd job that runs the installed `current` version with this state directory. */
-export function renderServicePlist(stateDir: string, options: { port: number; node?: string; environment?: NodeJS.ProcessEnv }): string {
+export function renderServicePlist(stateDir: string, options: ServiceOptions): string {
   const { argumentsList, variables, log } = serviceCommand(stateDir, options);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -201,7 +205,7 @@ const unitArgument = (value: string) => unitValue(value).replace(/\$/g, '$$$$');
  * The systemd unit that runs the installed `current` version with this state directory. Stopping or restarting it
  * ends only the web process: the worker, terminal host and their agents and shells go on, as they do under launchd.
  */
-export function renderServiceUnit(stateDir: string, manager: 'systemd-system' | 'systemd-user', options: { port: number; node?: string; environment?: NodeJS.ProcessEnv }): string {
+export function renderServiceUnit(stateDir: string, manager: 'systemd-system' | 'systemd-user', options: ServiceOptions): string {
   const { argumentsList, variables, log } = serviceCommand(stateDir, options);
   // A file named with spaces cannot be written to directly; its output then goes to the journal.
   const output = /\s/.test(log) ? 'journal' : `append:${log.replace(/%/g, '%%')}`;
@@ -245,7 +249,7 @@ const detail = (error: unknown) => String((error as { stderr?: unknown }).stderr
  * unexpectedly. The web process it starts brings up the worker and terminal host as usual. `start: false` only sets it
  * up, for a computer where Tower already runs and keeps serving until the next start.
  */
-export async function installService(stateDir: string, options: { port: number; node?: string; environment?: NodeJS.ProcessEnv; start?: boolean; warn?: (line: string) => void }): Promise<ServiceManager> {
+export async function installService(stateDir: string, options: ServiceOptions & { start?: boolean; warn?: (line: string) => void }): Promise<ServiceManager> {
   const manager = await serviceManager();
   if (!manager) throw new Error(process.platform === 'linux' ? `This computer does not run systemd, so Tower cannot keep itself running here. ${START_YOURSELF}`
     : `The background service is available on macOS and on Linux with systemd. ${START_YOURSELF}`);
@@ -254,10 +258,10 @@ export async function installService(stateDir: string, options: { port: number; 
   const environment = await serviceEnvironment(manager, options.environment ?? process.env, node, options.warn ?? (line => console.log(line)));
   const file = serviceFile(stateDir, manager);
   // Kept, so a later version can write the same service again with what it knows then (see refreshService).
-  await writeFile(join(runtimePaths(stateDir).root, 'service.json'), JSON.stringify({ manager, port: options.port, node, environment }), { mode: 0o600 });
+  await writeFile(join(runtimePaths(stateDir).root, 'service.json'), JSON.stringify({ manager, port: options.port, node, environment, publicUrls: options.publicUrls ?? [] }), { mode: 0o600 });
   if (manager === 'launchd') {
     await mkdir(dirname(file), { recursive: true });
-    await writeFile(file, renderServicePlist(stateDir, { port: options.port, node, environment }), { mode: 0o644 });
+    await writeFile(file, renderServicePlist(stateDir, { port: options.port, node, environment, publicUrls: options.publicUrls }), { mode: 0o644 });
     const domain = `gui/${process.getuid?.() ?? 501}`;
     await run('launchctl', ['bootout', domain, file]).catch(() => {});
     if (options.start === false) return manager;
@@ -270,7 +274,7 @@ export async function installService(stateDir: string, options: { port: number; 
   // A user's services stop when the user logs out unless systemd keeps that user's manager running.
   if (manager === 'systemd-user') await keepUserServices();
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, renderServiceUnit(stateDir, manager, { port: options.port, node, environment }), { mode: 0o644 });
+  await writeFile(file, renderServiceUnit(stateDir, manager, { port: options.port, node, environment, publicUrls: options.publicUrls }), { mode: 0o644 });
   const status = `${manager === 'systemd-user' ? 'systemctl --user' : 'systemctl'} status ${serviceUnit(stateDir)}`;
   try {
     await systemctl(manager, 'daemon-reload');
@@ -344,11 +348,16 @@ export async function rootOnly(folder: string, look: { lstat: (path: string) => 
  * Writes the installed service again with what this version knows about running it, when that differs; it takes effect
  * the next time the service starts. Started as the service, a new version keeps the service up to date this way.
  */
+/** What `installService` kept about the service; services set up before 1.141.1 kept no public URLs. */
+export async function savedService(stateDir: string): Promise<{ manager: ServiceManager; port: number; node: string; environment: NodeJS.ProcessEnv; publicUrls?: string[] } | undefined> {
+  return readFile(join(runtimePaths(stateDir).root, 'service.json'), 'utf8').then(text => JSON.parse(text), () => undefined);
+}
+
 export async function refreshService(stateDir: string): Promise<boolean> {
-  const saved = await readFile(join(runtimePaths(stateDir).root, 'service.json'), 'utf8').then(text => JSON.parse(text) as { manager: ServiceManager; port: number; node: string; environment: NodeJS.ProcessEnv }, () => undefined);
+  const saved = await savedService(stateDir);
   if (!saved || saved.manager !== await serviceManager()) return false;
   const file = serviceFile(stateDir, saved.manager);
-  const options = { port: saved.port, node: saved.node, environment: saved.environment };
+  const options = { port: saved.port, node: saved.node, environment: saved.environment, publicUrls: saved.publicUrls };
   const wanted = saved.manager === 'launchd' ? renderServicePlist(stateDir, options) : renderServiceUnit(stateDir, saved.manager, options);
   if (await readFile(file, 'utf8').catch(() => undefined) === wanted) return false;
   await writeFile(file, wanted, { mode: 0o644 });
