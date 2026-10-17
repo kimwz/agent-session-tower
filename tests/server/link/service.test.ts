@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { renderServicePlist, renderServiceUnit, rootOnly, runtimePaths, serviceLabel, serviceUnit, currentVersion, useVersion, installVersion, versionDirectory, entryPoint } from '../../../server/link/service.js';
-import { refuseTakeover, runLinkCommand, takeOver, type TakeOverSteps, type WebState } from '../../../server/link/cli.js';
+import { carriedPublicUrls, refuseTakeover, runLinkCommand, takeOver, type TakeOverSteps, type WebState } from '../../../server/link/cli.js';
 import { encodeJoinCode, joinCommand, releasePackage } from '../../../server/link/join-code.js';
 import { linkId } from '../../../server/link/identity.js';
 import { defaultStateDir } from '../../../server/state-dir.js';
@@ -27,6 +27,23 @@ test('the background service runs the current installed version with this state 
   assert.doesNotMatch(plist, /SECRET_TOKEN|never/, 'only the variables Tower needs are copied into the service');
   assert.match(plist, /<key>KeepAlive<\/key><dict><key>SuccessfulExit<\/key><false\/><\/dict>/);
   assert.match(plist, /<key>StandardOutPath<\/key><string>[^<]*\/logs\/tower\.log<\/string>/);
+});
+
+test('the service answers the public origins it was given, so a tunnel keeps reaching it after a restart', async t => {
+  const options = { port: 8000, node: '/usr/bin/node', environment: { PATH: '/usr/bin', HOME: '/home/someone' }, publicUrls: ['https://tower.example.com'] };
+  const plistArgs = [...renderServicePlist('/state', options).matchAll(/^ {4}<string>(.*)<\/string>$/gm)].map(match => match[1]);
+  assert.deepEqual(plistArgs.slice(-2), ['--public-url', 'https://tower.example.com']);
+  assert.match(renderServiceUnit('/state', 'systemd-user', options), /"--state-dir" "\/state" "--public-url" "https:\/\/tower\.example\.com"\n/);
+
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-public-url-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const command = { execPath: '/usr/bin/node', argv: ['bin/agent-session-tower.mjs', 'run', '--public-url', 'https://a.example.com/', '--public-url', 'https://b.example.com'], cwd: '/' };
+  assert.deepEqual(await carriedPublicUrls(stateDir, { service: false, command }), ['https://a.example.com', 'https://b.example.com'], 'a Tower started by hand hands over its origins');
+  assert.deepEqual(await carriedPublicUrls(stateDir, { service: true, command }), [], 'without a kept service there are none');
+  await mkdir(runtimePaths(stateDir).root, { recursive: true });
+  await writeFile(join(runtimePaths(stateDir).root, 'service.json'), JSON.stringify({ manager: 'launchd', port: 8000, node: '/usr/bin/node', environment: {}, publicUrls: ['https://kept.example.com'] }));
+  assert.deepEqual(await carriedPublicUrls(stateDir, { service: true }), ['https://kept.example.com'], 'a service set up again keeps its origins');
+  assert.deepEqual(await carriedPublicUrls(stateDir), ['https://kept.example.com']);
 });
 
 test('each state folder has its own service; the default one keeps the plain name', () => {
