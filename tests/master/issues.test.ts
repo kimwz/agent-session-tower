@@ -388,25 +388,28 @@ test('masters sharing one lookup database each query their own delegated work', 
   assert.notEqual(asked[0], asked[1], 'the same states of different work are not the same tables');
 });
 
-test('the web clears away closed issue masters\' data on its own, and knows an open issue master before the host saw it', async t => {
-  const stateDir = await temporaryFixture('tower-issue-clear-');
-  t.after(() => removeTemporaryFixture(stateDir));
-  const { data } = await masterPaths(stateDir);
-  const write = async (taskId: string, closedAt?: string, followed: unknown[] = []) => {
-    await mkdir(join(data, 'todo', taskId), { recursive: true });
-    await writeFile(join(data, 'todo', taskId, 'follow.json'), JSON.stringify({ version: 1, baselineAt: new Date().toISOString(), masterRuns: [], followed, ...(closedAt ? { closedAt } : {}) }), { mode: 0o600 });
+test('the web leaves closed issue masters\' data to the host: one due to be cleared away brings the host, which clears it', async t => {
+  const h = await harness(t);
+  const settingsPath = join(h.data, 'settings.json');
+  await writeFile(settingsPath, JSON.stringify({ ...JSON.parse(await readFile(settingsPath, 'utf8')), session: undefined }), { mode: 0o600 });
+  const write = async (taskId: string, closedAt: string, followed: unknown[] = []) => {
+    await mkdir(join(h.data, 'todo', taskId), { recursive: true });
+    await writeFile(join(h.data, 'todo', taskId, 'follow.json'), JSON.stringify({ version: 1, baselineAt: new Date().toISOString(), masterRuns: [], followed, closedAt }), { mode: 0o600 });
   };
-  await write('task-old', new Date(Date.now() - KEEP_CLOSED_MS - 1000).toISOString(), [{ id: 'x', kind: 'delegated', report: 'pending' }]);
-  await write('task-recent', new Date().toISOString());
+  await write('task-recent', new Date().toISOString(), [{ id: 'x', kind: 'delegated', report: 'pending' }]);
   let open = false;
-  const client = new MasterClient({ stateDir, credentials: () => undefined, issueMastersOpen: () => open });
+  const client = new MasterClient({ stateDir: h.dir, credentials: () => undefined, issueMastersOpen: () => open });
   t.after(() => client.dispose());
   const pendingWork = () => (client as unknown as { pendingWork(): Promise<boolean> }).pendingWork();
-  assert.equal(await pendingWork(), false, 'closed issue masters need no host, undelivered reports or not');
+  assert.equal(await pendingWork(), false, 'a closed issue master needs no host, undelivered reports or not');
   open = true;
   assert.equal(await pendingWork(), true, 'an open issue master the web knows of does');
   open = false;
-  client.start();
-  await until(async () => !(await stat(join(data, 'todo', 'task-old')).then(() => true, () => false)));
-  assert.ok((await stat(join(data, 'todo', 'task-recent'))).isDirectory());
+  await write('task-old', new Date(Date.now() - KEEP_CLOSED_MS - 1000).toISOString());
+  assert.equal(await pendingWork(), true, 'data due to be cleared away brings the host');
+  // The host clears it at its next look, and leaves the recent one.
+  await h.reopen().refresh();
+  await assert.rejects(stat(join(h.data, 'todo', 'task-old')), { code: 'ENOENT' });
+  assert.ok((await stat(join(h.data, 'todo', 'task-recent'))).isDirectory());
+  assert.equal(await pendingWork(), false);
 });

@@ -11,7 +11,7 @@ import { readPrivateJson } from '../stores/private-json.js';
 import { MASTER_PROTOCOL, type MasterHostReply } from './host.js';
 import type { VoiceTransportStage } from './voice-timings.js';
 import { masterPaths, type MasterPaths } from './paths.js';
-import { clearClosedIssueFiles, issueMastersPending } from './issue-files.js';
+import { issueFilesExpired, issueMastersPending } from './issue-files.js';
 import type { WebCredentials } from '../tower-tools/tower-client.js';
 import { TowerError, fromStatus, statusOf, type ErrorKind } from '../../shared/errors.js';
 import { audioSink } from '../http/sinks.js';
@@ -33,8 +33,8 @@ export interface MasterClientOptions {
   issueMastersOpen?: () => boolean | Promise<boolean>;
 }
 
-/** How often the web clears away closed issue masters' data, whether or not a host runs. */
-const CLEAR_MS = 24 * 60 * 60_000;
+/** How often the web looks for closed issue masters' data due to be cleared away, which the host does. */
+const EXPIRED_MS = 24 * 60 * 60_000;
 
 /**
  * The web side of the master host: starts it on first use, hands it this web's credentials, and relays its answers
@@ -45,7 +45,7 @@ export class MasterClient {
   private starting?: Promise<void>;
   private readonly streams = new Set<ClientRequest>();
   private heartbeat?: ReturnType<typeof setInterval>;
-  private clearing?: ReturnType<typeof setInterval>;
+  private expiring?: ReturnType<typeof setInterval>;
   private closed = false;
 
   constructor(private readonly options: MasterClientOptions) {}
@@ -63,22 +63,25 @@ export class MasterClient {
     });
     this.heartbeat = setInterval(tell, 15_000);
     this.heartbeat.unref();
-    const clear = () => { void this.hostPaths().then(paths => clearClosedIssueFiles(paths.data)).catch(error => {
-      console.error(`Closed issue masters' data could not be cleared away: ${(error as NodeJS.ErrnoException)?.code ?? 'error'}`);
-    }); };
-    clear();
-    this.clearing = setInterval(clear, CLEAR_MS);
-    this.clearing.unref();
+    // Only the host, which owns the issue masters, removes their data: one due to go brings it, and it idles out after.
+    this.expiring = setInterval(() => {
+      void this.hostPaths().then(paths => issueFilesExpired(paths.data)).then(expired => expired && !this.closed ? this.ensureHost() : undefined).catch(error => {
+        console.error(`Master could not clear away closed issue masters: ${(error as NodeJS.ErrnoException)?.code ?? (error === null || error === undefined ? undefined : statusOf(error)) ?? 'error'}`);
+      });
+    }, EXPIRED_MS);
+    this.expiring.unref();
   }
 
   /**
-   * Whether a master session exists, so the host should run to follow it: the main master's, an issue master the web
-   * knows open, or one whose session was open when the host last looked.
+   * Whether the host should run: a master session exists to follow (the main master's, an issue master the web knows
+   * open, or one whose session was open when the host last looked), or a closed issue master's data is due to be
+   * cleared away, which the host does.
    */
   private async pendingWork(): Promise<boolean> {
     const { data } = await this.hostPaths();
     const saved = await readPrivateJson(join(data, 'settings.json')).catch(() => undefined) as { session?: { sessionId?: unknown } } | undefined;
-    return typeof saved?.session?.sessionId === 'string' || Boolean(await this.options.issueMastersOpen?.()) || await issueMastersPending(data);
+    return typeof saved?.session?.sessionId === 'string' || Boolean(await this.options.issueMastersOpen?.()) || await issueMastersPending(data)
+      || await issueFilesExpired(data);
   }
 
   async call(method: string, args: Record<string, unknown> = {}): Promise<unknown> {
@@ -160,7 +163,7 @@ export class MasterClient {
   dispose(): void {
     this.closed = true;
     if (this.heartbeat) clearInterval(this.heartbeat);
-    if (this.clearing) clearInterval(this.clearing);
+    if (this.expiring) clearInterval(this.expiring);
     for (const stream of this.streams) stream.destroy();
     this.streams.clear();
   }
