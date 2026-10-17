@@ -189,3 +189,11 @@ test('a listing that names an object twice, on one page or across pages, is not 
   assert.equal((await client.scan('one/')).complete, false, 'one page');
   assert.equal((await client.scan('two/')).complete, false, 'across pages');
 });
+
+test('a listing stopped at its limit is not complete', async t => {
+  const bucket = await fakeBucket(t, { pageSize: 2 });
+  const client = new S3Client({ endpoint: bucket.endpoint, bucket: 'bucket', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret' });
+  for (let i = 0; i < 5; i++) bucket.objects.set(`tower/${i}`, { body: Buffer.from('x'), at: '2026-09-30T00:00:00Z' });
+  assert.equal((await client.scan('tower/', 3)).complete, false);
+  assert.equal((await client.scan('tower/', 10)).complete, true);
+});

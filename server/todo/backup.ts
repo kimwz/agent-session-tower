@@ -2,17 +2,20 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:
 import { TowerError } from '../../shared/errors.js';
 import type { TodoRestoreProgress } from '../../shared/todo/types.js';
 import type { TodoFiles } from './files.js';
-import type { TodoStore, TodoTables } from './store.js';
+import { mergeKeys, type TodoFileKey, type TodoStore, type TodoTables } from './store.js';
 
 /**
  * The todos in Tower's backups. The rows go into the backup itself (`web.todos`, encrypted with its passphrase); the
- * attachments, too large for it, go beside it as objects encrypted with this computer's own key, which only the
- * backup carries. So a changed passphrase never makes them upload again, and every backup opens its attachments.
+ * attachments, too large for it, go beside it as objects encrypted with this computer's own key, which only backups
+ * carry. So a changed passphrase never makes them upload again, and every backup opens its attachments.
  *
  * Objects are `<prefix>tower-todo-files/<namespace>/<sha256>/<i>-of-<n>`: pieces of at most 8 MiB, each sealed with
  * AES-256-GCM over `sha256|i|n`. The namespace is `<host>-<machine>-<key id>`, so a new key (a new file) never reuses
- * or overwrites objects another key sealed. Beside each backup, `<backup>.todo-files` (sealed with the key) lists the
- * objects it needs; this computer's objects that neither its file nor a backup still there needs are removed.
+ * or overwrites objects another key sealed. Objects already there are not sent again, and Tower never removes any.
+ *
+ * A restore keeps the keys of the backup it restored (TodoStore.fileKeys), and every later backup carries them beside
+ * this computer's own (`files.keys`): attachments sealed under another key stay openable from the newest backup alone,
+ * whichever older backups are removed.
  *
  * The backup service gives the bucket (TodoObjectStore); this module never reaches into the backup's own code.
  */
@@ -22,30 +25,31 @@ export interface TodoObjectStore {
   put(key: string, body: Buffer): Promise<void>;
   /** Fails for a missing object. */
   get(key: string, maxBytes: number): Promise<Buffer>;
-  delete(key: string): Promise<void>;
   /** The keys under `prefix`, and whether the listing reached its end. */
   scan(prefix: string): Promise<{ keys: string[]; complete: boolean }>;
 }
 
-/** The todos part of a backup (`web.todos`). `files` says where its attachments are and opens them. */
-export interface TodoBackupPart { schema: number; tables: TodoTables; files?: { namespace: string; key: string } }
+/**
+ * The todos part of a backup (`web.todos`). `files` says where this computer's attachments are and opens them, and
+ * `files.keys` where those sealed under other keys are; `exported` marks a downloaded backup, whose attachments only an
+ * automatic backup put in the bucket.
+ */
+export interface TodoBackupPart { schema: number; tables: TodoTables; files?: TodoFileKey & { keys?: TodoFileKey[] }; exported?: true }
 
-/** A backup being made: its part, and the attachments its rows name (sha256 → size). */
-export interface TodoBackupSnapshot { part: TodoBackupPart; contents: Map<string, number> }
+/** A backup being made: its part, the attachments it names (sha256 → size), and whether the file holds more than this build knows (`newer`). */
+export interface TodoBackupSnapshot { part: TodoBackupPart; contents: Map<string, number>; newer: boolean }
 
 export const TODO_FILES_FOLDER = 'tower-todo-files/';
-/** What follows a backup's key in the name of the list of objects it needs. */
-export const TODO_SIDECAR = '.todo-files';
 const PIECE_BYTES = 8 * 1024 * 1024;
+/** Attachments the bucket refuses one after another before the rest of a round's are given up. */
+const REFUSALS_IN_A_ROW = 3;
 const SEAL_BYTES = 12 + 16;
-const MAX_SIDECAR_BYTES = 32 * 1024 * 1024;
 const NAMESPACE = /^[a-z0-9-]{1,80}-[0-9a-f]{16}$/;
 const KEY = /^[A-Za-z0-9_-]{43}$/;
 
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const keyId = (key: Buffer) => createHash('sha256').update(key).digest('hex').slice(0, 16);
 const pieceName = (sha256: string, index: number, count: number) => `${sha256}/${index}-of-${count}`;
-const baseName = (key: string) => key.slice(key.lastIndexOf('/') + 1);
 
 function seal(key: Buffer, label: string, plain: Buffer): Buffer {
   const iv = randomBytes(12);
@@ -82,6 +86,8 @@ function wholeContents(keys: string[], base: string): Map<string, number> {
   return whole;
 }
 
+const validKey = (value: unknown): value is TodoFileKey => record(value) && typeof value.namespace === 'string' && NAMESPACE.test(value.namespace) && typeof value.key === 'string' && KEY.test(value.key);
+
 /** A backup's todos part, checked for its shape; the store checks the rows themselves when it restores them. */
 export function parseTodoPart(value: unknown): TodoBackupPart {
   const wrong = () => new TowerError('invalid', '백업의 할 일이 올바르지 않습니다.');
@@ -91,10 +97,14 @@ export function parseTodoPart(value: unknown): TodoBackupPart {
     if (!Array.isArray(rows) || !rows.every(record)) throw wrong();
     tables[name] = rows as Record<string, unknown>[];
   }
-  const files = value.files;
-  if (files !== undefined && !(record(files) && typeof files.namespace === 'string' && NAMESPACE.test(files.namespace) && typeof files.key === 'string' && KEY.test(files.key))) throw wrong();
-  return { schema: value.schema as number, tables, ...(files ? { files: { namespace: files.namespace as string, key: files.key as string } } : {}) };
+  const files = value.files, keys = record(files) ? files.keys : undefined;
+  if (files !== undefined && !(validKey(files) && (keys === undefined || (Array.isArray(keys) && keys.every(validKey))))) throw wrong();
+  return { schema: value.schema as number, tables,
+    ...(validKey(files) ? { files: { namespace: files.namespace, key: files.key, ...(Array.isArray(keys) ? { keys: mergeKeys([], keys as TodoFileKey[]) } : {}) } } : {}) };
 }
+
+/** Every key a backup's part carries: its computer's own first, then the others. */
+const keysOf = (part: TodoBackupPart): TodoFileKey[] => part.files ? mergeKeys([{ namespace: part.files.namespace, key: part.files.key }], part.files.keys ?? []) : [];
 
 export interface TodoBackupOptions {
   /** The size of an attachment's pieces (tests make it small). */
@@ -105,47 +115,74 @@ export interface TodoBackupOptions {
 
 export class TodoBackup {
   private readonly pieceBytes: number;
+  /** Counts restores that replaced the todos; a backup round started before one does not speak for what is there now. */
+  private restores = 0;
+  /** The last restore's attachments being brought back. */
   private bringing?: { stop: AbortController; done: Promise<void> };
 
   constructor(private readonly store: TodoStore, private readonly files: TodoFiles, private readonly options: TodoBackupOptions = {}) {
     this.pieceBytes = options.pieceBytes ?? PIECE_BYTES;
   }
 
-  /** The todos part of a backup and the attachments it names, read at one moment; undefined when the todos cannot be read. */
+  /** This computer's namespace for its current key. */
+  private own(computer: string, key: string): TodoFileKey { return { namespace: `${computer}-${keyId(Buffer.from(key, 'base64url'))}`, key }; }
+
+  /**
+   * The todos part of a backup and the attachments it names, read at one moment, with every key this file knows;
+   * undefined when the todos cannot be read.
+   */
   snapshot(computer: string): TodoBackupSnapshot | undefined {
     const data = this.store.backupData();
     if (!data) return undefined;
-    const files = data.key ? { namespace: `${computer}-${keyId(Buffer.from(data.key, 'base64url'))}`, key: data.key } : undefined;
-    return { part: { schema: data.schema, tables: data.tables, ...(files ? { files } : {}) }, contents: data.contents };
+    const own = data.key ? this.own(computer, data.key) : undefined;
+    const keys = own ? mergeKeys([own], this.store.fileKeys()).slice(1) : [];
+    return { part: { schema: data.schema, tables: data.tables, ...(own ? { files: { ...own, ...(keys.length ? { keys } : {}) } } : {}) }, contents: data.contents, newer: data.newer };
   }
 
   /**
-   * Uploads the attachments a backup names that its namespace lacks (all of them when the namespace cannot be
-   * listed), and answers the list of objects to keep beside the backup `backupKey`, and whether the namespace was
-   * listed in full. Contents missing on this computer are left out; contents damaged here (not what their hash says)
-   * are left out too, and answered in `damaged`, so the copies already in the bucket stay as they are.
+   * Uploads the attachments a backup names that this computer's namespace lacks (all of them when it cannot be listed).
+   * Answers what did not go up: contents damaged here (`damaged`: not what their hash says, so the copies in the
+   * bucket stay as they are), contents that could not be read or sent (`failed`), and contents this computer does not
+   * have or cannot look at (`missing`); a backup still carries the keys that open copies sealed elsewhere. A failure
+   * of one object leaves the others to try; a bucket that does not answer at all (an error marked `unreachable`), or
+   * refuses several in a row, fails the rest at once. Once `signal` says Tower is stopping, a failure is the backup's.
    */
-  async upload(objects: TodoObjectStore, prefix: string, snapshot: TodoBackupSnapshot, backupKey: string): Promise<{ sidecar?: Buffer; listed: boolean; damaged: string[] }> {
+  async upload(objects: TodoObjectStore, prefix: string, snapshot: TodoBackupSnapshot, signal?: AbortSignal): Promise<{ damaged: string[]; failed: string[]; missing: string[] }> {
     const files = snapshot.part.files;
-    if (!files) return { listed: false, damaged: [] };
+    const damaged: string[] = [], failed: string[] = [], missing: string[] = [];
+    if (!files) return { damaged, failed, missing: [...snapshot.contents.keys()] };
     const key = Buffer.from(files.key, 'base64url');
     const base = `${prefix}${TODO_FILES_FOLDER}${files.namespace}/`;
-    let present = new Map<string, number>(), listed = false;
-    try {
-      const listing = await objects.scan(base);
-      present = wholeContents(listing.keys, base);
-      listed = listing.complete;
-    } catch (error) { console.warn(`Todo attachments in the backup could not be listed; all are uploaded: ${error instanceof Error ? error.message : String(error)}`); }
-    const kept: string[] = [], damaged: string[] = [];
+    let present = new Map<string, number>();
+    try { present = wholeContents((await objects.scan(base)).keys, base); }
+    catch (error) { console.warn(`Todo attachments in the backup could not be listed; all are uploaded: ${error instanceof Error ? error.message : String(error)}`); }
+    const wanted: [string, number][] = [];
     for (const [sha256, size] of snapshot.contents) {
-      if (present.has(sha256)) { kept.push(sha256); continue; }
-      if (!await this.files.hasContent(sha256, size)) continue;
-      if (await this.uploadContent(objects, base, key, sha256, size)) kept.push(sha256);
-      else damaged.push(sha256);
+      if (present.has(sha256)) continue;
+      const here = await this.files.hasContent(sha256, size).catch(error => {
+        console.warn(`Todo attachment ${sha256} on this computer could not be looked at: ${error instanceof Error ? error.message : String(error)}`);
+        return false;
+      });
+      if (here) wanted.push([sha256, size]); else missing.push(sha256);
     }
-    const sidecar = seal(key, `sidecar|${baseName(backupKey)}`, Buffer.from(JSON.stringify({ version: 1, files: [{ namespace: files.namespace, sha256: kept }] })));
-    return { sidecar, listed, damaged };
+    let refused = 0;
+    for (const [index, [sha256, size]] of wanted.entries()) {
+      try {
+        if (!await this.uploadContent(objects, base, key, sha256, size)) damaged.push(sha256);
+        else refused = 0;
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        console.warn(`Todo attachment ${sha256} was not backed up: ${error instanceof Error ? error.message : String(error)}`);
+        // A bucket that does not answer, or refuses several in a row, would refuse the rest too.
+        if ((error as { unreachable?: boolean }).unreachable || ++refused >= REFUSALS_IN_A_ROW) { failed.push(...wanted.slice(index).map(([item]) => item)); break; }
+        failed.push(sha256);
+      }
+    }
+    return { damaged, failed, missing };
   }
+
+  /** Moves each time a restore replaces the todos. */
+  generation(): number { return this.restores; }
 
   /**
    * Uploads one attachment in sealed pieces. Its contents are checked against their hash before anything is sent:
@@ -176,49 +213,32 @@ export class TodoBackup {
   }
 
   /**
-   * Removes this computer's attachment objects (`<computer>-*` namespaces) that neither its file names (in the current
-   * namespace) nor any backup still there lists. Skipped, answering why, when the file cannot say what it names, a
-   * backup's list cannot be read, or a listing is incomplete.
+   * Replaces the todos with a backup's part, keeping the keys it carries, then brings back the attachments this
+   * computer lacks from wherever the bucket holds them, in the background (see TodoOverview.restore). `computer` names
+   * this computer in namespaces. Answers where the file was copied first, and the keys the backup carried.
    */
-  async cleanup(objects: TodoObjectStore, prefix: string, computer: string, backups: string[]): Promise<string | undefined> {
-    const named = this.store.fileContents();
-    const key = this.store.filesKey();
-    if (!named || !key) return 'the todo file cannot say which attachments it names';
-    const current = `${computer}-${keyId(Buffer.from(key, 'base64url'))}`;
-    const keep = new Set([...named.keys()].map(sha256 => `${current}/${sha256}`));
-    for (const backup of backups) {
-      let list: unknown;
-      try { list = JSON.parse(unseal(Buffer.from(key, 'base64url'), `sidecar|${baseName(backup)}`, await objects.get(`${backup}${TODO_SIDECAR}`, MAX_SIDECAR_BYTES)).toString('utf8')); }
-      catch { return `the attachment list of ${baseName(backup)} cannot be read`; }
-      if (!record(list) || !Array.isArray(list.files)) return `the attachment list of ${baseName(backup)} is not valid`;
-      for (const entry of list.files) {
-        if (!record(entry) || typeof entry.namespace !== 'string' || !Array.isArray(entry.sha256)) return `the attachment list of ${baseName(backup)} is not valid`;
-        for (const sha256 of entry.sha256) keep.add(`${entry.namespace}/${String(sha256)}`);
-      }
-    }
-    const base = `${prefix}${TODO_FILES_FOLDER}${computer}-`;
-    const listing = await objects.scan(base);
-    if (!listing.complete) return 'the attachment objects could not be listed in full';
-    for (const item of listing.keys) {
-      // Exactly this computer's: another whose name starts the same has more before its key id.
-      const found = /^([0-9a-f]{16})\/([0-9a-f]{64})\/\d{1,6}-of-\d{1,6}$/.exec(item.slice(base.length));
-      if (found && !keep.has(`${computer}-${found[1]}/${found[2]}`)) await objects.delete(item);
-    }
-    return undefined;
-  }
-
-  /**
-   * Replaces the todos with a backup's part, then brings back the attachments this computer lacks from where the
-   * backup put them, in the background (see TodoOverview.restore). Answers where the file was copied first.
-   */
-  async restore(value: unknown, objects: () => TodoObjectStore, prefix: string): Promise<{ before: string }> {
+  async restore(value: unknown, objects: () => TodoObjectStore, prefix: string, computer: string): Promise<{ before: string; keys: TodoFileKey[] }> {
     const part = parseTodoPart(value);
+    const before = await this.files.contentTurnOf(() => this.store.restoreData(part.schema, part.tables, keysOf(part)));
+    this.restores++;
+    // Only once these rows are in does the earlier restore's bringing back stop: a refused restore leaves it going.
     this.close();
-    const before = await this.files.contentTurnOf(() => this.store.restoreData(part.schema, part.tables));
     const stop = new AbortController();
-    const done = this.bringBack(part, objects, prefix, stop.signal).catch(error => console.error(`Todo attachments of the restored backup could not be brought back: ${error instanceof Error ? error.message : String(error)}`));
+    const progress: TodoRestoreProgress & { fetched?: number } = { state: 'downloading', total: 0, missing: 0 };
+    const own = this.store.filesKey();
+    // This computer's own copies first, then the backup's, then any other key this file knows.
+    const sources = mergeKeys(own ? [this.own(computer, own)] : [], mergeKeys(keysOf(part), this.store.fileKeys()));
+    const done = this.bringBack(sources, objects, prefix, stop.signal, progress)
+      .catch(error => {
+        console.error(`Todo attachments of the restored backup could not be brought back: ${error instanceof Error ? error.message : String(error)}`);
+        // Whatever stopped it, the page is not left waiting: what was not brought back counts as missing.
+        if (stop.signal.aborted) return;
+        progress.state = 'partial';
+        progress.missing = progress.total - (progress.fetched ?? 0);
+        this.store.setRestoreProgress(progress);
+      });
     this.bringing = { stop, done };
-    return { before };
+    return { before, keys: keysOf(part) };
   }
 
   /** Settles when the attachments of the last restore are back, or given up on. */
@@ -227,41 +247,64 @@ export class TodoBackup {
   /** Stops bringing back attachments; what is back stays. */
   close(): void { this.bringing?.stop.abort(); }
 
-  private async bringBack(part: TodoBackupPart, objects: () => TodoObjectStore, prefix: string, signal: AbortSignal): Promise<void> {
+  private async bringBack(sources: TodoFileKey[], objects: () => TodoObjectStore, prefix: string, signal: AbortSignal, progress: TodoRestoreProgress & { fetched?: number }): Promise<void> {
+    // Each step that shows something first checks this restore is still the last one: a later one owns the page.
+    const show = (progress: TodoRestoreProgress) => { if (!signal.aborted) this.store.setRestoreProgress(progress); };
     const wanted: [string, number][] = [];
-    for (const [sha256, size] of this.store.fileContents() ?? []) if (!await this.files.hasContent(sha256, size)) wanted.push([sha256, size]);
-    const progress: TodoRestoreProgress = { state: 'downloading', total: wanted.length, missing: 0 };
-    this.store.setRestoreProgress(progress);
-    const files = part.files;
-    if (wanted.length && files) {
-      const key = Buffer.from(files.key, 'base64url');
-      const base = `${prefix}${TODO_FILES_FOLDER}${files.namespace}/`;
-      let bucket: TodoObjectStore | undefined, counts = new Map<string, number>(), listed = false;
-      try {
-        bucket = objects();
-        const listing = await bucket.scan(base);
-        counts = wholeContents(listing.keys, base);
-        listed = listing.complete;
-      } catch (error) { console.warn(`Todo attachments of the restored backup could not be listed: ${error instanceof Error ? error.message : String(error)}`); }
+    // Contents here that are not what their hash says (damaged, or replaced in place) are brought back too.
+    for (const [sha256, size] of this.store.fileContents() ?? []) {
+      if (!await this.verified(sha256, size)) wanted.push([sha256, size]);
+      if (signal.aborted) return;
+    }
+    progress.total = wanted.length;
+    progress.fetched = 0;
+    show(progress);
+    if (wanted.length && sources.length) {
+      let bucket: TodoObjectStore | undefined;
+      try { bucket = objects(); }
+      catch (error) { console.warn(`The backup bucket cannot be reached to bring attachments back: ${error instanceof Error ? error.message : String(error)}`); }
+      // What each namespace holds whole; one that cannot be listed in full is still asked as this build would store.
+      const listed: { base: string; key: Buffer; counts: Map<string, number>; complete: boolean }[] = [];
+      for (const source of bucket ? sources : []) {
+        const base = `${prefix}${TODO_FILES_FOLDER}${source.namespace}/`;
+        try { const listing = await bucket!.scan(base); listed.push({ base, key: Buffer.from(source.key, 'base64url'), counts: wholeContents(listing.keys, base), complete: listing.complete }); }
+        catch (error) {
+          console.warn(`Todo attachments under ${source.namespace} could not be listed: ${error instanceof Error ? error.message : String(error)}`);
+          listed.push({ base, key: Buffer.from(source.key, 'base64url'), counts: new Map(), complete: false });
+        }
+      }
       for (const [sha256, size] of wanted) {
         if (signal.aborted) return;
-        // Listed in full, a content not there is not in the bucket; otherwise it is asked for as this build would have stored it.
-        const count = counts.get(sha256) ?? (listed ? undefined : Math.max(1, Math.ceil(size / this.pieceBytes)));
-        try {
-          if (!bucket || count === undefined) throw new TowerError('not-found', 'not in the backup');
-          if (!await this.files.hasContent(sha256, size)) await this.files.importContent(sha256, size, this.pieces(bucket, base, key, sha256, count, signal));
-        } catch (error) {
-          if (signal.aborted) return;
-          progress.missing++;
-          if (!(error instanceof TowerError && error.kind === 'not-found')) console.warn(`Todo attachment ${sha256} could not be brought back: ${error instanceof Error ? error.message : String(error)}`);
+        let back = false;
+        for (const place of listed) {
+          const count = place.counts.get(sha256) ?? (place.complete ? undefined : Math.max(1, Math.ceil(size / this.pieceBytes)));
+          if (count === undefined) continue;
+          try {
+            if (!await this.verified(sha256, size)) await this.files.importContent(sha256, size, this.pieces(bucket!, place.base, place.key, sha256, count, signal));
+            back = true;
+            break;
+          } catch (error) {
+            if (signal.aborted) return;
+            console.warn(`Todo attachment ${sha256} could not be brought back from ${place.base}: ${error instanceof Error ? error.message : String(error)}`);
+          }
         }
-        this.store.setRestoreProgress(progress);
+        if (back) progress.fetched!++; else progress.missing++;
+        show(progress);
       }
     } else progress.missing = wanted.length;
+    if (signal.aborted) return;
     progress.state = progress.missing ? 'partial' : 'done';
-    this.store.setRestoreProgress(progress);
+    show(progress);
     this.store.touch();
     this.options.onChange?.();
+  }
+
+  /** Whether local contents are there and right; one that cannot be read counts as not, so it is fetched again. */
+  private verified(sha256: string, size: number): Promise<boolean> {
+    return this.files.verifyContent(sha256, size).catch(error => {
+      console.warn(`Todo attachment ${sha256} on this computer could not be checked; it is brought back: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    });
   }
 
   private async *pieces(bucket: TodoObjectStore, base: string, key: Buffer, sha256: string, count: number, signal: AbortSignal): AsyncGenerator<Buffer> {

@@ -18,6 +18,8 @@ export interface BackupPreview {
   skills: number;
   /** Made on another computer: its triggers and Slack would also run there while its Tower is on. */
   otherComputer: boolean;
+  /** A downloaded backup whose todos have attachments: their contents are not in it, and a restore fetches them from the bucket if still there. */
+  todoFilesFetched?: true;
 }
 
 /** Where the last restore is: waiting for the execution worker to take its part, or done. */

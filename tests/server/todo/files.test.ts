@@ -11,7 +11,7 @@ import { TodoRequestSchema, type TodoOp } from '../../../shared/todo/ops.js';
 import { TODO_FILE_MAX_BYTES } from '../../../shared/todo/types.js';
 import { TODO_UPLOAD_TTL_MS, TodoFiles, todoFilePath } from '../../../server/todo/files.js';
 import { TODO_SCHEMA_STEP } from '../../../server/todo/schema.js';
-import { TODO_RETENTION_MS, TodoStore } from '../../../server/todo/store.js';
+import { TODO_RETENTION_MS, TodoStore, type TodoTables } from '../../../server/todo/store.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 const kind = (error: unknown) => error instanceof TowerError ? error.kind : undefined;
@@ -273,14 +273,16 @@ test('a cleanup waiting its turn keeps contents an upload moved into place after
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const turn = files.contentTurnOf.bind(files);
-  let first = true;
+  let first = true, entered!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; });
   files.contentTurnOf = <T>(work: () => T | Promise<T>) => {
     if (!first) return turn(work);
     first = false;
+    entered();
     return gate.then(() => turn(work));
   };
   const cleaning = files.purge();
-  await new Promise(resolve => setTimeout(resolve, 50));
+  await waiting;
   const attach = store.attach.bind(store);
   store.attach = () => { throw new Error('stopped'); };
   await assert.rejects(files.completeUpload(started.id), /stopped/);
@@ -299,4 +301,102 @@ test('contents with another link to them are not served', async t => {
   const done = await upload('t', Buffer.from('linked elsewhere'));
   await link(todoFilePath(dir, done.file.sha256), join(dir, 'elsewhere'));
   await assert.rejects(files.openFile(done.file.id), (error: unknown) => kind(error) === 'not-found');
+});
+
+test('contents only a kept copy from before a restore names stay, so going back to it finds them', async t => {
+  const { apply, store, files, upload, tick } = await fixture(t);
+  apply({ op: 'task.create', id: 't', content: 'Task' });
+  const content = Buffer.from('only in the copy before the restore');
+  await upload('t', content);
+  const tables = store.backupData()!.tables;
+  store.restoreData(TODO_SCHEMA_STEP, { ...tables, todo_files: [] });
+  tick(TODO_RETENTION_MS + 1000);
+  store.purge(); await files.purge();
+  assert.ok(await files.hasContent(sha(content), content.length));
+});
+
+test('the same contents uploaded again replace a damaged or linked copy', async t => {
+  const { dir, apply, store, upload } = await fixture(t);
+  apply({ op: 'task.create', id: 't', content: 'Task' });
+  const content = Buffer.from('good bytes, same size as the damage');
+  const first = await upload('t', content);
+  await writeFile(todoFilePath(dir, sha(content)), Buffer.alloc(content.length, 0x42));
+  assert.equal(store.detail('t').files[0]?.missing, undefined, 'the size still matches');
+  await upload('t', content);
+  assert.deepEqual(await readFile(todoFilePath(dir, sha(content))), content);
+  await link(todoFilePath(dir, sha(content)), join(dir, 'elsewhere'));
+  assert.equal(store.detail('t').files.find(file => file.id === first.file.id)?.missing, true, 'a linked copy cannot be used');
+  await upload('t', content);
+  assert.equal((await stat(todoFilePath(dir, sha(content)))).nlink, 1);
+  assert.equal(store.detail('t').files.some(file => file.missing), false);
+});
+
+test('a task’s detail marks contents missing by the same test that serving makes', async t => {
+  const { dir, apply, store, files, upload } = await fixture(t);
+  apply({ op: 'task.create', id: 't', content: 'Task' });
+  const done = await upload('t', Buffer.from('contents of one size'));
+  await writeFile(todoFilePath(dir, done.file.sha256), Buffer.from('another size'));
+  assert.equal(store.detail('t').files[0]?.missing, true);
+  await assert.rejects(files.openFile(done.file.id), (error: unknown) => kind(error) === 'not-found');
+});
+
+test('a restore refused for an unknown table, column or a broken reference leaves the rows and the revision as they were', async t => {
+  const { apply, store } = await fixture(t);
+  apply({ op: 'task.create', id: 't', content: 'Task' });
+  const tables = store.backupData()!.tables;
+  const before = { tables: store.backupData()!.tables, revision: store.revision() };
+  const cases: [string, TodoTables][] = [
+    ['an unknown table', { ...tables, todo_future: [{ id: 'x' }] }],
+    ['an unknown column', { ...tables, todo_tasks: tables.todo_tasks!.map(row => ({ ...row, effort: 1 })) }],
+    ['a task in a project that is not there', { ...tables, todo_tasks: tables.todo_tasks!.map(row => ({ ...row, project_id: 'gone' })) }],
+  ];
+  for (const [what, bad] of cases) {
+    assert.throws(() => store.restoreData(TODO_SCHEMA_STEP, bad), (error: unknown) => kind(error) === 'invalid' || /FOREIGN KEY/.test(String(error)), what);
+    assert.deepEqual(store.backupData()!.tables, before.tables, what);
+    assert.equal(store.revision(), before.revision, what);
+  }
+});
+
+test('a copy from before a restore that cannot be read does not stop the cleanup', async t => {
+  const { dir, apply, store, files, upload, tick } = await fixture(t);
+  apply({ op: 'task.create', id: 't', content: 'Task' });
+  const done = await upload('t', Buffer.from('deleted for good'));
+  await writeFile(join(dir, 'todo-restore-before-20261017T090000000Z.sqlite'), Buffer.concat([Buffer.from('SQLite format 3\0'), Buffer.alloc(84, 0xff)]));
+  apply({ op: 'file.delete', id: done.file.id });
+  tick(TODO_RETENTION_MS + 1000);
+  store.purge(); await files.purge();
+  assert.equal(await files.hasContent(done.file.sha256, done.file.size), false);
+});
+
+test('a restore whose projects or tasks do not form the trees the store keeps is refused and changes nothing', async t => {
+  const { apply, store } = await fixture(t);
+  apply({ op: 'project.create', id: 'p', name: 'P' }, { op: 'project.create', id: 'q', name: 'Q', parentId: 'p' }, { op: 'project.create', id: 'other', name: 'Other' },
+    { op: 'section.create', id: 's', projectId: 'other', name: 'S' },
+    { op: 'task.create', id: 'a', projectId: 'p', content: 'A' }, { op: 'task.create', id: 'b', parentId: 'a', content: 'B' });
+  const tables = store.backupData()!.tables;
+  const before = { tables: store.backupData()!.tables, revision: store.revision() };
+  const task = (id: string, change: Record<string, unknown>) => tables.todo_tasks!.map(row => row.id === id ? { ...row, ...change } : row);
+  const deep = ['d1', 'd2', 'd3', 'd4', 'd5'].map((id, index, all) => ({ ...tables.todo_tasks![0]!, id, parent_id: index ? all[index - 1] : 'a', sort_key: 'V' }));
+  const cases: [string, TodoTables][] = [
+    ['a task its own parent', { ...tables, todo_tasks: task('a', { parent_id: 'a' }) }],
+    ['two tasks each the other’s parent', { ...tables, todo_tasks: task('a', { parent_id: 'b' }) }],
+    ['a project cycle', { ...tables, todo_projects: tables.todo_projects!.map(row => row.id === 'p' ? { ...row, parent_id: 'q' } : row) }],
+    ['sub-tasks five levels down', { ...tables, todo_tasks: [...tables.todo_tasks!, ...deep] }],
+    ['a sub-task in another project', { ...tables, todo_tasks: task('b', { project_id: 'other' }) }],
+    ['a section of another project', { ...tables, todo_tasks: task('a', { section_id: 's' }) }],
+  ];
+  for (const [what, bad] of cases) {
+    assert.throws(() => store.restoreData(TODO_SCHEMA_STEP, bad), (error: unknown) => kind(error) === 'invalid', what);
+    assert.deepEqual(store.backupData()!.tables, before.tables, what);
+    assert.equal(store.revision(), before.revision, what);
+  }
+});
+
+test('two restores in one millisecond each keep their own copy of the file before them', async t => {
+  const { dir, store } = await fixture(t);
+  const tables = store.backupData()!.tables;
+  const first = store.restoreData(TODO_SCHEMA_STEP, tables);
+  const second = store.restoreData(TODO_SCHEMA_STEP, tables);
+  assert.notEqual(first, second);
+  assert.equal((await readdir(dir)).filter(name => name.startsWith('todo-restore-before-')).length, 2);
 });

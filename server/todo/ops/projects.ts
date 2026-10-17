@@ -4,6 +4,8 @@ import { invalid, missing, stale, type TodoContext } from '../context.js';
 
 /** Projects nest at most this many levels (a top-level project is level 1). */
 export const MAX_PROJECT_LEVELS = 3;
+/** Walks up and down stop here even in a file that broke the rules (a cycle never hangs a query). */
+const WALK_LIMIT = MAX_PROJECT_LEVELS + 2;
 
 interface ProjectRow { id: string; parent_id: string | null; inbox: number; archived_at: string | null; deleted_at: string | null; deleted_with: string | null }
 interface SectionRow { id: string; project_id: string; deleted_at: string | null; deleted_with: string | null }
@@ -20,10 +22,10 @@ export function liveSection(ctx: TodoContext, id: string): SectionRow {
 }
 
 const level = (ctx: TodoContext, id: string) => ctx.get<{ n: number }>(`WITH RECURSIVE up(id, n) AS (SELECT parent_id, 1 FROM todo_projects WHERE id = ?
-  UNION ALL SELECT p.parent_id, up.n + 1 FROM todo_projects p JOIN up ON p.id = up.id WHERE up.id IS NOT NULL) SELECT MAX(n) AS n FROM up`, id)?.n ?? 1;
+  UNION ALL SELECT p.parent_id, up.n + 1 FROM todo_projects p JOIN up ON p.id = up.id WHERE up.id IS NOT NULL AND up.n < ${WALK_LIMIT}) SELECT MAX(n) AS n FROM up`, id)?.n ?? 1;
 /** The project and every project below it. */
 const subtree = (ctx: TodoContext, id: string) => ctx.all<ProjectRow & { depth: number }>(`WITH RECURSIVE down(id, depth) AS (SELECT ?, 0
-  UNION ALL SELECT p.id, down.depth + 1 FROM todo_projects p JOIN down ON p.parent_id = down.id) SELECT p.*, down.depth AS depth FROM down JOIN todo_projects p ON p.id = down.id`, id);
+  UNION ALL SELECT p.id, down.depth + 1 FROM todo_projects p JOIN down ON p.parent_id = down.id WHERE down.depth < ${WALK_LIMIT}) SELECT p.*, down.depth AS depth FROM down JOIN todo_projects p ON p.id = down.id`, id);
 
 function parentFor(ctx: TodoContext, parentId: string | null | undefined, height: number): string | null {
   if (!parentId) return null;

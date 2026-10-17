@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { constants, existsSync, lstatSync, openSync, closeSync, fchmodSync, readdirSync, rmSync } from 'node:fs';
+import { constants, lstatSync, openSync, closeSync, fchmodSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { TowerError } from '../../shared/errors.js';
@@ -7,12 +7,12 @@ import type { TodoOp, TodoOpName, TodoOpOf, TodoRequest } from '../../shared/tod
 import type { TodoAvailability, TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoRestoreProgress, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { nodeVerified, sqlitePatched } from '../storage/runtime.js';
 import { TodoContext } from './context.js';
-import { checkTodoFileRow, todoFilePath } from './files.js';
+import { checkTodoFileRow, todoFilePath, usableContent } from './files.js';
 import { createComment, deleteComment, updateComment } from './ops/comments.js';
 import { attachFile, checkAttachable, deleteFile, restoreFile, type NewTodoFile } from './ops/files.js';
 import { createLink, deleteLink } from './ops/links.js';
-import { createLabel, createProject, createSection, deleteLabel, deleteProject, deleteSection, moveLabel, moveProject, moveSection, restoreLabel, restoreProject, restoreSection, updateLabel, updateProject, updateSection } from './ops/projects.js';
-import { completeTask, createTask, deleteTask, moveTask, restoreTask, uncompleteTask, updateTask } from './ops/tasks.js';
+import { MAX_PROJECT_LEVELS, createLabel, createProject, createSection, deleteLabel, deleteProject, deleteSection, moveLabel, moveProject, moveSection, restoreLabel, restoreProject, restoreSection, updateLabel, updateProject, updateSection } from './ops/projects.js';
+import { MAX_TASK_DEPTH, completeTask, createTask, deleteTask, moveTask, restoreTask, uncompleteTask, updateTask } from './ops/tasks.js';
 import { TASK_COLUMNS, VISIBLE_FILE, commentOf, completionOf, eventOf, fileOf, labelOf, linkOf, projectOf, sectionOf, taskOf } from './rows.js';
 import { TODO_DATA_TABLES, TODO_SCHEMA, TODO_SCHEMA_STEP, minWriterAt } from './schema.js';
 
@@ -63,10 +63,17 @@ const OPERATIONS: { [N in TodoOpName]: Handler } = {
 
 /** The copies a restore makes of the file it replaces; only the newest few are kept. */
 const RESTORE_COPIES_KEPT = 3;
-const RESTORE_COPY = /^todo-restore-before-\d{8}T\d{6}\d{3}Z\.sqlite$/;
+const RESTORE_COPY = /^todo-restore-before-\d{8}T\d{6}\d{3}Z(?:-[0-9a-f]{6})?\.sqlite$/;
 
 /** A backup's rows, by table; see `TODO_DATA_TABLES`. */
 export type TodoTables = Record<string, Record<string, unknown>[]>;
+/** Where attachments sealed with a key are in a backup bucket, and the key (base64url). */
+export interface TodoFileKey { namespace: string; key: string }
+/** Both lists, each namespace once (the first one's entry wins). */
+export function mergeKeys(first: TodoFileKey[], second: TodoFileKey[]): TodoFileKey[] {
+  const seen = new Set<string>();
+  return [...first, ...second].filter(item => !seen.has(item.namespace) && Boolean(seen.add(item.namespace))).map(({ namespace, key }) => ({ namespace, key }));
+}
 
 type Sqlite = typeof import('node:sqlite');
 
@@ -93,6 +100,7 @@ export class TodoStore {
   readonly path: string;
   private readonly stateDir: string;
   private db?: DatabaseSync;
+  private sqlite?: Sqlite;
   private restoreProgress?: TodoRestoreProgress;
   private state: TodoAvailability = { state: 'unavailable', reason: '할 일 저장소를 아직 열지 않았습니다.' };
   private revisionValue = 0;
@@ -128,6 +136,7 @@ export class TodoStore {
     if (!sqlite?.DatabaseSync) throw new Error(runtimeProblem(sqlite, undefined));
     const db = new sqlite.DatabaseSync(this.path);
     this.db = db;
+    this.sqlite = sqlite;
     const problem = this.options.runtime ? this.options.runtime() : runtimeProblem(sqlite, (db.prepare('SELECT sqlite_version() AS v').get() as { v: string }).v);
     if (problem) throw new Error(problem);
     // Only this process writes, under the state lock: waiting for a lock would only stall the web, so none is waited for.
@@ -228,7 +237,7 @@ export class TodoStore {
     this.readable();
     const task = this.task(id);
     if (!task || task.deletedAt) throw new TowerError('not-found', '작업을 찾을 수 없습니다.');
-    const subtasks = this.all(`WITH RECURSIVE down(id) AS (SELECT id FROM todo_tasks WHERE parent_id = ? UNION ALL SELECT t.id FROM todo_tasks t JOIN down ON t.parent_id = down.id)
+    const subtasks = this.all(`WITH RECURSIVE down(id, depth) AS (SELECT id, 1 FROM todo_tasks WHERE parent_id = ? UNION ALL SELECT t.id, down.depth + 1 FROM todo_tasks t JOIN down ON t.parent_id = down.id WHERE down.depth < ${MAX_TASK_DEPTH + 2})
       SELECT ${TASK_COLUMNS} FROM todo_tasks t JOIN down ON down.id = t.id WHERE t.deleted_at IS NULL ORDER BY t.sort_key`, id).map(taskOf);
     const related = (column: 'from_task_id' | 'to_task_id', other: 'from_task_id' | 'to_task_id') =>
       this.all<Record<string, unknown> & { other: string }>(`SELECT k.*, k.${other} AS other FROM todo_links k JOIN todo_tasks o ON o.id = k.${other} AND o.deleted_at IS NULL WHERE k.${column} = ? ORDER BY k.created_at`, id)
@@ -237,7 +246,7 @@ export class TodoStore {
       task, subtasks,
       comments: this.all('SELECT * FROM todo_comments WHERE task_id = ? AND deleted_at IS NULL ORDER BY created_at', id).map(commentOf),
       files: this.all(`SELECT f.* FROM todo_files f LEFT JOIN todo_comments c ON c.id = f.comment_id WHERE f.task_id = ? AND ${VISIBLE_FILE} ORDER BY f.created_at, f.rowid`, id)
-        .map(fileOf).map(file => existsSync(todoFilePath(this.stateDir, file.sha256)) ? file : { ...file, missing: true as const }),
+        .map(fileOf).map(file => usableContent(lstatSync(todoFilePath(this.stateDir, file.sha256), { throwIfNoEntry: false }), file.size) ? file : { ...file, missing: true as const }),
       completions: this.all('SELECT * FROM todo_completions WHERE task_id = ? AND undone_at IS NULL ORDER BY completed_at DESC LIMIT 50', id).map(completionOf),
       events: this.all('SELECT * FROM todo_events WHERE task_id = ? ORDER BY id DESC LIMIT 100', id).map(eventOf),
       previous: related('to_task_id', 'from_task_id'), next: related('from_task_id', 'to_task_id'),
@@ -391,19 +400,21 @@ export class TodoStore {
    * Everything a backup keeps, read at one moment: the data tables' rows, the step of the schema this build writes, the
    * attachments' key, and the contents the rows name. Undefined when the file cannot be read.
    */
-  backupData(): { schema: number; tables: TodoTables; key?: string; contents: Map<string, number> } | undefined {
+  backupData(): { schema: number; tables: TodoTables; key?: string; contents: Map<string, number>; newer: boolean } | undefined {
     if (!this.db || this.state.state === 'unavailable') return undefined;
+    const columns = this.schemaColumns();
     this.db.exec('BEGIN');
     try {
       const tables: TodoTables = {};
       // In the order rows were added, which lists of one moment keep (rowid); a table without one by its key.
       for (const table of TODO_DATA_TABLES) {
         const rowid = !this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? AND sql LIKE '%WITHOUT ROWID%'", table);
-        tables[table] = this.all(`SELECT * FROM ${table} ORDER BY ${rowid ? 'rowid' : '1, 2'}`);
+        tables[table] = this.all(`SELECT ${[...columns.get(table)!].join(', ')} FROM ${table} ORDER BY ${rowid ? 'rowid' : '1, 2'}`);
       }
       const contents = new Map(this.all<{ sha256: string; size: number }>('SELECT sha256, MAX(size) AS size FROM todo_files GROUP BY sha256').map(row => [row.sha256, Number(row.size)]));
       const key = this.meta('files_key');
-      return { schema: TODO_SCHEMA_STEP, tables, ...(key ? { key } : {}), contents };
+      // A file a newer build changed may hold more than this build's columns and tables: `newer` says so.
+      return { schema: TODO_SCHEMA_STEP, tables, ...(key ? { key } : {}), contents, newer: this.fileStep > TODO_SCHEMA_STEP };
     } finally { if (this.db.isTransaction) this.db.exec('COMMIT'); }
   }
 
@@ -413,13 +424,13 @@ export class TodoStore {
    * older than the file, or a backup of a newer schema, is refused: rows of what it does not know would be lost.
    * Answers where the copy is.
    */
-  restoreData(schema: number, tables: TodoTables): string {
+  restoreData(schema: number, tables: TodoTables, keys: TodoFileKey[] = []): string {
     this.writable();
     if (this.fileStep !== TODO_SCHEMA_STEP) throw new TowerError('locked', '더 새로운 Tower가 만든 할 일 저장소라 복원하지 않았습니다. Tower를 업데이트한 뒤 복원하세요.');
     if (schema > TODO_SCHEMA_STEP) throw new TowerError('conflict', '더 새로운 Tower의 할 일 백업입니다. Tower를 업데이트한 뒤 복원하세요.');
-    const columns = new Map(TODO_DATA_TABLES.map(table => [table, new Set(this.all<{ name: string }>(`PRAGMA table_info(${table})`).map(row => row.name))]));
+    const columns = this.schemaColumns();
     for (const [table, rows] of Object.entries(tables)) {
-      const known = columns.get(table as typeof TODO_DATA_TABLES[number]);
+      const known = columns.get(table);
       if (!known) throw new TowerError('invalid', `할 일 백업에 알 수 없는 표가 있습니다: ${table}`);
       for (const row of rows) {
         for (const [name, value] of Object.entries(row)) {
@@ -430,6 +441,7 @@ export class TodoStore {
     }
     // Contents are found by a row's hash and shown under its name: nothing but what an upload makes goes in.
     for (const row of tables.todo_files ?? []) checkTodoFileRow(row);
+    checkTrees(tables);
     const before = this.copyAside();
     this.revisionValue = this.transaction(() => {
       // Checked when the transaction commits, so rows go in table by table whatever points at what.
@@ -443,16 +455,31 @@ export class TodoStore {
         }
       }
       this.ensureInbox();
+      // The keys that open the restored attachments where the bucket holds them stay with this file from now on.
+      this.setMeta('files_keys', JSON.stringify(mergeKeys(this.fileKeys(), keys)));
       if ((this.all('PRAGMA foreign_key_check') as unknown[]).length) throw new TowerError('invalid', '할 일 백업의 항목이 서로 맞지 않습니다.');
       return this.nextRevision();
     });
     return before;
   }
 
+  /** The columns of each data table as this build's schema makes them, whatever a newer build added to the file. */
+  private schemaColumns(): Map<string, Set<string>> {
+    if (!schemaColumns) {
+      const memory = new this.sqlite!.DatabaseSync(':memory:');
+      try {
+        for (const step of TODO_SCHEMA) memory.exec(step.sql);
+        schemaColumns = new Map(TODO_DATA_TABLES.map(table => [table, new Set((memory.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(row => row.name))]));
+      } finally { memory.close(); }
+    }
+    return schemaColumns;
+  }
+
   /** A consistent copy of the file as it is now, kept beside it (the newest few). */
   private copyAside(): string {
     const stamp = new Date(this.now()).toISOString().replace(/[-:.]/g, '');
-    const path = join(this.stateDir, `todo-restore-before-${stamp}.sqlite`);
+    // A random part too, so two restores in one millisecond never meet.
+    const path = join(this.stateDir, `todo-restore-before-${stamp}-${randomBytes(3).toString('hex')}.sqlite`);
     // Made owner-only and empty first: VACUUM INTO writes into an empty file it finds.
     closeSync(openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600));
     try { this.db!.prepare('VACUUM INTO ?').run(path); }
@@ -462,18 +489,72 @@ export class TodoStore {
     return path;
   }
 
+  /** Keys of attachments sealed elsewhere (other computers, earlier keys of this one) that restores brought here. */
+  fileKeys(): TodoFileKey[] {
+    if (!this.db || this.state.state === 'unavailable') return [];
+    const value = this.meta('files_keys');
+    const list: unknown = value ? JSON.parse(value) : [];
+    return Array.isArray(list) ? list.filter((item): item is TodoFileKey => !!item && typeof item.namespace === 'string' && typeof item.key === 'string') : [];
+  }
+
   /** The key this computer's attachments are encrypted with in backups (base64url), when the file has one. */
   filesKey(): string | undefined {
     return this.db && this.state.state !== 'unavailable' ? this.meta('files_key') : undefined;
   }
 
+  /** The contents the kept copies of the file before restores name (see copyAside), read without changing them. */
+  restoreCopyContents(): Set<string> {
+    const named = new Set<string>();
+    if (!this.sqlite) return named;
+    for (const name of readdirSync(this.stateDir).filter(item => RESTORE_COPY.test(item))) {
+      // A copy that cannot be read (cut short while it was made) names nothing it can bring back; the others still count.
+      try {
+        const copy = new this.sqlite.DatabaseSync(join(this.stateDir, name), { readOnly: true });
+        try {
+          if (!copy.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'todo_files'").get()) continue;
+          for (const row of copy.prepare('SELECT DISTINCT sha256 FROM todo_files').all() as { sha256: string }[]) named.add(row.sha256);
+        } finally { copy.close(); }
+      } catch (error) { console.warn(`The todo copy ${name} could not be read and protects no attachments: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    return named;
+  }
+
   /** What the page shows about bringing back a restored backup's attachments. */
-  setRestoreProgress(progress: TodoRestoreProgress | undefined): void { this.restoreProgress = progress && { ...progress }; }
+  setRestoreProgress(progress: TodoRestoreProgress | undefined): void { this.restoreProgress = progress && { state: progress.state, total: progress.total, missing: progress.missing }; }
 
   /** Moves the revision so open pages load again (attachments brought back after a restore). */
   touch(): void {
     if (!this.db || this.state.state !== 'ready') return;
     this.revisionValue = this.transaction(() => this.nextRevision());
+  }
+}
+
+let schemaColumns: Map<string, Set<string>> | undefined;
+
+/**
+ * Throws unless a backup's projects and tasks form the trees the operations keep: no parent cycles, projects at most
+ * MAX_PROJECT_LEVELS levels and sub-tasks MAX_TASK_DEPTH below a top task, a sub-task in its parent's project, and a
+ * task's section in its project. A file that broke them would make the store's walks up and down never end.
+ */
+function checkTrees(tables: TodoTables): void {
+  const wrong = (what: string) => new TowerError('invalid', `할 일 백업의 구조가 올바르지 않습니다: ${what}`);
+  const byId = (rows: Record<string, unknown>[] | undefined) => new Map((rows ?? []).map(row => [String(row.id), row]));
+  const projects = byId(tables.todo_projects), sections = byId(tables.todo_sections), tasks = byId(tables.todo_tasks);
+  /** How many parents above `id`, refusing a cycle or a chain longer than `most`. */
+  const above = (rows: Map<string, Record<string, unknown>>, id: string, most: number, what: string) => {
+    let count = 0;
+    for (let parent = rows.get(id)?.parent_id; parent !== null && parent !== undefined; parent = rows.get(String(parent))?.parent_id) {
+      if (++count > most) throw wrong(`${what} ${id}`);
+    }
+    return count;
+  };
+  for (const id of projects.keys()) above(projects, id, MAX_PROJECT_LEVELS - 1, '프로젝트 단계');
+  for (const [id, task] of tasks) {
+    above(tasks, id, MAX_TASK_DEPTH, '하위 작업 단계');
+    const parent = task.parent_id === null || task.parent_id === undefined ? undefined : tasks.get(String(task.parent_id));
+    if (parent && parent.project_id !== task.project_id) throw wrong(`하위 작업 ${id}의 프로젝트`);
+    const section = task.section_id === null || task.section_id === undefined ? undefined : sections.get(String(task.section_id));
+    if (section && section.project_id !== task.project_id) throw wrong(`작업 ${id}의 섹션`);
   }
 }
 

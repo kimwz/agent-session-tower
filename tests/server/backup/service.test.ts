@@ -141,8 +141,9 @@ test('automatic backups go to the bucket when due, keep only the newest of this 
   const own = [...bucket.objects.keys()].filter(key => !others.includes(key)).sort();
   assert.deepEqual(others.filter(key => bucket.objects.has(key)), others);
   assert.equal(own.length, 2, 'only the newest two of its own are kept');
-  assert.match(own[0]!, /^tower\/tower-backup-studio-[0-9a-f]{6}-20261001T000000Z\.towerbackup$/);
-  assert.match(own[1]!, /-20261002T000000Z\.towerbackup$/);
+  // Names carry the time to the millisecond and a random part, so two runs never share a key.
+  assert.match(own[0]!, /^tower\/tower-backup-studio-[0-9a-f]{6}-20261001T000000000Z-[0-9a-f]{8}\.towerbackup$/);
+  assert.match(own[1]!, /-20261002T000000000Z-[0-9a-f]{8}\.towerbackup$/);
   const status = (await a.service.overview()).status;
   assert.equal(status.lastSuccessAt, '2026-10-02T00:00:00.000Z');
   assert.equal(status.lastKey, own[1]);
