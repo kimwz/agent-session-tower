@@ -27,7 +27,7 @@ import { runRunnerWorker } from './runs/worker.js';
 import { runTerminalHost } from './terminals/host.js';
 import { TerminalHostClient } from './terminals/client.js';
 import { runMasterHost } from './master/host.js';
-import { startMasterMcp } from './master/mcp.js';
+import { runMasterMcp } from './master/mcp.js';
 import { startReviewFilesMcp } from './permissions/inspect.js';
 import { runMasterQuery } from './master/query-process.js';
 import { MasterClient } from './master/client.js';
@@ -192,10 +192,7 @@ async function main() {
     return;
   }
   if (args[0] === '--master-mcp') {
-    if ((args.length !== 2 && !(args.length === 3 && args[2] === '--heartbeat')) || !args[1]) throw new Error('The master tools require a state directory.');
-    const capability = args[2] === '--heartbeat' ? process.env.TOWER_HEARTBEAT_CAPABILITY : undefined;
-    if (args[2] === '--heartbeat' && !capability) throw new Error('Heartbeat tools require a run capability.');
-    await startMasterMcp(resolve(args[1]), process.stdin, process.stdout, capability);
+    await runMasterMcp(args.slice(1));
     return;
   }
   if (args[0] === '--master-host') {

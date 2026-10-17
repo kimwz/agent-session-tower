@@ -34,23 +34,65 @@ export const MASTER_TOOLS = [
   ...TOWER_TOOLS.filter(tool => tool.name === 'terminal_read'),
 ];
 
-export interface MasterToolsOptions extends TowerToolsOptions {
+export interface MasterScreenOptions {
   /** Sends a screen command to the pages. */
   broadcast(event: MasterStreamEvent): void;
   ackMs?: number;
 }
 
 /**
- * What the master session's `tower_master` tools do, run here in the master host, which calls Tower like a page.
- * Nothing is limited: the master may do whatever the owner's pages can.
+ * The owner's screen as the masters use it: the tab that last said it shows a master, and the page's word on each
+ * command. One for the host, shared by the main master and the issue masters, as the page's dispatcher is.
  */
-export class MasterTools extends TowerTools {
+export class MasterScreen {
   private readonly acks = new Map<string, (value: { result: MasterDirectiveResult; note?: string }) => void>();
   private tab?: { id: string; at: number };
 
-  constructor(private readonly master: MasterToolsOptions) { super(master); }
+  constructor(private readonly options: MasterScreenOptions) {}
 
-  override async call(name: string, args: Record<string, unknown>): Promise<unknown> {
+  /** A page showing a master says so, and screen commands go to it. */
+  present(tabId: string): void { this.tab = { id: tabId, at: Date.now() }; }
+
+  /** The page's word on a screen command. */
+  ack(id: string, result: MasterDirectiveResult, note?: string): boolean {
+    const waiting = this.acks.get(id);
+    waiting?.({ result, ...(note ? { note } : {}) });
+    return Boolean(waiting);
+  }
+
+  /** A screen command in the tab showing a master, done by the page with its own controls. */
+  async show(args: Record<string, unknown>): Promise<unknown> {
+    let command: MasterScreenCommand;
+    try { command = screenCommand(args); } catch (error) { return { error: (error as Error).message }; }
+    const tab = this.tab && Date.now() - this.tab.at < PRESENCE_MS ? this.tab.id : undefined;
+    if (!tab) return { result: 'no-page', note: 'No page of the owner shows the master now, so nothing was shown.' };
+    const id = randomUUID();
+    const reply = await new Promise<{ result: MasterDirectiveResult; note?: string } | undefined>(resolve => {
+      const finish = (value: { result: MasterDirectiveResult; note?: string } | undefined) => { clearTimeout(timer); this.acks.delete(id); resolve(value); };
+      const timer = setTimeout(() => finish(undefined), this.options.ackMs ?? ACK_MS);
+      this.acks.set(id, finish);
+      this.options.broadcast({ type: 'directive', seq: 0, directive: { ...command, id, tabId: tab, expiresAt: Date.now() + 30_000 } });
+    });
+    return reply ? { result: reply.result, ...(reply.note ? { note: truncate(reply.note, 300) } : {}) } : { result: 'no-answer', note: 'The page did not confirm; it may be closed or in the background.' };
+  }
+}
+
+export type MasterToolsOptions = TowerToolsOptions & (MasterScreenOptions | { screen: MasterScreen });
+
+/**
+ * What a master session's `tower_master` tools do, run here in the master host, which calls Tower like a page.
+ * Nothing is limited: the master may do whatever the owner's pages can.
+ */
+export class MasterTools extends TowerTools {
+  readonly screen: MasterScreen;
+
+  constructor(private readonly master: MasterToolsOptions) {
+    super(master);
+    this.screen = 'screen' in master ? master.screen : new MasterScreen(master);
+  }
+
+  /** `headers` go with the call's changes on this computer: an issue master's turn sends its reporting credential. */
+  override async call(name: string, args: Record<string, unknown>, headers?: Record<string, string>): Promise<unknown> {
     if (name === 'tower_api' && args.method === 'POST') {
       try {
         const target = apiTarget(String(args.method), String(args.path), typeof args.node === 'string' ? args.node : undefined);
@@ -71,37 +113,13 @@ export class MasterTools extends TowerTools {
         }
       } catch (error) { return { error: (error as Error).message }; }
     }
-    if (name !== 'ui') return super.call(name, args);
+    if (name !== 'ui') return super.call(name, args, headers);
     if (!this.master.tower.hasCredentials()) return { error: 'Tower 웹에 아직 연결되지 않았습니다. 잠시 뒤 다시 하세요.' };
-    return this.ui(args);
+    return this.screen.show(args);
   }
 
-  /** A page showing the master says so, and screen commands go to it. */
-  present(tabId: string): void { this.tab = { id: tabId, at: Date.now() }; }
-
-  /** The page's word on a screen command. */
-  ack(id: string, result: MasterDirectiveResult, note?: string): boolean {
-    const waiting = this.acks.get(id);
-    waiting?.({ result, ...(note ? { note } : {}) });
-    return Boolean(waiting);
-  }
-
-  /** A screen command in the tab showing the master, done by the page with its own controls. */
-  private async ui(args: Record<string, unknown>): Promise<unknown> {
-    let command: MasterScreenCommand;
-    try { command = screenCommand(args); } catch (error) { return { error: (error as Error).message }; }
-    const tab = this.tab && Date.now() - this.tab.at < PRESENCE_MS ? this.tab.id : undefined;
-    if (!tab) return { result: 'no-page', note: 'No page of the owner shows the master now, so nothing was shown.' };
-    const id = randomUUID();
-    const reply = await new Promise<{ result: MasterDirectiveResult; note?: string } | undefined>(resolve => {
-      const finish = (value: { result: MasterDirectiveResult; note?: string } | undefined) => { clearTimeout(timer); this.acks.delete(id); resolve(value); };
-      const timer = setTimeout(() => finish(undefined), this.master.ackMs ?? ACK_MS);
-      this.acks.set(id, finish);
-      this.master.broadcast({ type: 'directive', seq: 0, directive: { ...command, id, tabId: tab, expiresAt: Date.now() + 30_000 } });
-    });
-    return reply ? { result: reply.result, ...(reply.note ? { note: truncate(reply.note, 300) } : {}) } : { result: 'no-answer', note: 'The page did not confirm; it may be closed or in the background.' };
-  }
-
+  present(tabId: string): void { this.screen.present(tabId); }
+  ack(id: string, result: MasterDirectiveResult, note?: string): boolean { return this.screen.ack(id, result, note); }
 }
 
 /** A screen command from the model's arguments, checked field by field. */

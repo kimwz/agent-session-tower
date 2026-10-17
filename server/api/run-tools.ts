@@ -1,6 +1,6 @@
 import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
-import { subscriptionOnly } from '../runs/subscription.js';
+import { subscriptionOnly, todoMasterTaskId } from '../runs/subscription.js';
 import type { Run, Session } from '../../shared/types.js';
 import { browserTools, type BrowserEnvironment, type BrowserTools } from '../browser/tools.js';
 import type { RunManager } from '../runs/manager.js';
@@ -18,10 +18,16 @@ export function thisBuild(): { command: string; args: string[] } {
   const entry = fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../index.ts' : '../index.js', import.meta.url));
   return { command: process.execPath, args: isSea() ? [] : [...process.execArgv.filter(arg => !/^--inspect(?:-brk|-port|-publish-uid)?(?:=|$)/.test(arg)), entry] };
 }
-/** The master session's page tools; they reach the master host, which only the owner's own processes can. */
-function masterToolServer(stateDir: string, capability?: string): SessionMcpServer {
+/**
+ * The master session's page tools; they reach the master host, which only the owner's own processes can. A heartbeat
+ * run gets its two scoped tools; an issue master's turn names its todo and carries its reporting credential, so the host
+ * answers as that master and Tower records what the turn starts as its own.
+ */
+function masterToolServer(stateDir: string, scope?: { heartbeat: string } | { taskId: string; capability: string }): SessionMcpServer {
   const build = thisBuild();
-  return { command: build.command, args: [...build.args, '--master-mcp', stateDir, ...(capability ? ['--heartbeat'] : [])], ...(capability ? { env: { TOWER_HEARTBEAT_CAPABILITY: capability } } : {}) };
+  if (scope && 'heartbeat' in scope) return { command: build.command, args: [...build.args, '--master-mcp', stateDir, '--heartbeat'], env: { TOWER_HEARTBEAT_CAPABILITY: scope.heartbeat } };
+  if (scope) return { command: build.command, args: [...build.args, '--master-mcp', stateDir, '--instance', `todo:${scope.taskId}`], env: { [CALLER_CAPABILITY_ENV]: scope.capability } };
+  return { command: build.command, args: [...build.args, '--master-mcp', stateDir] };
 }
 function toolServer(stateDir: string, mode: '--tower-mcp' | '--slack-mcp', extra: string[], capability: string): SessionMcpServer {
   const build = thisBuild();
@@ -41,7 +47,7 @@ export function sessionBrowsers(stateDir: string, runs: Pick<RunManager, 'sessio
  * Trigger, Slack and ordinary agent-started turns never get Tower's tools. A trusted local heartbeat run receives only
  * two scoped master tools, without the generic lookups, browsers or owner capability below. Other turns started here get the read-only session
  * lookups, which Claude Code and Codex elsewhere on this computer get from their user configuration. The owner's turns in
- * the master's folder also get the master's page tools. Those other turns, whoever started them, get the browsers
+ * the master's folder, and in an issue master's folder, also get the master's page tools. Those other turns, whoever started them, get the browsers
  * (see browser/tools.ts) and the Todo tools (todo/agent-tools.ts), a controlling computer's turns too.
  */
 export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry; secrets?: Pick<SecretRuntime, 'initialized' | 'subject'>; browsers?: () => BrowserEnvironment }) {
@@ -70,9 +76,9 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
     const provenance = options.runs.sessionOrigin(session.id);
     const secrets = secretTools(run, session);
     if (run.heartbeat?.targets?.length && run.sessionId === session.id && !run.ownerStopped && run.origin?.kind === 'agent' && !run.origin.controllerId
-      && !provenance?.untrustedInput && (!provenance || provenance.kind === 'owner') && subscriptionOnly(options.stateDir, session.cwd)) {
+      && !provenance?.untrustedInput && (!provenance || provenance.kind === 'owner') && subscriptionOnly(options.stateDir, session.cwd) && !todoMasterTaskId(options.stateDir, session.cwd)) {
       const capability = options.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: run.sessionId });
-      return { servers: { tower_master: masterToolServer(options.stateDir, capability), ...secrets }, required: true };
+      return { servers: { tower_master: masterToolServer(options.stateDir, { heartbeat: capability }), ...secrets }, required: true };
     }
     const tools = resolve(run, session, secrets);
     if (run.origin?.controllerId) return withBrowsers(session, tools);
@@ -103,7 +109,10 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
     // Bound to this run: a later turn, even in the same conversation, gets its own credential.
     const tower = toolServer(options.stateDir, '--tower-mcp', [], options.capabilities.issue({ kind: 'owner-run', runId: run.id, sessionId: session.id }));
     const servers: SessionMcpServers = { tower, ...secrets };
-    if (!origin.controllerId && subscriptionOnly(options.stateDir, session.cwd)) servers.tower_master = masterToolServer(options.stateDir);
+    if (!origin.controllerId && subscriptionOnly(options.stateDir, session.cwd)) {
+      const taskId = todoMasterTaskId(options.stateDir, session.cwd);
+      servers.tower_master = masterToolServer(options.stateDir, taskId ? { taskId, capability: options.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: session.id }) } : undefined);
+    }
     // The owner's own top-level conversation waits for its secrets rather than starting without them, as it always has.
     const child = session.isSubagent || session.launchedByAgent || session.parentId || session.launchedBy;
     return { servers, required: Boolean(secrets.tower_secrets && !child && options.secrets?.initialized()), towerTools: 'attached' };
