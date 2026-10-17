@@ -27,7 +27,7 @@ async function saveFile(path: string, token: string, body: unknown): Promise<voi
 }
 
 const PART_LABELS: Record<BackupPart, string> = { triggers: '트리거', secretVault: '암호화한 시크릿 보관함', triggerSecrets: '트리거 비밀값', permissions: '권한 규칙', models: '모델 설정', slack: 'Slack 연결과 규칙', github: 'GitHub 자동화 규칙', publicAgents: '공개 에이전트',
-  skills: '스킬과 지침', decisions: '빠른 판단', projectGroups: '폴더 그룹·숨김', remoteExclusions: '원격 공유 제외 폴더', master: '마스터 음성 설정', backup: '자동 백업 설정' };
+  skills: '스킬과 지침', decisions: '빠른 판단', projectGroups: '폴더 그룹·숨김', remoteExclusions: '원격 공유 제외 폴더', todos: '할 일·첨부 파일', master: '마스터 음성 설정', backup: '자동 백업 설정' };
 
 interface RemoteForm { enabled: boolean; endpoint: string; bucket: string; prefix: string; region: string; accessKeyId: string; secretAccessKey: string; passphrase: string; intervalHours: string; keep: string }
 const formOf = (overview: BackupOverview): RemoteForm => ({ enabled: overview.settings.enabled, endpoint: overview.settings.remote.endpoint, bucket: overview.settings.remote.bucket, prefix: overview.settings.remote.prefix,

@@ -20,6 +20,8 @@ import { ClosedSessionStore } from './stores/closed-sessions.js';
 import { worktreeCleanupFor, worktreeCleanupVisible } from './worktrees/janitor.js';
 import { ProjectGroupStore } from './stores/project-groups.js';
 import { TodoStore } from './todo/store.js';
+import { TodoFiles } from './todo/files.js';
+import { TodoBackup } from './todo/backup.js';
 import { DurableRunManager } from './runs/durable-runner.js';
 import { runRunnerWorker } from './runs/worker.js';
 import { runTerminalHost } from './terminals/host.js';
@@ -250,6 +252,8 @@ async function main() {
   const exclusions = new RemoteExclusionStore(stateDir);
   // Opened under the state lock taken above, and closed before it is released.
   const todos = new TodoStore(stateDir);
+  const todoFiles = new TodoFiles(stateDir, todos);
+  const todoBackup = new TodoBackup(todos, todoFiles, stateDir, { onChange: () => changed() });
   // Only the background service's own install is replaced by an update; an update left unfinished is settled first.
   const updates = new Updates({ stateDir, version: APP_VERSION, port, managed: await managedByService(stateDir, process.argv[1], Boolean(serviceLog)) });
   // Started as the background service, this version writes the service the way it runs it best, for its next start;
@@ -278,7 +282,9 @@ async function main() {
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await exclusions.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
   todos.start();
   todos.purge();
-  const todoPurge = setInterval(() => todos.purge(), 6 * 60 * 60 * 1000);
+  const purgeTodoFiles = () => todoFiles.purge().catch(error => console.error(`Todo attachment cleanup failed: ${error instanceof Error ? error.message : String(error)}`));
+  await todoFiles.start().then(purgeTodoFiles, error => console.error(`Todo attachments are unavailable: ${error instanceof Error ? error.message : String(error)}`));
+  const todoPurge = setInterval(() => { todos.purge(); void purgeTodoFiles(); }, 6 * 60 * 60 * 1000);
   todoPurge.unref();
   const attachmentStores = { chat: new AttachmentStore(stateDir), auto: new AttachmentStore(join(stateDir, 'auto-prompt-staging')) };
   const attachmentUploads = new AttachmentUploads(stateDir, { ...attachmentStores,
@@ -292,6 +298,7 @@ async function main() {
   } catch (error) {
     attachmentUploads.close();
     clearInterval(todoPurge);
+    todoBackup.close();
     todos.close();
     auth.close();
     try { await runs.close(); } finally { await releaseLock(); }
@@ -520,6 +527,14 @@ async function main() {
       completed: input => todos.completed(input),
       search: (query, input) => todos.search(query, input),
       apply: request => { const changes = todos.apply(request); changed(); return changes; },
+      files: {
+        startUpload: input => todoFiles.startUpload(input),
+        uploadOffset: id => todoFiles.uploadOffset(id),
+        appendUpload: (id, offset, chunks) => todoFiles.appendUpload(id, offset, chunks),
+        completeUpload: async id => { const attached = await todoFiles.completeUpload(id); changed(); return attached; },
+        cancelUpload: id => todoFiles.cancelUpload(id),
+        openFile: (id, image) => todoFiles.openFile(id, image),
+      },
     },
     enqueue: async (id, prompt, attachments, context) => {
       const cwd = runs.getSession(id)?.cwd;
@@ -669,7 +684,7 @@ async function main() {
   // Full backups: the worker gives its skills; restores go through each process's own stores (see BackupService.apply).
   const backups = new BackupService({ stateDir, version: APP_VERSION, skills: () => runs.skillsBackup(), triggers: () => runs.triggersBackup(), settings: () => runs.settingsBackup(), restartWorker: () => runs.restartWorker(),
     unavailable: () => runs.supports('backup') ? undefined : '실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 쓸 수 있습니다.',
-    stores: { groups, exclusions, decisions }, master: body => master.call('settings', { body }), onChange: () => changed() });
+    stores: { groups, exclusions, decisions }, master: body => master.call('settings', { body }), todos: todoBackup, onChange: () => changed() });
   await backups.start();
   // The terminal and master hosts keep their own code until they restart; what they run is looked at every half
   // minute, never starting one and never keeping one alive (the master host does not count pings as use; the terminal
@@ -751,6 +766,7 @@ async function main() {
     dispose();
     auth.close();
     clearInterval(todoPurge);
+    todoBackup.close();
     todos.close();
     try { await finishCleanup([auth.flush(), titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), runs.close()]); } finally { await releaseLock(); }
     if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') throw new Error(`Port ${port} is already in use. Open http://localhost:${port} if Agent Session Tower is already running, or choose --port 8001.`);
@@ -830,6 +846,7 @@ async function main() {
     dispose();
     server.closeAllConnections();
     clearInterval(todoPurge);
+    todoBackup.close();
     todos.close();
     server.close();
     try { await finishCleanup([auth.flush(), stoppingLinks, stoppingPublic, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), backups.flush(), notifications.close(), outcomes.close(), decisions.close(), runs.close()]); } finally { await releaseLock(); }

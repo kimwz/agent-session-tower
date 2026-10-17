@@ -51,7 +51,8 @@ export interface BackupPayload {
   /** The mark of the Tower that made it (see BackupService), telling this computer's backups from another's. */
   machine?: string;
   worker: WorkerRestore;
-  web: { projectGroups?: unknown; remoteExclusions?: unknown; decisions?: unknown; backup?: unknown };
+  /** `todos`: the owner's todos (server/todo/backup.ts), checked when restored. */
+  web: { projectGroups?: unknown; remoteExclusions?: unknown; decisions?: unknown; todos?: unknown; backup?: unknown };
   master?: { settings?: Record<string, unknown>; voiceKey?: string };
 }
 
@@ -158,11 +159,12 @@ export function payloadParts(payload: BackupPayload): BackupPart[] {
   if (payload.web.decisions !== undefined) parts.add('decisions');
   if (payload.web.projectGroups !== undefined) parts.add('projectGroups');
   if (payload.web.remoteExclusions !== undefined) parts.add('remoteExclusions');
+  if (payload.web.todos !== undefined) parts.add('todos');
   if (payload.master) parts.add('master');
   if (payload.web.backup !== undefined) parts.add('backup');
   return ORDER.filter(part => parts.has(part));
 }
-const ORDER: BackupPart[] = ['triggers', 'triggerSecrets', 'secretVault', 'permissions', 'models', 'slack', 'github', 'publicAgents', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'master', 'backup'];
+const ORDER: BackupPart[] = ['triggers', 'triggerSecrets', 'secretVault', 'permissions', 'models', 'slack', 'github', 'publicAgents', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'todos', 'master', 'backup'];
 
 /** A decrypted payload, checked for its shape; the parts themselves are checked when each is restored. */
 export function parsePayload(value: unknown): BackupPayload {
@@ -181,6 +183,6 @@ export function parsePayload(value: unknown): BackupPayload {
   const web = value.web;
   return { version: 1, ...(typeof value.machine === 'string' ? { machine: value.machine } : {}), worker: { files, ...(encryptedVault ? { encryptedVault } : {}), ...(machineKey ? { machineKey } : {}), ...(triggers ? { triggers: triggers as unknown as TriggerBackup } : {}), ...(skills ? { skills: skills as unknown as SkillBackup } : {}) },
     web: { ...(web.projectGroups !== undefined ? { projectGroups: web.projectGroups } : {}), ...(web.remoteExclusions !== undefined ? { remoteExclusions: web.remoteExclusions } : {}),
-      ...(web.decisions !== undefined ? { decisions: web.decisions } : {}), ...(web.backup !== undefined ? { backup: web.backup } : {}) },
+      ...(web.decisions !== undefined ? { decisions: web.decisions } : {}), ...(web.todos !== undefined ? { todos: web.todos } : {}), ...(web.backup !== undefined ? { backup: web.backup } : {}) },
     ...(master ? { master: master as BackupPayload['master'] } : {}) };
 }

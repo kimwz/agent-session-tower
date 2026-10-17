@@ -106,20 +106,27 @@ export class S3Client {
   }
 
   /** Every object under `prefix`, following continuation up to `limit` objects. */
-  async list(prefix: string, limit = 5000): Promise<RemoteBackup[]> {
+  async list(prefix: string, limit = 5000): Promise<RemoteBackup[]> { return (await this.scan(prefix, limit)).items; }
+
+  /**
+   * The objects under `prefix`, up to `limit`, and whether that is all of them: false when the listing stopped at the
+   * limit, or a page said there was more without saying where.
+   */
+  async scan(prefix: string, limit = 5000): Promise<{ items: RemoteBackup[]; complete: boolean }> {
     const found: RemoteBackup[] = [];
-    let token: string | undefined;
+    let token: string | undefined, more = false;
     // A store that keeps saying there is more without giving any is not followed forever.
-    for (let page = 0; page < 100; page++) {
+    for (let page = 0; page < Math.max(100, Math.ceil(limit / 500)); page++) {
       const response = await this.request('GET', this.url(undefined, { 'list-type': '2', prefix, ...(token ? { 'continuation-token': token } : {}) }));
       const xml = await response.text();
       for (const match of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
         const key = tag(match[1]!, 'Key');
         if (key !== undefined) found.push({ key, size: Number(tag(match[1]!, 'Size') ?? 0), modifiedAt: tag(match[1]!, 'LastModified') ?? '' });
       }
-      token = tag(xml, 'IsTruncated') === 'true' ? tag(xml, 'NextContinuationToken') : undefined;
+      more = tag(xml, 'IsTruncated') === 'true';
+      token = more ? tag(xml, 'NextContinuationToken') : undefined;
       if (!token || found.length >= limit) break;
     }
-    return found;
+    return { items: found, complete: !more };
   }
 }

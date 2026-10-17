@@ -1,4 +1,4 @@
-import type { TodoComment, TodoCompletion, TodoEvent, TodoEventKind, TodoLabel, TodoLayout, TodoLink, TodoPriority, TodoProject, TodoRecurrence, TodoSection, TodoTask } from '../../shared/todo/types.js';
+import type { TodoComment, TodoCompletion, TodoEvent, TodoEventKind, TodoFile, TodoLabel, TodoLayout, TodoLink, TodoPriority, TodoProject, TodoRecurrence, TodoSection, TodoTask } from '../../shared/todo/types.js';
 
 /** Each table's row and the value the page sees, converted in one place per table. */
 
@@ -47,3 +47,11 @@ export const completionOf = (row: Row): TodoCompletion => ({
 export const eventOf = (row: Row): TodoEvent => ({
   id: String(row.id), taskId: text(row.task_id), kind: text(row.kind) as TodoEventKind, detail: JSON.parse(text(row.detail)) as Record<string, unknown>, at: text(row.at),
 });
+
+export const fileOf = (row: Row): TodoFile => ({
+  id: text(row.id), taskId: text(row.task_id), commentId: maybe(row.comment_id), name: text(row.name), mimeType: text(row.mime), size: Number(row.size),
+  sha256: text(row.sha256), createdAt: text(row.created_at), deletedAt: maybe(row.deleted_at),
+});
+
+/** Files that show: not deleted, on a task not deleted, and on no comment or one not deleted (`f` the file, `c` its comment). */
+export const VISIBLE_FILE = 'f.deleted_at IS NULL AND (f.comment_id IS NULL OR c.deleted_at IS NULL)';
