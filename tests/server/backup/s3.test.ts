@@ -155,3 +155,18 @@ test('the AWS and R2 example listings are complete, across continuation pages', 
     ['tower/a.towerbackup', 434234, '2026-09-30T00:00:00.000Z'], ['tower/b.towerbackup', 1, '2026-09-30T00:00:01.000Z'], ['tower/c.towerbackup', 3, '2026-09-30T00:00:02.000Z']]);
   assert.deepEqual((await client.list('tower/')).map(item => item.key), ['tower/a.towerbackup', 'tower/b.towerbackup', 'tower/c.towerbackup']);
 });
+
+test('names a listing has only in their place: one elsewhere makes the page not whole, and a page not whole is read for showing only', () => {
+  const page = (inner: string) => `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>tower/a</Key></Contents>${inner}</ListBucketResult>`;
+  for (const [what, xml] of [
+    ['an entry inside another element', page('<CommonPrefixes><Contents><Key>tower/old</Key></Contents></CommonPrefixes>')],
+    ['a result inside the result', page('<Name><ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult></Name>')],
+    ['a key below an entry’s child', page('<Contents><Owner><Key>tower/old</Key></Owner><Key>tower/b</Key></Contents>')],
+    ['a key outside an entry', page('<Key>tower/old</Key>')],
+    ['IsTruncated inside an entry', page('<Contents><Key>tower/b</Key><IsTruncated>true</IsTruncated></Contents>')],
+  ] as const) assert.equal(listPage(xml).whole, false, what);
+  // Not whole: keys in comments are not entries, a key is listed once, and an out-of-range character stays as written.
+  const loose = listPage('<ListBucketResult><Contents><Key>tower/a</Key></Contents><Contents><Key>tower/a</Key></Contents><!-- <Contents><Key>tower/ghost</Key></Contents> --><Contents><Key>tower/b&#1114112;</Key></Contents><Name><![CDATA[x]]></Name></ListBucketResult>');
+  assert.equal(loose.whole, false);
+  assert.deepEqual(loose.items.map(item => item.key), ['tower/a', 'tower/b&#1114112;']);
+});

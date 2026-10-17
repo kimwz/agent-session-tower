@@ -267,6 +267,8 @@ export class BackupService {
       let remaining: string[] | undefined;
       try {
         const listing = await client.scan(own);
+        // Only a whole listing says which backups are the oldest; from any other nothing is removed.
+        if (!listing.complete) throw new BackupError('저장소의 백업 목록을 끝까지 읽지 못해 정리하지 않았습니다.', 'upstream');
         const names = new Set(listing.items.map(item => item.key));
         const mine = listing.items.filter(item => this.own(item.key, own)).map(item => item.key).sort();
         const removed = new Set<string>();
@@ -283,7 +285,7 @@ export class BackupService {
           await client.delete(name).catch(error => warnings.push(`지운 백업의 첨부 파일 목록을 지우지 못했습니다: ${error instanceof Error ? error.message : String(error)}`));
         }
         // A listing that does not show the backup just made is not trusted to show the others.
-        if (listing.complete && names.has(key)) remaining = mine.filter(item => !removed.has(item));
+        if (names.has(key)) remaining = mine.filter(item => !removed.has(item));
       } catch (error) { warnings.push(`오래된 백업을 정리하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`); }
       // Attachment objects nothing needs any more; only when every list of them could be seen.
       if (todos && attachments?.listed && remaining) {

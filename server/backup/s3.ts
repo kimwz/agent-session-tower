@@ -44,7 +44,9 @@ export function endpointUrl(value: string): URL {
   return url;
 }
 
-const xmlText = (value: string) => value.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code))).replace(/&amp;/g, '&');
+/** A character reference past Unicode's last code point stays as written. */
+const xmlText = (value: string) => value.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+  .replace(/&#(\d+);/g, (raw, code) => Number(code) <= 0x10ffff ? String.fromCodePoint(Number(code)) : raw).replace(/&amp;/g, '&');
 const tag = (xml: string, name: string) => { const found = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(xml); return found ? xmlText(found[1]!) : undefined; };
 
 /** An element of a listing as parsed: its name, its child elements in order, and its text (entities decoded). */
@@ -118,19 +120,34 @@ export function strictXmlRoot(xml: string): XmlElement | undefined {
   return stack.length ? undefined : root;
 }
 
+/** Where the names a listing is read by may stand: anywhere else they could hide an entry. */
+const PLACE: Record<string, string | undefined> = { ListBucketResult: undefined, Contents: 'ListBucketResult', IsTruncated: 'ListBucketResult', Key: 'Contents' };
+
+/** Whether one of those names stands below `element` (whose parent is `parent`) other than in its place. */
+function misplaced(element: XmlElement, parent: string | undefined): boolean {
+  if (element.name in PLACE && PLACE[element.name] !== parent) return true;
+  return element.children.some(child => misplaced(child, element.name));
+}
+
 /**
  * One page of a ListObjectsV2 answer. `whole` only when the page is provably all there: a document strictXmlRoot
- * understands, rooted at ListBucketResult, with exactly one direct IsTruncated of true or false, and every direct
- * Contents holding exactly one Key with text. Anything else is not whole; its items are then read leniently, as
- * before, for showing backups, never for deciding that nothing else exists.
+ * understands, rooted at ListBucketResult, with exactly one direct IsTruncated of true or false, every direct
+ * Contents holding exactly one Key with text, and none of those names anywhere else. Anything else is not whole; its
+ * items are then read leniently (outside comments, each key once), for showing backups only, never for removing any.
  */
 export function listPage(xml: string): { items: RemoteBackup[]; whole: boolean; truncated: boolean; token?: string } {
-  const lenient = () => ({ items: [...xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)].flatMap(match => {
-    const key = tag(match[1]!, 'Key');
-    return key === undefined ? [] : [{ key, size: Number(tag(match[1]!, 'Size') ?? 0), modifiedAt: tag(match[1]!, 'LastModified') ?? '' }];
-  }), whole: false, truncated: false });
+  const lenient = () => {
+    const seen = new Set<string>();
+    const items = [...xml.replace(/<!--[\s\S]*?-->/g, '').matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)].flatMap(match => {
+      const key = tag(match[1]!, 'Key');
+      if (key === undefined || seen.has(key)) return [];
+      seen.add(key);
+      return [{ key, size: Number(tag(match[1]!, 'Size') ?? 0), modifiedAt: tag(match[1]!, 'LastModified') ?? '' }];
+    });
+    return { items, whole: false, truncated: false };
+  };
   const root = strictXmlRoot(xml);
-  if (!root || root.name !== 'ListBucketResult') return lenient();
+  if (!root || root.name !== 'ListBucketResult' || misplaced(root, undefined)) return lenient();
   const children = (element: XmlElement, name: string) => element.children.filter(child => child.name === name);
   /** The text of a leaf child that appears once; undefined when it is missing, repeated or has elements in it. */
   const leaf = (element: XmlElement, name: string) => { const found = children(element, name); return found.length === 1 && !found[0]!.children.length ? found[0]!.text : undefined; };

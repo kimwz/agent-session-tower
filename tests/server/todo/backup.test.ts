@@ -32,6 +32,10 @@ interface Faults {
   failDelete: Set<string>; failList: boolean; truncateList: boolean;
   /** This computer's backups listed as only the newest one, in a reply cut short (no IsTruncated, no end). */
   partialBackupList?: boolean;
+  /** This computer's backup listing, well-formed but with every entry but the newest backup's moved inside another element. */
+  nestedBackupList?: boolean;
+  /** This computer's backup listing with a part it cannot read, and the newest backup named again in comments. */
+  commentedBackupList?: boolean;
 }
 
 async function computer(t: TestContext, bucket: Bucket, options: { stateDir?: string; host?: string; keep?: number; faults?: Faults; clock?: { now: number }; skillsGate?: () => Promise<void> } = {}) {
@@ -52,6 +56,17 @@ async function computer(t: TestContext, bucket: Bucket, options: { stateDir?: st
     const response = await fetch(input, init);
     if (attachmentList && faults?.truncateList) return new Response((await response.text()).replace('<IsTruncated>false</IsTruncated>', '<IsTruncated>true</IsTruncated>'), { status: 200 });
     const backupList = init?.method === 'GET' && url.searchParams.has('list-type') && (url.searchParams.get('prefix') ?? '').includes('tower-backup-');
+    if (backupList && (faults?.nestedBackupList || faults?.commentedBackupList)) {
+      const xml = await response.text();
+      const keys = [...xml.matchAll(/<Key>([^<]+)<\/Key>/g)].map(match => match[1]!).sort();
+      const newest = keys.filter(name => name.endsWith('.towerbackup')).pop()!;
+      const entry = (name: string) => `<Contents><Key>${name}</Key><Size>1</Size></Contents>`;
+      const shown = keys.filter(name => name.startsWith(newest)).map(entry).join('');
+      const body = faults.nestedBackupList
+        ? `<ListBucketResult><IsTruncated>false</IsTruncated>${shown}<CommonPrefixes>${keys.filter(name => !name.startsWith(newest)).map(entry).join('')}</CommonPrefixes></ListBucketResult>`
+        : `<ListBucketResult><IsTruncated>false</IsTruncated>${keys.map(entry).join('')}<!-- ${entry(newest)}${entry(newest)} --><Name><![CDATA[bucket]]></Name></ListBucketResult>`;
+      return new Response(body, { status: 200 });
+    }
     if (backupList && faults?.partialBackupList) {
       const keys = [...(await response.text()).matchAll(/<Key>([^<]+)<\/Key>/g)].map(match => match[1]!).sort();
       const newest = keys.filter(name => name.endsWith('.towerbackup')).pop()!;
@@ -436,4 +451,34 @@ test('local contents with another link to them are brought back from the backup 
   const opened = await a.files.openFile(attached.id);
   await opened.handle.close();
   assert.equal((await stat(todoFilePath(a.stateDir, sha(file)))).nlink, 1);
+});
+
+test('a backup listed somewhere other than its place keeps what it needs', async t => {
+  const bucket = await fakeBucket(t);
+  const faults: Faults = { failDelete: new Set(), failList: false, truncateList: false };
+  const a = await computer(t, bucket, { faults });
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const old = Buffer.from('needed by the first backup only');
+  const file = await a.attach('t', old);
+  const first = await a.upload();
+  a.apply({ op: 'file.delete', id: file.id });
+  a.clock.now += TODO_RETENTION_MS + HOUR;
+  a.todos.purge(); await a.files.purge();
+  faults.nestedBackupList = true;
+  await a.upload();
+  assert.ok(bucket.objects.has(first));
+  assert.equal(piecesOf(bucket, namespaceOf(a), old).length, 1);
+});
+
+test('a listing of backups that cannot be read whole removes no backup, whatever it seems to name', async t => {
+  const bucket = await fakeBucket(t);
+  const faults: Faults = { failDelete: new Set(), failList: false, truncateList: false };
+  const a = await computer(t, bucket, { faults, keep: 2 });
+  const first = await a.upload();
+  faults.commentedBackupList = true;
+  const second = await a.upload();
+  assert.ok(bucket.objects.has(first), 'within the two kept');
+  assert.ok(bucket.objects.has(second), 'the backup just made');
+  assert.ok(bucket.objects.has(`${second}${TODO_SIDECAR}`));
+  assert.match((await a.service.overview()).status.lastWarning ?? '', /정리하지/);
 });
