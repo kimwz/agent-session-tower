@@ -36,6 +36,8 @@ interface Faults {
   nestedBackupList?: boolean;
   /** This computer's backup listing with a part it cannot read, and the newest backup named again in comments. */
   commentedBackupList?: boolean;
+  /** This computer's backup listing, whole, but naming its oldest backup twice. */
+  duplicatedBackupList?: boolean;
 }
 
 async function computer(t: TestContext, bucket: Bucket, options: { stateDir?: string; host?: string; keep?: number; faults?: Faults; clock?: { now: number }; skillsGate?: () => Promise<void> } = {}) {
@@ -66,6 +68,11 @@ async function computer(t: TestContext, bucket: Bucket, options: { stateDir?: st
         ? `<ListBucketResult><IsTruncated>false</IsTruncated>${shown}<CommonPrefixes>${keys.filter(name => !name.startsWith(newest)).map(entry).join('')}</CommonPrefixes></ListBucketResult>`
         : `<ListBucketResult><IsTruncated>false</IsTruncated>${keys.map(entry).join('')}<!-- ${entry(newest)}${entry(newest)} --><Name><![CDATA[bucket]]></Name></ListBucketResult>`;
       return new Response(body, { status: 200 });
+    }
+    if (backupList && faults?.duplicatedBackupList) {
+      const xml = await response.text();
+      const first = /<Contents>[\s\S]*?<\/Contents>/.exec(xml)![0];
+      return new Response(xml.replace('</ListBucketResult>', `${first}</ListBucketResult>`), { status: 200 });
     }
     if (backupList && faults?.partialBackupList) {
       const keys = [...(await response.text()).matchAll(/<Key>([^<]+)<\/Key>/g)].map(match => match[1]!).sort();
@@ -480,5 +487,21 @@ test('a listing of backups that cannot be read whole removes no backup, whatever
   assert.ok(bucket.objects.has(first), 'within the two kept');
   assert.ok(bucket.objects.has(second), 'the backup just made');
   assert.ok(bucket.objects.has(`${second}${TODO_SIDECAR}`));
+  assert.match((await a.service.overview()).status.lastWarning ?? '', /정리하지/);
+});
+
+test('a listing that names a backup twice removes no backup', async t => {
+  const bucket = await fakeBucket(t);
+  const faults: Faults = { failDelete: new Set(), failList: false, truncateList: false };
+  const a = await computer(t, bucket, { faults, keep: 2 });
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const file = Buffer.from('needed by the first backup');
+  await a.attach('t', file);
+  const first = await a.upload();
+  faults.duplicatedBackupList = true;
+  const second = await a.upload();
+  assert.ok(bucket.objects.has(first) && bucket.objects.has(`${first}${TODO_SIDECAR}`));
+  assert.ok(bucket.objects.has(second));
+  assert.equal(piecesOf(bucket, namespaceOf(a), file).length, 1);
   assert.match((await a.service.overview()).status.lastWarning ?? '', /정리하지/);
 });

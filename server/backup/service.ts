@@ -270,7 +270,7 @@ export class BackupService {
         // Only a whole listing says which backups are the oldest; from any other nothing is removed.
         if (!listing.complete) throw new BackupError('저장소의 백업 목록을 끝까지 읽지 못해 정리하지 않았습니다.', 'upstream');
         const names = new Set(listing.items.map(item => item.key));
-        const mine = listing.items.filter(item => this.own(item.key, own)).map(item => item.key).sort();
+        const mine = [...new Set(listing.items.filter(item => this.own(item.key, own)).map(item => item.key))].sort();
         const removed = new Set<string>();
         try {
           for (const item of mine.slice(0, Math.max(0, mine.length - settings.keep))) {

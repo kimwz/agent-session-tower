@@ -231,14 +231,17 @@ export class S3Client {
    */
   async scan(prefix: string, limit = 5000): Promise<{ items: RemoteBackup[]; complete: boolean }> {
     const found: RemoteBackup[] = [];
+    const seen = new Set<string>();
     let token: string | undefined, more = false;
     // A store that keeps saying there is more without giving any is not followed forever.
     for (let page = 0; page < Math.max(100, Math.ceil(limit / 500)); page++) {
       const response = await this.request('GET', this.url(undefined, { 'list-type': '2', prefix, ...(token ? { 'continuation-token': token } : {}) }));
       const listed = listPage(await response.text());
+      // A key named twice is not a listing to count by: one entry may stand where another belongs.
+      const twice = listed.items.some(item => seen.has(item.key) || !seen.add(item.key));
       found.push(...listed.items);
       // Only a page read whole says where the listing ends; any other may have left objects out.
-      if (!listed.whole) return { items: found, complete: false };
+      if (!listed.whole || twice) return { items: found, complete: false };
       more = listed.truncated;
       token = listed.token;
       if (!token || found.length >= limit) break;

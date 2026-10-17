@@ -170,3 +170,22 @@ test('names a listing has only in their place: one elsewhere makes the page not 
   assert.equal(loose.whole, false);
   assert.deepEqual(loose.items.map(item => item.key), ['tower/a', 'tower/b&#1114112;']);
 });
+
+test('a listing that names an object twice, on one page or across pages, is not complete', async t => {
+  const entry = (key: string) => `<Contents><Key>${key}</Key><Size>1</Size></Contents>`;
+  const pages: Record<string, string> = {
+    once: `<ListBucketResult><IsTruncated>false</IsTruncated>${entry('tower/a')}${entry('tower/b')}${entry('tower/a')}</ListBucketResult>`,
+    first: `<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken>${entry('tower/a')}</ListBucketResult>`,
+    next: `<ListBucketResult><IsTruncated>false</IsTruncated>${entry('tower/a')}${entry('tower/b')}</ListBucketResult>`,
+  };
+  const server = createServer((req, res) => {
+    const url = new URL(req.url!, 'http://x');
+    res.writeHead(200, { 'content-type': 'application/xml' });
+    res.end(url.searchParams.get('prefix') === 'one/' ? pages.once : url.searchParams.has('continuation-token') ? pages.next : pages.first);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const client = new S3Client({ endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, bucket: 'bucket', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret' });
+  assert.equal((await client.scan('one/')).complete, false, 'one page');
+  assert.equal((await client.scan('two/')).complete, false, 'across pages');
+});
