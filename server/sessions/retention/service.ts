@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { RETENTION_SESSION_BUDGET, selectRetention, type RetentionCandidate, type RetentionObservation, type RetentionRecord } from './policy.js';
 import { RetentionArchive } from './archive.js';
+import { retentionNodeMap } from './ancestry.js';
 import { RetentionStore } from './store.js';
 import type { RetentionAdapter, RetentionJournalEntry, RetentionOverview, RetentionMember, RetentionOperationContext } from './types.js';
 
@@ -21,7 +22,7 @@ export class RetentionService {
   private catchUp = false;
   /** An archive request arrived since the last cycle began; the next one comes soon rather than in an hour. */
   private requested = false;
-  /** Subagent parent links from the latest observation, to tell whether a reopen sits under a request. */
+  /** Subagent parent links (hot and cold) from the latest observation, to tell whether a reopen sits under a request. */
   private parents = new Map<string, string | undefined>();
   private cycleIncomplete = false;
   private nextCandidateId?: string;
@@ -428,7 +429,8 @@ export class RetentionService {
     try { observation = await this.options.observe(); }
     catch (error) { this.cycleIncomplete = true; throw error; }
     this.observationComplete = observation.complete; this.cycleIncomplete ||= !observation.complete; this.observationIssues = observation.issues || [];
-    if (observation.complete) this.parents = new Map(observation.records.map(record => [record.session.id, record.session.isSubagent ? record.session.parentId : undefined]));
+    // Cold ancestry counts too: a request two levels up reaches a hot child through a cold parent, as selection sees it.
+    if (observation.complete) this.parents = new Map([...new Set(retentionNodeMap(observation).values())].map(node => [node.id, node.isSubagent ? node.parentId : undefined]));
     for (const record of observation.records) {
       const policy = this.options.store.policy(record.session.id); if (!policy) continue;
       const newer = policy.archivedAt && Date.parse(record.lastActivityAt || '') > Date.parse(policy.archivedAt);

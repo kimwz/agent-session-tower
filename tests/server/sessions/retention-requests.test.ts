@@ -274,3 +274,23 @@ test('a descendant reopened while its family is being reserved stops the move be
     assert.equal((await service.cycle()).deferredReasons?.['reopened-descendant'], 1);
   } finally { await service.quiesce(); }
 }));
+
+test('a reopen under a request two levels up, through a cold parent, is kept and holds the family back', async () => fixture(async path => {
+  const root = join(path, 'state'); const store = new RetentionStore(root, { storage: actualStorage(root) }); await store.start(now - 30 * day);
+  // A (hot, requested) -> B (cold, known only from ancestry) -> C (hot).
+  const a = record('a'), c = record('c', 'b'); let clock = now - hour;
+  const ancestry = [{ id: 'b', provider: 'claude' as const, nativeId: 'b', parentId: 'a', isSubagent: true }];
+  const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'bundles'), []), onError: () => {}, now: () => clock,
+    observe: async () => observation([a, c], { ancestry }),
+    adapter: { capability: () => ({ status: 'blocked', reason: 'fixture' }), files: async () => [], reserve: async () => undefined, inspectCold: async members => ({ complete: true, members, issues: [] }) } });
+  await service.start();
+  try {
+    assert.deepEqual(selectRetention(observation([a, c], { ancestry })).candidates.length, 0); // c is too young alone; a is unrequested
+    await service.cycle(); // learns the family links, cold ones included
+    await service.requestArchive(['a']); clock = now;
+    await service.cancelArchiveRequest('c'); assert.equal(store.policy('c')?.reopenedAt, iso(now));
+    const summary = await service.cycle();
+    assert.equal(store.policy('c')?.reopenedAt, iso(now));
+    assert.equal(summary.candidates, 0); assert.equal(summary.deferredReasons?.['reopened-descendant'], 1);
+  } finally { await service.quiesce(); }
+}));
