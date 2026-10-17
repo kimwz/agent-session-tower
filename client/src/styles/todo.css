@@ -1,25 +1,22 @@
 /* The Todo page (client/src/todo): only what is needed shows; the rest waits on hover, selection and menus. */
 .todo-mode, .todo-popover, .todo-modal-scrim { --p1:#ec7b7b; --p2:#e9a35f; --p3:#7fa6f2; --p4:#5f6d82; --todo-card:#131c29; --todo-card-hover:#172231; --todo-column:#0f1621; }
 
-/* Header: canvas or todo. It stays visible when the canvas gives the header's room to the graph. */
+/* Header: canvas or todo, with its words. It stays in the compact header beside the sidebar toggle. */
 .page-switch { display:inline-flex; align-items:center; gap:2px; margin-left:10px; padding:2px; border:1px solid #2b3a4e; border-radius:8px; background:#0f1722; }
-.page-switch button { display:inline-flex; align-items:center; gap:5px; height:26px; padding:0 10px; border-radius:6px; color:#8a9bb2; font-size:11.5px; font-weight:500; }
+.page-switch button { display:inline-flex; align-items:center; gap:5px; height:26px; padding:0 10px; border-radius:6px; color:#8a9bb2; font-size:11.5px; font-weight:500; white-space:nowrap; }
 .page-switch button:hover { color:#d0deef; }
 .page-switch button[aria-pressed="true"] { background:#22334a; color:var(--bright); }
-.canvas-only .app-header .brand > .page-switch { display:inline-flex; pointer-events:auto; background:#142030ed; margin-left:0; }
-/* Over the canvas the switch shows icons only, and the canvas's new-session button moves past it. */
-.canvas-only .page-switch span { display:none; }
-.canvas-only .page-switch button { padding:0 8px; }
-.canvas-only .canvas-new-session { left:136px; }
-/* Beside an open conversation on a narrow window the header has no room for the words either. */
-@media (max-width: 900px) { .has-chat .page-switch span { display:none; } .has-chat .page-switch button { padding:0 8px; } }
+.sidebar-closed .page-switch { margin-left:0; background:#142030ed; }
+.canvas-only .page-switch { pointer-events:auto; }
+/* Beside an open conversation on a narrow window the header has no room for the words. */
+@media (max-width: 760px) { .has-chat .page-switch span { display:none; } .has-chat .page-switch button { padding:0 8px; } }
 
 .todo-workspace { overflow:hidden; }
 .workspace[hidden] { display:none; }
 .todo-page { position:relative; display:flex; flex:1; min-width:0; min-height:0; }
 
 /* Sidebar */
-.todo-sidebar { width:248px; flex:0 0 248px; display:flex; flex-direction:column; gap:4px; padding:16px 10px 20px; overflow-y:auto; border-right:1px solid var(--line); background:#0e151f; z-index:12; }
+.todo-sidebar { width:var(--sidebar-width); flex:0 0 var(--sidebar-width); display:flex; flex-direction:column; gap:4px; padding:16px 10px 20px; overflow-y:auto; border-right:1px solid var(--line); background:#0e151f; z-index:12; }
 .todo-side-add { display:flex; align-items:center; gap:8px; height:34px; margin:0 4px 6px; padding:0 10px; border-radius:7px; color:#e6a16f; font-weight:600; font-size:12.5px; }
 .todo-side-add:hover:not(:disabled) { background:#1a2433; }
 .todo-side-add kbd, .todo-side-search kbd { margin-left:auto; }
@@ -459,10 +456,9 @@ a.todo-file-name:hover { text-decoration:underline; }
 }
 @media (max-width:680px) {
   .page-switch { margin-left:4px; }
-  .canvas-only .canvas-new-session { left:118px; }
-  .page-switch button { padding:0 7px; }
-  .page-switch span { display:none; }
-  .todo-mode .brand h1, .todo-mode .brand-local, .todo-mode .header-center { display:none; }
+  .page-switch button { padding:0 8px; }
+  /* A phone's header keeps the mark and the switch; the name, badge and host would push the switch's words out. */
+  .brand h1, .brand-local, .header-center { display:none; }
   .todo-sidebar { position:absolute; top:0; bottom:0; left:0; z-index:41; width:282px; box-shadow:10px 0 30px #00000060; }
   .todo-main-head { padding:14px 16px 8px; }
   .todo-title h2 { font-size:18px; }

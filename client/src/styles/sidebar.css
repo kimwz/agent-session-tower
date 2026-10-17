@@ -1,6 +1,10 @@
+/* One sidebar width for the canvas's sessions and the todo lists. */
+.app {
+  --sidebar-width:282px
+}
 .sidebar {
-  width:282px;
-  flex:0 0 282px;
+  width:var(--sidebar-width);
+  flex:0 0 var(--sidebar-width);
   border-right:1px solid var(--line);
   display:flex;
   flex-direction:column;

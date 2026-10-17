@@ -35,6 +35,8 @@ type GraphProps = { slackUnreadIds?: ReadonlySet<string>; slack?: SlackPublicSta
   hostsComplete?: boolean;
   /** Every joined computer, including those the computer filter leaves off the canvas. */
   allHosts?: Host[]; sessions: Session[]; projectFolders?: ReadonlyArray<Pick<Session, 'cwd' | 'node' | 'project'>>; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string, draft?: SessionDraft) => void; onAutoPrompt: (cwd?: string, node?: string) => void; repositories?: RepositoryStatus[]; onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; onIssue?: (cwd: string) => void; emptyState?: ReactNode;
+  /** Page actions shown first in the view tools at the canvas's top right (the new-session button). */
+  tools?: ReactNode;
   /** The todo of each session in an open issue family, by session id. */
   todoBadges?: Readonly<Record<string, TodoSessionBadge>> };
 
@@ -51,7 +53,7 @@ function viewportTransitionDuration() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 280;
 }
 
-function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, hosts, hostsComplete = true, allHosts, sessions, projectFolders = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, onIssue, emptyState, todoBadges }: GraphProps) {
+function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, hosts, hostsComplete = true, allHosts, sessions, projectFolders = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, onIssue, emptyState, todoBadges, tools }: GraphProps) {
   const { language } = useI18n();
   const { fitView, zoomIn, zoomOut, getViewport, setViewport } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
@@ -297,6 +299,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     </ReactFlow>
     {!showMonitor && emptyState}
     <div ref={quickControls} className="canvas-quick-controls" aria-label={t("캔버스 보기 도구")}>
+      {tools}
       <div className="canvas-zoom-controls" role="group" aria-label={t("그래프 보기 조절")}><button onClick={() => { followingFit.current = false; void zoomOut({ duration: 0 }); }} aria-label={t("그래프 축소")} title={t("축소")}><Minus size={15} /></button><span>{zoom}%</span><button onClick={() => { followingFit.current = false; void zoomIn({ duration: 0 }); }} aria-label={t("그래프 확대")} title={t("확대")}><Plus size={15} /></button><i /><button onClick={() => fitVisibleGraph(GRAPH_FIT)} aria-label={t("전체 그래프 맞춤")} title={t("전체 맞춤")}><Maximize size={15} /></button>{selectedId && nodes.some(n => n.id === selectedId) && <button className="canvas-find-session" onClick={() => fitVisibleGraph({ nodes: [{ id: selectedId }], maxZoom: 1.1, padding: 0.7 })} aria-label={t("선택한 세션 위치로 이동")} title={t("선택한 세션 찾기")}><Scan size={15} /></button>}</div>
     </div>
     <div className="canvas-session-summary"><span>{t("{0} / {1}개 세션 표시 · {2}개 작업 중", { 0: shown.toLocaleString(), 1: sessions.length.toLocaleString(), 2: working.toLocaleString() })}</span>{!manual && shown < sessions.length && graphLimit < 72 && <button onClick={() => setGraphLimit(value => Math.min(72, value + 8))}>{t("더 표시")}</button>}{!manual && graphLimit > 8 && <button onClick={() => setGraphLimit(8)}>{t("접기")}</button>}</div>

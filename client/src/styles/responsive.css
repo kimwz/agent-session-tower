@@ -1,7 +1,6 @@
 @media(min-width:1600px) {
-  .sidebar {
-  width:304px;
-  flex-basis:304px
+  .app {
+  --sidebar-width:304px
 }
 .chat-panel {
   width:510px;
@@ -23,9 +22,8 @@
 }
 
 @media(max-width:1250px) {
-  .sidebar {
-  width:254px;
-  flex-basis:254px
+  .app {
+  --sidebar-width:254px
 }
 .app-header {
   padding-inline:18px
@@ -109,9 +107,8 @@
   flex-basis:440px;
   max-width:57vw
 }
-.sidebar {
-  width:249px;
-  flex-basis:249px
+.app {
+  --sidebar-width:249px
 }
 
 }
