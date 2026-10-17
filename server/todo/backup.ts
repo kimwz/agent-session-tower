@@ -11,8 +11,7 @@ import type { TodoStore, TodoTables } from './store.js';
  *
  * Objects are `<prefix>tower-todo-files/<namespace>/<sha256>/<i>-of-<n>`: pieces of at most 8 MiB, each sealed with
  * AES-256-GCM over `sha256|i|n`. The namespace is `<host>-<machine>-<key id>`, so a new key (a new file) never reuses
- * or overwrites objects another key sealed. Objects already there are not sent again, and Tower never removes any:
- * a backup that could not hold all its todos (see `upload`) instead keeps older backups from being removed.
+ * or overwrites objects another key sealed. Objects already there are not sent again, and Tower never removes any.
  *
  * The backup service gives the bucket (TodoObjectStore); this module never reaches into the backup's own code.
  */
@@ -33,7 +32,11 @@ export interface TodoObjectStore {
 export interface TodoBackupPart { schema: number; tables: TodoTables; files?: { namespace: string; key: string }; exported?: true }
 
 /** A backup being made: its part, and the attachments its rows name (sha256 → size). */
-export interface TodoBackupSnapshot { part: TodoBackupPart; contents: Map<string, number> }
+/** A backup being made: its part, the attachments it names (sha256 → size), and whether the file holds more than this build knows (`newer`). */
+export interface TodoBackupSnapshot { part: TodoBackupPart; contents: Map<string, number>; newer: boolean }
+
+/** Which attachments a backup's namespace already holds whole, and which neither it nor this computer has. */
+export interface TodoUploadPlan { present: Map<string, number>; missing: string[] }
 
 export const TODO_FILES_FOLDER = 'tower-todo-files/';
 const PIECE_BYTES = 8 * 1024 * 1024;
@@ -119,32 +122,44 @@ export class TodoBackup {
     const data = this.store.backupData();
     if (!data) return undefined;
     const files = data.key ? { namespace: `${computer}-${keyId(Buffer.from(data.key, 'base64url'))}`, key: data.key } : undefined;
-    return { part: { schema: data.schema, tables: data.tables, ...(files ? { files } : {}) }, contents: data.contents };
+    return { part: { schema: data.schema, tables: data.tables, ...(files ? { files } : {}) }, contents: data.contents, newer: data.newer };
   }
 
   /**
-   * Uploads the attachments a backup names that its namespace lacks (all of them when it cannot be listed). Answers
-   * what the backup could not hold: contents damaged here (`damaged`: not what their hash says, so the copies already
-   * in the bucket stay as they are), contents that could not be read or sent (`failed`), and contents neither here nor
-   * in the namespace (`missing`). A failure of one object leaves the others to try; a bucket that does not answer at all
-   * (an error marked `unreachable`), or refuses several in a row, fails the rest of them at once. Once `signal` says Tower is stopping, a failure is
-   * the backup's.
+   * Looks before a backup goes up: which attachments its namespace already holds whole (none when it cannot be listed),
+   * and which are neither there nor on this computer, so the backup cannot hold them.
    */
-  async upload(objects: TodoObjectStore, prefix: string, snapshot: TodoBackupSnapshot, signal?: AbortSignal): Promise<{ damaged: string[]; failed: string[]; missing: string[] }> {
+  async plan(objects: TodoObjectStore, prefix: string, snapshot: TodoBackupSnapshot): Promise<TodoUploadPlan> {
     const files = snapshot.part.files;
-    const damaged: string[] = [], failed: string[] = [], missing: string[] = [];
-    if (!files) return { damaged, failed, missing: [...snapshot.contents.keys()] };
-    const key = Buffer.from(files.key, 'base64url');
+    if (!files) return { present: new Map(), missing: [...snapshot.contents.keys()] };
     const base = `${prefix}${TODO_FILES_FOLDER}${files.namespace}/`;
     let present = new Map<string, number>();
     try { present = wholeContents((await objects.scan(base)).keys, base); }
     catch (error) { console.warn(`Todo attachments in the backup could not be listed; all are uploaded: ${error instanceof Error ? error.message : String(error)}`); }
-    const wanted = [...snapshot.contents].filter(([sha256]) => !present.has(sha256));
+    const missing: string[] = [];
+    for (const [sha256, size] of snapshot.contents) if (!present.has(sha256) && !await this.files.hasContent(sha256, size)) missing.push(sha256);
+    return { present, missing };
+  }
+
+  /**
+   * Uploads the attachments a backup names that its namespace lacks and this computer has. Answers what did not go
+   * up: contents damaged here (`damaged`: not what their hash says, so the copies already in the bucket stay as they
+   * are) and contents that could not be read or sent (`failed`). A failure of one object leaves the others to try; a
+   * bucket that does not answer at all (an error marked `unreachable`), or refuses several in a row, fails the rest at
+   * once. Once `signal` says Tower is stopping, a failure is the backup's.
+   */
+  async upload(objects: TodoObjectStore, prefix: string, snapshot: TodoBackupSnapshot, plan: TodoUploadPlan, signal?: AbortSignal): Promise<{ damaged: string[]; failed: string[] }> {
+    const files = snapshot.part.files;
+    const damaged: string[] = [], failed: string[] = [];
+    if (!files) return { damaged, failed };
+    const key = Buffer.from(files.key, 'base64url');
+    const base = `${prefix}${TODO_FILES_FOLDER}${files.namespace}/`;
+    const skip = new Set(plan.missing);
+    const wanted = [...snapshot.contents].filter(([sha256]) => !plan.present.has(sha256) && !skip.has(sha256));
     let refused = 0;
     for (const [index, [sha256, size]] of wanted.entries()) {
       try {
-        if (!await this.files.hasContent(sha256, size)) missing.push(sha256);
-        else if (!await this.uploadContent(objects, base, key, sha256, size)) damaged.push(sha256);
+        if (!await this.uploadContent(objects, base, key, sha256, size)) damaged.push(sha256);
         else refused = 0;
       } catch (error) {
         if (signal?.aborted) throw error;
@@ -154,7 +169,7 @@ export class TodoBackup {
         failed.push(sha256);
       }
     }
-    return { damaged, failed, missing };
+    return { damaged, failed };
   }
 
   /** Moves each time a restore replaces the todos. */

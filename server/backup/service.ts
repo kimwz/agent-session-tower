@@ -55,8 +55,12 @@ const FILE = 'backup-settings.json';
 /** Files a restore may replace, copied aside first. Skills replaced go to Tower's skill trash as usual. */
 const REPLACED = [...Object.keys(WORKER_FILES), 'skills.json', 'guidance', 'project-groups.json', 'remote-exclusions.json', 'decisions.json', FILE, join('master', 'settings.json'), join('master', 'elevenlabs-key.json')];
 
-/** A backup that could not hold all the todos keeps at least this many more older backups than `keep`. */
-const INCOMPLETE_EXTRA_KEPT = 30;
+/** What ends the name of a partial backup: one that could not hold all the todos. */
+const PARTIAL = `-partial${BACKUP_EXTENSION}`;
+/** Partial backups kept, at least (or `keep` when that is more). */
+const PARTIAL_KEPT = 30;
+/** A backup name's time as one sortable string, the old names (to the second) and the new (to the millisecond) alike. */
+const backupTime = (key: string) => { const found = /(\d{8}T\d{6})(\d{3})?Z/.exec(key.slice(key.lastIndexOf('/') + 1)); return found ? `${found[1]}${found[2] ?? '000'}` : ''; };
 /** Attachment objects of one computer may be many more than its backups; they are listed this far. */
 const TODO_OBJECTS_LISTED = 200_000;
 
@@ -185,8 +189,10 @@ export class BackupService {
   /** This computer in backup names: its host name and its mark. */
   private get computer(): string { return `${this.host}-${this.saved.machine}`; }
   private fileName(at: number): string { return `tower-backup-${this.computer}-${new Date(at).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}${BACKUP_EXTENSION}`; }
-  /** An automatic backup's name: its time to the millisecond and a random part, so no two runs ever share a key. */
-  private uploadName(at: number): string { return `tower-backup-${this.computer}-${new Date(at).toISOString().replace(/[-:.]/g, '')}-${randomBytes(4).toString('hex')}${BACKUP_EXTENSION}`; }
+  /** An automatic backup's name: its time to the millisecond and a random part, so no two runs ever share a key; tagged when partial. */
+  private uploadName(at: number, partial: boolean): string {
+    return `tower-backup-${this.computer}-${new Date(at).toISOString().replace(/[-:.]/g, '')}-${randomBytes(4).toString('hex')}${partial ? PARTIAL : BACKUP_EXTENSION}`;
+  }
 
   /** An encrypted backup to download. */
   /**
@@ -226,7 +232,7 @@ export class BackupService {
       scan: async prefix => { const listing = await client.scan(prefix, TODO_OBJECTS_LISTED); return { keys: listing.items.map(item => item.key), complete: listing.complete }; } };
   }
   /** Exactly this computer's automatic backups: its own name and mark, then a time and nothing else. */
-  private own(key: string, prefix: string): boolean { return key.startsWith(prefix) && /^\d{8}T\d{6}(?:\d{3}Z-[0-9a-f]{8}|Z)\.towerbackup$/.test(key.slice(prefix.length)); }
+  private own(key: string, prefix: string): boolean { return key.startsWith(prefix) && /^\d{8}T\d{6}(?:\d{3}Z-[0-9a-f]{8}(?:-partial)?|Z)\.towerbackup$/.test(key.slice(prefix.length)); }
 
   /** Makes an automatic backup when one is due: never made, older than the interval, or retried a while after a failure. */
   async runIfDue(): Promise<void> {
@@ -243,8 +249,8 @@ export class BackupService {
   /**
    * Makes a backup now and uploads it; answers its key. One at a time. The upload is what counts: removing this
    * computer's oldest backups afterwards may fail (a key allowed only to write) without making it upload again. A
-   * backup that could not hold all its todos still goes up, but removes no older backup: one of those may be the last
-   * that can bring them back.
+   * backup that could not hold all its todos goes up as a partial backup, which never removes a complete one: a
+   * complete one may be the last that can bring them back.
    */
   upload(): Promise<string> {
     if (this.running) return this.running;
@@ -258,24 +264,28 @@ export class BackupService {
       const attempted = this.saved.status.lastAttemptAt;
       await this.change(() => { this.saved = { ...this.saved, status: { ...this.saved.status, lastAttemptAt: new Date(at).toISOString() } }; }).catch(() => {});
       const undoAttempt = () => this.change(() => { const { lastAttemptAt: _at, ...status } = this.saved.status; this.saved = { ...this.saved, status: { ...status, ...(attempted ? { lastAttemptAt: attempted } : {}) } }; }).catch(() => {});
-      const key = `${settings.remote.prefix}${this.uploadName(at)}`;
-      // A restore after this point replaces what the snapshot below holds; see the check before removing older backups.
+      // A restore after this point replaces what the snapshot below holds: the round then removes nothing.
       const generation = this.options.todos?.generation();
       const todos = this.todoSnapshot();
-      // What keeps this backup from holding all the todos, as the owner reads it; any of it keeps older backups.
-      const missing: string[] = [];
-      if (this.options.todos && !todos) missing.push('할 일 저장소를 읽지 못해 할 일이 빠졌습니다');
-      if (this.options.todos?.restoring()) missing.push('복원한 첨부 파일을 아직 받아 오는 중입니다');
+      // Why this backup cannot hold all the todos, known before it goes up; any of it makes it a partial backup.
+      const partial: string[] = [];
+      if (this.options.todos && !todos) partial.push('할 일 저장소를 읽지 못해 할 일이 빠졌습니다');
+      if (todos?.newer) partial.push('더 새로운 Tower가 바꾼 할 일 저장소라 이 Tower가 아는 내용만 담았습니다');
+      if (this.options.todos?.restoring()) partial.push('복원한 첨부 파일을 아직 받아 오는 중입니다');
+      const warnings: string[] = [];
+      let key = '';
       try {
         const text = await encryptBackup(await this.payload(todos, settings), settings.passphrase, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
-        // The backup first, so a slow or stopped attachment upload never costs the settings; a backup whose
-        // attachments did not all go up then keeps the older ones (below).
+        const plan = todos ? await this.options.todos!.plan(this.objects(client), settings.remote.prefix, todos) : undefined;
+        if (plan?.missing.length) partial.push(`이 컴퓨터에 내용이 없는 첨부 파일 ${plan.missing.length}개가 빠졌습니다`);
+        key = `${settings.remote.prefix}${this.uploadName(at, partial.length > 0)}`;
+        // The backup first, so a slow or stopped attachment upload never costs the settings. Attachments that then
+        // fail to go up are still on this computer and named by the backup: the next backup sends them.
         await client.put(key, Buffer.from(text), 'application/octet-stream');
-        if (todos) {
-          const attachments = await this.options.todos!.upload(this.objects(client), settings.remote.prefix, todos, this.closing.signal);
-          if (attachments.damaged.length) missing.push(`이 컴퓨터에서 손상된 첨부 파일 ${attachments.damaged.length}개가 빠졌습니다`);
-          if (attachments.failed.length) missing.push(`저장소에 올리지 못한 첨부 파일 ${attachments.failed.length}개가 빠졌습니다`);
-          if (attachments.missing.length) missing.push(`이 컴퓨터에 내용이 없는 첨부 파일 ${attachments.missing.length}개가 빠졌습니다`);
+        if (todos && plan) {
+          const attachments = await this.options.todos!.upload(this.objects(client), settings.remote.prefix, todos, plan, this.closing.signal);
+          if (attachments.damaged.length) warnings.push(`이 컴퓨터에서 손상된 첨부 파일 ${attachments.damaged.length}개는 올리지 않았습니다.`);
+          if (attachments.failed.length) warnings.push(`첨부 파일 ${attachments.failed.length}개를 저장소에 올리지 못했습니다. 다음 백업 때 다시 올립니다.`);
         }
       } catch (error) {
         // Stopped because Tower is shutting down: not a failure, and the next start tries again when due.
@@ -284,22 +294,24 @@ export class BackupService {
         await this.change(() => { this.saved = { ...this.saved, status: { ...this.saved.status, lastError: message } }; }).catch(() => {});
         throw error;
       }
-      const warnings: string[] = [];
-      // Removing older backups takes turns with restores, so none applies between the check and the removal.
-      await this.oneRestore(async () => {
-        if (this.options.todos && (this.options.todos.generation() !== generation || this.options.todos.restoring())) missing.push('백업하는 동안 할 일을 복원했습니다');
-        // A backup that could not hold all the todos keeps the older ones, up to a bound: a cause that stays (an
-        // attachment missing everywhere, a todo file that cannot be read) must not let the backups grow without end.
-        const kept = missing.length ? Math.max(settings.keep + INCOMPLETE_EXTRA_KEPT, 2 * settings.keep) : settings.keep;
-        if (missing.length) warnings.push(`이번 백업에 할 일이 온전히 들어가지 않아 오래된 백업을 정리하지 않았습니다: ${missing.join(', ')}. 원인을 해결하면(내용이 없는 첨부 파일을 지우거나 할 일 저장소를 고치면) 다시 정리합니다. 그때까지는 최근 ${kept}개를 넘는 백업만 지웁니다.`);
-        try {
-          const listing = await client.scan(own);
-          // Only a whole listing says which backups are the oldest; from any other nothing is removed.
-          if (!listing.complete) throw new BackupError('저장소의 백업 목록을 끝까지 읽지 못해 정리하지 않았습니다.', 'upstream');
-          const mine = [...new Set(listing.items.filter(item => this.own(item.key, own)).map(item => item.key))].sort();
-          for (const item of mine.slice(0, Math.max(0, mine.length - kept))) await client.delete(item);
-        } catch (error) { warnings.push(`오래된 백업을 정리하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`); }
-      });
+      if (partial.length) warnings.push(`할 일이 온전히 들어가지 않은 부분 백업으로 올렸고, 온전한 백업은 지우지 않았습니다: ${partial.join(', ')}. 원인을 해결하면(내용이 없는 첨부 파일을 지우거나 할 일 저장소를 고치면) 다시 온전한 백업이 만들어집니다.`);
+      try {
+        const listing = await client.scan(own);
+        // Only a whole listing says which backups are the oldest; from any other nothing is removed.
+        if (!listing.complete) throw new BackupError('저장소의 백업 목록을 끝까지 읽지 못해 정리하지 않았습니다.', 'upstream');
+        const mine = [...new Set(listing.items.filter(item => this.own(item.key, own)).map(item => item.key))]
+          .sort((a, b) => backupTime(a).localeCompare(backupTime(b)) || (a < b ? -1 : a > b ? 1 : 0));
+        // Partial backups never push out complete ones: complete ones rotate only after a complete backup, partial
+        // ones (a bounded number) after any.
+        const partials = mine.filter(item => item.endsWith(PARTIAL)), completes = mine.filter(item => !item.endsWith(PARTIAL));
+        const doomed = [...partials.slice(0, Math.max(0, partials.length - Math.max(settings.keep, PARTIAL_KEPT))),
+          ...(partial.length ? [] : completes.slice(0, Math.max(0, completes.length - settings.keep)))];
+        // Decided in turn with restores: one applied while this backup was made means it removes nothing. The
+        // removing itself is not held up behind: a restore that starts now already holds the backup it applies.
+        const restored = await this.oneRestore(async () => Boolean(this.options.todos && this.options.todos.generation() !== generation));
+        if (restored) warnings.push('백업하는 동안 할 일을 복원했습니다. 이번에는 오래된 백업을 지우지 않았습니다.');
+        else for (const item of doomed) await client.delete(item);
+      } catch (error) { warnings.push(`오래된 백업을 정리하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`); }
       const warning = warnings.length ? warnings.join(' ') : undefined;
       await this.change(() => {
         const { lastError: _error, lastWarning: _warning, ...status } = this.saved.status;

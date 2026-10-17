@@ -393,9 +393,8 @@ export class TodoStore {
    * Everything a backup keeps, read at one moment: the data tables' rows, the step of the schema this build writes, the
    * attachments' key, and the contents the rows name. Undefined when the file cannot be read.
    */
-  backupData(): { schema: number; tables: TodoTables; key?: string; contents: Map<string, number> } | undefined {
-    // A file a newer build changed may hold what this build cannot put in a backup of its own schema.
-    if (!this.db || this.state.state === 'unavailable' || this.fileStep > TODO_SCHEMA_STEP) return undefined;
+  backupData(): { schema: number; tables: TodoTables; key?: string; contents: Map<string, number>; newer: boolean } | undefined {
+    if (!this.db || this.state.state === 'unavailable') return undefined;
     const columns = this.schemaColumns();
     this.db.exec('BEGIN');
     try {
@@ -407,7 +406,8 @@ export class TodoStore {
       }
       const contents = new Map(this.all<{ sha256: string; size: number }>('SELECT sha256, MAX(size) AS size FROM todo_files GROUP BY sha256').map(row => [row.sha256, Number(row.size)]));
       const key = this.meta('files_key');
-      return { schema: TODO_SCHEMA_STEP, tables, ...(key ? { key } : {}), contents };
+      // A file a newer build changed may hold more than this build's columns and tables: `newer` says so.
+      return { schema: TODO_SCHEMA_STEP, tables, ...(key ? { key } : {}), contents, newer: this.fileStep > TODO_SCHEMA_STEP };
     } finally { if (this.db.isTransaction) this.db.exec('COMMIT'); }
   }
 
