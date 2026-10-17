@@ -52,17 +52,18 @@ export class TowerTools {
 
   constructor(private readonly options: TowerToolsOptions) {}
 
-  async call(name: string, args: Record<string, unknown>): Promise<unknown> {
+  /** `headers` go with tower_api's changes on this computer (a calling turn's reporting credential), never to a joined one. */
+  async call(name: string, args: Record<string, unknown>, headers?: Record<string, string>): Promise<unknown> {
     if (!this.options.tower.hasCredentials()) return { error: 'Tower 웹에 아직 연결되지 않았습니다. 잠시 뒤 다시 하세요.' };
     const signal = AbortSignal.timeout(this.options.toolMs ?? TOOL_MS);
-    if (name === 'tower_api') return this.towerApi(args, signal);
+    if (name === 'tower_api') return this.towerApi(args, signal, headers);
     if (name === 'tower_query') return this.towerQuery(args);
     if (name === 'session_read') return this.sessionRead(args, signal);
     if (name === 'terminal_read') return this.terminalRead(args);
     return { error: `알 수 없는 도구: ${name}` };
   }
 
-  private async towerApi(args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+  private async towerApi(args: Record<string, unknown>, signal: AbortSignal, local: Record<string, string> = {}): Promise<unknown> {
     let target: ApiTarget;
     try { target = apiTarget(String(args.method), String(args.path), typeof args.node === 'string' && args.node ? args.node : undefined, this.options.refused); }
     catch (error) { return { error: (error as Error).message }; }
@@ -75,7 +76,7 @@ export class TowerTools {
     // Out of time before anything went out: nothing was sent.
     if (signal.aborted) return { error: '시간이 오래 걸려 보내지 않았습니다. 다시 시도하세요.' };
     // A joined computer runs a new request at most once by its ID; an Auto Prompt needs its own.
-    const headers: Record<string, string> = target.node ? { 'X-Tower-Request-Id': uuidv7() } : {};
+    const headers: Record<string, string> = target.node ? { 'X-Tower-Request-Id': uuidv7() } : { ...local };
     if (target.local === '/api/auto-prompts' && body && !body.requestId) body.requestId = randomUUID();
     // Past the deadline a change still waiting for the web does not go; one on its way is not cut off.
     const response = await this.options.tower.call('POST', target.path, body, { write: true, headers, beforeSend: signal })

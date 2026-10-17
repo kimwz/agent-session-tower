@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { open, readdir } from 'node:fs/promises';
 import { request, type ClientRequest, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { isSea } from 'node:sea';
@@ -10,7 +10,8 @@ import { APP_VERSION } from '../../shared/app-identity.js';
 import { readPrivateJson } from '../stores/private-json.js';
 import { MASTER_PROTOCOL, type MasterHostReply } from './host.js';
 import type { VoiceTransportStage } from './voice-timings.js';
-import { masterPaths, type MasterPaths } from './paths.js';
+import { issueDataDir, masterPaths, type MasterPaths } from './paths.js';
+import { TODO_MASTER_TASK_ID } from '../../shared/master.js';
 import type { WebCredentials } from '../tower-tools/tower-client.js';
 import { TowerError, fromStatus, statusOf, type ErrorKind } from '../../shared/errors.js';
 import { audioSink } from '../http/sinks.js';
@@ -58,11 +59,14 @@ export class MasterClient {
     this.heartbeat.unref();
   }
 
-  /** Whether a master session exists, so the host should run to follow it. */
+  /**
+   * Whether a master session exists, so the host should run to follow it: the main master's, or an issue master's
+   * whose session was open when the host last looked.
+   */
   private async pendingWork(): Promise<boolean> {
     const { data } = await this.hostPaths();
     const saved = await readPrivateJson(join(data, 'settings.json')).catch(() => undefined) as { session?: { sessionId?: unknown } } | undefined;
-    return typeof saved?.session?.sessionId === 'string';
+    return typeof saved?.session?.sessionId === 'string' || await issueMastersOpen(data);
   }
 
   async call(method: string, args: Record<string, unknown> = {}): Promise<unknown> {
@@ -223,4 +227,19 @@ export class MasterClient {
     if (reply.error) throw relayed(reply.error.message, reply.error.statusCode);
     return reply;
   }
+}
+
+/**
+ * Whether an issue master's follow file says its session was open when the host last looked (the host marks it
+ * `closedAt` when the session is closed or gone; see issues.ts).
+ */
+async function issueMastersOpen(masterData: string): Promise<boolean> {
+  const root = issueDataDir(masterData);
+  for (const taskId of await readdir(root).catch(() => [] as string[])) {
+    if (!TODO_MASTER_TASK_ID.test(taskId)) continue;
+    // best-effort: a file that cannot be read gives no reason to start the host; the host itself sorts it out.
+    const saved = await readPrivateJson(join(root, taskId, 'follow.json')).catch(() => undefined) as { version?: unknown; closedAt?: unknown } | undefined;
+    if (saved?.version === 1 && typeof saved.closedAt !== 'string') return true;
+  }
+  return false;
 }
