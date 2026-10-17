@@ -18,7 +18,8 @@ const FOLLOW_MS = 5_000;
 const SWEEP_MS = 60 * 60_000;
 
 
-interface IssueMaster { taskId: string; binding: MasterBinding; session: MasterSession; tools: MasterTools }
+/** `followed`: from its start until it is let go of; only then are its turns taken in (see `turnsOf`). */
+interface IssueMaster { taskId: string; binding: MasterBinding; session: MasterSession; tools: MasterTools; followed: boolean }
 
 export interface IssueMastersOptions {
   /** Tower's state directory as the host resolved it. */
@@ -83,9 +84,13 @@ export class IssueMasters {
     const owner = this.turns.get(id);
     return owner !== undefined && owner !== self;
   }
-  /** Where a master tells of its own turns: `owner` is its todo, or '' for the main master. */
-  turnsOf(owner = ''): { add(runId: string): void; delete(runId: string): void } {
-    return { add: id => { this.turns.set(id, owner); }, delete: id => { if (this.turns.get(id) === owner) this.turns.delete(id); } };
+  /**
+   * Where a master tells of its own turns: `owner` is its todo, or '' for the main master. An issue master's are taken
+   * in only while it is followed: one let go of may still finish a look (a report's answer arriving), and what it adds
+   * then would be kept for no master.
+   */
+  turnsOf(owner = '', entry?: IssueMaster): { add(runId: string): void; delete(runId: string): void } {
+    return { add: id => { if (!entry || entry.followed) this.turns.set(id, owner); }, delete: id => { if (this.turns.get(id) === owner) this.turns.delete(id); } };
   }
 
   /**
@@ -146,14 +151,15 @@ export class IssueMasters {
     // Work it handed out before the host first saw it (a host just started) is still its own.
     const times = [session.createdAt, ...(snapshot.runs ?? []).filter(run => run.sessionId === session.id).map(run => run.createdAt)].map(Date.parse).filter(Number.isFinite);
     const baselineAt = times.length ? new Date(Math.min(...times) - 60_000).toISOString() : undefined;
-    const entry = { taskId, binding: bindingOf(session) } as IssueMaster;
+    const entry = { taskId, binding: bindingOf(session), followed: true } as IssueMaster;
     const { tower, live, readDb, screen, followMs, reportRetryMs } = this.options;
     entry.session = new MasterSession({ stateDir: this.options.stateDir, dataDir: issueDataDir(this.options.dataDir, taskId), binding: () => entry.binding,
       folder: join(this.options.stateDir, TODO_MASTERS_FOLDER, taskId), writeGuide: folder => writeTodoMasterGuide(folder, taskId), ...(baselineAt ? { baselineAt } : {}),
-      otherMaster: { session: id => this.masterSession(id), run: id => this.masterRun(id, taskId) }, turns: this.turnsOf(taskId), tower, live, ...(followMs ? { followMs } : {}), ...(reportRetryMs ? { reportRetryMs } : {}) });
+      otherMaster: { session: id => this.masterSession(id), run: id => this.masterRun(id, taskId) }, turns: this.turnsOf(taskId, entry), tower, live, ...(followMs ? { followMs } : {}), ...(reportRetryMs ? { reportRetryMs } : {}) });
     entry.tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), scope: `todo:${taskId}`, screen, started: (target, body, answer) => entry.session.started(target, body, answer), delegated: () => entry.session.delegatedTable() });
     try { await mkdir(issueDataDir(this.options.dataDir, taskId), { recursive: true, mode: 0o700 }); await entry.session.start(); }
     catch (error) {
+      entry.followed = false;
       // best-effort: it never started; the error that stopped it is logged below.
       await entry.session.close().catch(() => {});
       for (const id of entry.session.ownRuns()) this.turnsOf(taskId).delete(id);
@@ -169,6 +175,7 @@ export class IssueMasters {
    * masters sent it keeps its boundary through their own follow files (`Followed.master`).
    */
   private forget(entry: IssueMaster): void {
+    entry.followed = false;
     this.instances.delete(entry.taskId);
     for (const id of entry.session.ownRuns()) this.turnsOf(entry.taskId).delete(id);
     this.rebind();
