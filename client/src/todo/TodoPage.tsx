@@ -180,8 +180,10 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const sectionShape = useMemo(() => {
     const context = { world, today, start, query, searchResults };
     const base = locked && project ? archivedColumns(view, display, context, project.id) : boardColumns(view, display, context);
-    if (!project || locked || !base.some(column => column.id === 'section:none')) return { columns: base, archived: 0 };
-    return shapeSections(base, world.sections.filter(item => item.projectId === project.id), { collapse: true, showArchived: showArchivedSections, tasks: Object.values(world.tasks) });
+    if (!project || !base.some(column => column.id === 'section:none')) return { columns: base, archived: 0 };
+    const shaped = shapeSections(base, world.sections.filter(item => item.projectId === project.id), { collapse: !locked, showArchived: showArchivedSections, tasks: Object.values(world.tasks) });
+    // An archived project's archived sections show too, read-only and without a section menu like the rest of it.
+    return locked ? { ...shaped, columns: shaped.columns.map(column => ({ ...column, sectionId: undefined })) } : shaped;
   }, [view, display, world, today, start, query, searchResults, locked, project, showArchivedSections]);
   const columns = sectionShape.columns;
   // A card names its project where the list is not one project and its column does not already.
