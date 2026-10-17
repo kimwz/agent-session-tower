@@ -4,6 +4,8 @@ import type { RetentionNode } from '../../../shared/retention.js';
 
 export const RETENTION_DAYS = 7;
 export const RETAINED_PARENT_COUNT = 20;
+/** Sessions one cycle moves at most; a larger requested family leaves over several cycles. */
+export const RETENTION_SESSION_BUDGET = 100;
 const DAY = 86_400_000;
 export interface RetentionRecord {
   session: Session;
@@ -18,6 +20,9 @@ export interface RetentionRecord {
   archiveRevision?: number;
   /** Archive once the session settles, whatever its kind (a closed issue's family, masters included). */
   archiveWhenIdle?: boolean;
+  archiveRequestedAt?: string;
+  /** Last time the owner reopened this session; it then stays out of an ancestor's earlier request. */
+  reopenedAt?: string;
   restoredAt?: string;
 }
 export interface RetentionObservation {
@@ -94,13 +99,14 @@ export function selectRetention(observation: RetentionObservation): RetentionSel
     }
     return false;
   };
-  const emit = (id: string, reason: RetentionCandidate['reason'], ids: string[]) => {
+  // `family` is everything that must be safe to move, when only part of it (`ids`) moves now.
+  const emit = (id: string, reason: RetentionCandidate['reason'], ids: string[], family = ids) => {
     if (reason === 'parent-limit' && ids.some(member => {
       const record = records.get(member)!; if (record.kind === 'parent') return false;
       const ended = Math.max(time(record.latestTaskEndedAt), time(record.restoredAt)) || time(record.inactiveSince);
       return !ended || observation.now < ended + RETENTION_DAYS * DAY;
     })) { result.deferred.push({ id, reason: 'young-descendant' }); return false; }
-    const unsafe = ids.find(member => protectedIds.has(member) || observation.blockedIds?.has(member) || !validRelationship(member));
+    const unsafe = family.find(member => protectedIds.has(member) || observation.blockedIds?.has(member) || !validRelationship(member));
     if (unsafe) { result.deferred.push({ id, reason: !validRelationship(unsafe) ? 'unknown-relationship' : 'protected' }); return false; }
     result.candidates.push({ rootId: id, ids, reason, revisions: Object.fromEntries(ids.map(member => [member, records.get(member)?.archiveRevision || 0])) });
     return true;
@@ -129,17 +135,7 @@ export function selectRetention(observation: RetentionObservation): RetentionSel
   // finishes first, and activity after the request does not withdraw it (only reopening does).
   // Without a recorded end, a day of unchanged native state counts as settled.
   const depth = (id: string): number => { let count = 0; const seen = new Set<string>(); for (let node = nodes.get(id); node?.parentId && !seen.has(node.id); node = nodes.get(node.parentId)) { seen.add(node.id); count++; } return count; };
-  // A subagent's request lapses while an ancestor it belongs to is kept, so reopening a parent
-  // (which cancels only the parent's request) keeps its whole family.
-  const ancestorKept = (id: string): boolean => {
-    const seen = new Set<string>();
-    for (let node = nodes.get(id); node?.isSubagent && node.parentId && !seen.has(node.id); node = nodes.get(node.parentId)) {
-      seen.add(node.id); const parent = records.get(node.parentId);
-      if (parent && !parent.archiveWhenIdle) return true;
-    }
-    return false;
-  };
-  const requested = observation.records.filter(record => record.archiveWhenIdle && !ancestorKept(record.session.id));
+  const requested = observation.records.filter(record => record.archiveWhenIdle);
   const requestedIds = new Set(requested.map(record => record.session.id));
   // Ancestors first, so a requested family leaves as one operation rather than child by child.
   requested.sort((a, b) => depth(a.session.id) - depth(b.session.id));
@@ -149,8 +145,22 @@ export function selectRetention(observation: RetentionObservation): RetentionSel
     // An end before a restore is the one that was archived; a restored session needs a new end or a quiet day.
     const ended = time(record.latestTaskEndedAt), inactive = time(record.inactiveSince);
     if (!(ended && ended >= time(record.restoredAt)) && !(inactive && observation.now >= inactive + DAY)) { result.deferred.push({ id, reason: 'awaiting-idle' }); continue; }
-    const ids = descendants(id).filter(member => !assigned.has(member));
-    if (emit(id, 'explicit-archive', ids)) for (const member of ids) assigned.add(member);
+    const family = descendants(id).filter(member => !assigned.has(member));
+    // A descendant reopened or restored on its own after this request is the owner's again: the family
+    // waits (child expiry still applies to it) unless that descendant was requested once more since.
+    const since = Math.max(time(record.archiveRequestedAt), time(record.restoredAt));
+    if (family.some(member => {
+      const other = records.get(member)!; const kept = Math.max(time(other.reopenedAt), time(other.restoredAt));
+      return member !== id && kept > since && !(other.archiveWhenIdle && time(other.archiveRequestedAt) >= kept);
+    })) { result.deferred.push({ id, reason: 'reopened-descendant' }); continue; }
+    // A family over the cycle budget moves deepest members first, so every batch takes whole subtrees
+    // and the requested session itself goes with the last one.
+    const ids = family.length > RETENTION_SESSION_BUDGET
+      ? [...family].sort((a, b) => depth(b) - depth(a) || a.localeCompare(b)).slice(0, RETENTION_SESSION_BUDGET) : family;
+    if (!emit(id, 'explicit-archive', ids, family)) continue;
+    for (const member of ids) assigned.add(member);
+    // The rest of the family is budget-deferred, which brings the next cycle forward.
+    if (ids.length < family.length) result.deferred.push({ id, reason: 'session-budget' });
   }
   for (const record of observation.records) {
     const { session } = record;

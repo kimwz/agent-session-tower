@@ -19,7 +19,7 @@ export async function privateDirectory(path: string): Promise<string> {
 export function validateOperationId(id: string): void {
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id)) throw new Error('Invalid retention operation ID.');
 }
-export interface RetentionPolicyState { id: string; archivedAt?: string; archiveRevision: number; restoredAt?: string; archiveWhenIdle?: boolean }
+export interface RetentionPolicyState { id: string; archivedAt?: string; archiveRevision: number; restoredAt?: string; archiveWhenIdle?: boolean; archiveRequestedAt?: string; reopenedAt?: string }
 export class RetentionStore {
   private entries = new Map<string, RetentionJournalEntry>();
   private policies = new Map<string, RetentionPolicyState>();

@@ -349,8 +349,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'setClosed': {
         if (!options.closedSessions) throw new TowerError('unavailable', 'Session closure is unavailable.');
         if (typeof args[0] !== 'string' || typeof args[1] !== 'boolean') throw new TowerError('invalid', 'Invalid session closure request.');
-        // Cancel before restoring, so a restored session never sits with its archive request still standing.
-        if (!args[1] && options.retention) { await options.retention.service.cancelArchiveRequest(args[0]); await options.retention.service.restoreSession(args[0]); }
+        if (!args[1] && options.retention) await options.retention.service.restoreSession(args[0]);
         const session = options.runs.getSession(args[0]);
         if (!session) return undefined;
         if (!args[1]) {

@@ -73,15 +73,47 @@ test('a restored requested session needs a new end or a quiet day before it goes
   assert.equal(selectRetention(observation([master])).candidates.length, 1);
 });
 
-test('a subagent request lapses while its parent is kept, leaving only the usual child expiry', () => {
-  const master = record('master'), child = record('child', 'master', requested());
-  assert.deepEqual(selectRetention(observation([master, child])).candidates, []);
-  child.latestTaskEndedAt = child.lastActivityAt = iso(now - 8 * day);
-  assert.equal(selectRetention(observation([master, child])).candidates[0].reason, 'child-expired');
+test('a subagent request is honoured on its own, even under a parent that stays', () => {
+  const master = record('master'), child = record('child', 'master', requested()), grandchild = record('grandchild', 'child');
+  const [candidate, ...others] = selectRetention(observation([master, child, grandchild])).candidates;
+  assert.equal(others.length, 0); assert.equal(candidate.rootId, 'child'); assert.deepEqual(candidate.ids.sort(), ['child', 'grandchild']);
   // Requested on both sides, the family leaves as one operation rooted at the parent.
-  Object.assign(master, requested()); child.latestTaskEndedAt = child.lastActivityAt = iso(now - hour);
-  const candidates = selectRetention(observation([master, child])).candidates;
-  assert.equal(candidates.length, 1); assert.equal(candidates[0].rootId, 'master');
+  Object.assign(master, requested());
+  const candidates = selectRetention(observation([master, child, grandchild])).candidates;
+  assert.equal(candidates.length, 1); assert.equal(candidates[0].rootId, 'master'); assert.equal(candidates[0].ids.length, 3);
+});
+
+test('a descendant reopened or restored on its own after the request holds the family back until requested again', () => {
+  const master = record('master', undefined, requested({ archiveRequestedAt: iso(now - 3 * hour) }));
+  const child = record('child', 'master', { reopenedAt: iso(now - 2 * hour) });
+  assert.deepEqual(selectRetention(observation([master, child])).deferred, [{ id: 'master', reason: 'reopened-descendant' }]);
+  child.reopenedAt = undefined; child.restoredAt = iso(now - 2 * hour);
+  assert.deepEqual(selectRetention(observation([master, child])).deferred, [{ id: 'master', reason: 'reopened-descendant' }]);
+  // Restored together with the parent is the same family coming back, not a separate reopen.
+  master.restoredAt = child.restoredAt; master.latestTaskEndedAt = iso(now - hour);
+  assert.equal(selectRetention(observation([master, child])).candidates.length, 1);
+  // A reopen before the request, or a request on the descendant since its reopen, lets the family go.
+  delete master.restoredAt; delete child.restoredAt; child.reopenedAt = iso(now - 4 * hour);
+  assert.equal(selectRetention(observation([master, child])).candidates.length, 1);
+  child.reopenedAt = iso(now - 2 * hour); Object.assign(child, requested({ archiveRequestedAt: iso(now - hour) }));
+  assert.deepEqual(selectRetention(observation([master, child])).candidates[0].ids.sort(), ['child', 'master']);
+});
+
+test('a requested family over the cycle budget leaves in batches, deepest members first and the parent last', () => {
+  const master = record('master', undefined, requested());
+  const children = Array.from({ length: 120 }, (_, i) => record(`c${String(i).padStart(3, '0')}`, 'master'));
+  const grandchildren = Array.from({ length: 30 }, (_, i) => record(`g${i}`, 'c000'));
+  let hot = [master, ...children, ...grandchildren];
+  const first = selectRetention(observation(hot)).candidates;
+  assert.equal(first.length, 1); assert.equal(first[0].rootId, 'master'); assert.equal(first[0].ids.length, 100);
+  assert.ok(grandchildren.every(record => first[0].ids.includes(record.session.id))); assert.ok(!first[0].ids.includes('master'));
+  // One working member anywhere holds every batch back.
+  children[119].session.status = 'working';
+  assert.deepEqual(selectRetention(observation(hot)).deferred, [{ id: 'master', reason: 'protected' }]);
+  children[119].session.status = 'completed';
+  hot = hot.filter(record => !first[0].ids.includes(record.session.id));
+  const second = selectRetention(observation(hot)).candidates;
+  assert.equal(second[0].ids.length, 51); assert.ok(second[0].ids.includes('master'));
 });
 
 test('helpers a master launched are their own requests, and parent limits keep counting other parents', () => {
@@ -96,15 +128,16 @@ async function fixture(run: (path: string) => Promise<void>): Promise<void> {
   try { await prepareActualStorage(path); await run(path); } finally { await closeActualStorage(path); await rm(path, { recursive: true, force: true }); }
 }
 /** Moves fixture originals into a cold folder and back, recording each step like the native adapter. */
-function movingAdapter(native: string, originals: string): RetentionAdapter & { moved: string[] } {
+function movingAdapter(native: string, originals: string, beforeMove?: () => Promise<void>): RetentionAdapter & { moved: string[] } {
   const moved: string[] = [];
   return { moved, capability: () => ({ status: 'supported' }), files: async () => [], inspectCold: async members => ({ complete: true, members, issues: [] }),
-    reserve: async (candidate, _records, ctx) => ({ revalidate: async () => { await ctx.fresh(); return true; }, preserveOwnership: async () => {}, release: async () => {},
+    reserve: async (candidate, records, ctx) => ({ revalidate: async () => { await beforeMove?.(); await ctx.fresh(); return true; }, preserveOwnership: async () => {}, release: async () => {},
       moveCold: async () => {
         const members: RetentionMember[] = [];
         for (const id of candidate.ids) {
           const hot = join(native, `${id}.jsonl`), cold = join(originals, `${id}.jsonl`); const info = await stat(hot);
-          const member: RetentionMember = { sessionId: id, provider: 'claude', nativeId: id, ...(id === 'master' ? {} : { parentId: 'master' }), originalPath: hot, coldPath: cold, operationId: ctx.operationId, state: 'intent', identity: { dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs } };
+          const parentId = records.find(record => record.session.id === id)?.session.parentId;
+          const member: RetentionMember = { sessionId: id, provider: 'claude', nativeId: id, ...(parentId ? { parentId } : {}), originalPath: hot, coldPath: cold, operationId: ctx.operationId, state: 'intent', identity: { dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs } };
           await ctx.commitMember(member); await rename(hot, cold); moved.push(id);
           const confirmed = { ...member, state: 'cold' as const }; await ctx.commitMember(confirmed); members.push(confirmed);
         }
@@ -143,11 +176,11 @@ test('a request survives a service restart, archives the master with its subagen
     summary = await service.cycle(); assert.equal(summary.archivedMembers, 2); assert.deepEqual(adapter.moved.sort(), ['child', 'master']);
     await assert.rejects(readFile(join(native, 'master.jsonl')), /ENOENT/);
     hot = false;
-    // Reopening (setClosed false) cancels first, then restores the family.
-    await service.cancelArchiveRequest('master'); await service.restoreSession('master');
+    // Reopening (setClosed false) restores the family, then cancels the request.
+    await service.restoreSession('master'); await service.cancelArchiveRequest('master');
     assert.equal(await readFile(join(native, 'master.jsonl'), 'utf8'), 'master transcript\n');
     assert.equal(await readFile(join(native, 'child.jsonl'), 'utf8'), 'child transcript\n');
-    assert.equal(store.policy('master')?.archiveWhenIdle, undefined); assert.ok(store.policy('master')?.restoredAt);
+    assert.equal(store.policy('master')?.archiveWhenIdle, undefined); assert.ok(store.policy('master')?.restoredAt); assert.ok(store.policy('master')?.reopenedAt);
     hot = true;
     summary = await service.cycle(); assert.equal(summary.candidates, 0);
   } finally { await service.quiesce(); }
@@ -167,5 +200,40 @@ test('a restore without reopening keeps the request; cancelling clears it durabl
     await service.cancelArchiveRequest('master');
     const reopened = new RetentionStore(root, { storage: actualStorage(root) }); await reopened.start();
     assert.equal(reopened.policy('master')?.archiveWhenIdle, undefined);
+  } finally { await service.quiesce(); }
+}));
+
+test('a family of 151 sessions leaves over two cycles, the parent with the last batch', async () => fixture(async path => {
+  const native = join(path, 'native'), originals = join(path, 'originals'), root = join(path, 'state'); await mkdir(native); await mkdir(originals);
+  const ids = ['master', ...Array.from({ length: 150 }, (_, i) => `c${i}`)];
+  for (const id of ids) await writeFile(join(native, `${id}.jsonl`), `${id}\n`);
+  const adapter = movingAdapter(native, originals);
+  const store = new RetentionStore(root, { storage: actualStorage(root) }); await store.start(now - 30 * day);
+  const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'bundles'), [native], [originals]), adapter, onError: () => {},
+    observe: async () => observation(ids.filter(id => !adapter.moved.includes(id)).map(id => id === 'master' ? record('master') : record(id, 'master'))) });
+  await service.start();
+  try {
+    await service.requestArchive(['master']);
+    let summary = await service.cycle(); assert.equal(adapter.moved.length, 100); assert.ok(!adapter.moved.includes('master')); assert.equal(summary.archivedMembers, 100); assert.equal(summary.deferredReasons?.['session-budget'], 1);
+    summary = await service.cycle(); assert.equal(adapter.moved.length, 151); assert.ok(adapter.moved.includes('master')); assert.equal(summary.archivedMembers, 151);
+  } finally { await service.quiesce(); }
+}));
+
+test('a descendant reopened while its family is being reserved stops the move before any original leaves', async () => fixture(async path => {
+  const native = join(path, 'native'), originals = join(path, 'originals'), root = join(path, 'state'); await mkdir(native); await mkdir(originals);
+  for (const id of ['master', 'child']) await writeFile(join(native, `${id}.jsonl`), `${id}\n`);
+  const store = new RetentionStore(root, { storage: actualStorage(root) }); await store.start(now - 30 * day);
+  // The reopen lands between selection and the move (written directly: the cycle holds the service queue).
+  const adapter = movingAdapter(native, originals, async () => { await store.setPolicy({ id: 'child', archiveRevision: 1, reopenedAt: new Date().toISOString() }); });
+  const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'bundles'), [native], [originals]), adapter, onError: () => {},
+    observe: async () => observation([record('master'), record('child', 'master')]) });
+  await service.start();
+  try {
+    await service.requestArchive(['master']);
+    const summary = await service.cycle();
+    assert.deepEqual(adapter.moved, []); assert.equal(summary.archived, 0); assert.equal(store.list()[0].phase, 'conflict');
+    assert.equal(await readFile(join(native, 'child.jsonl'), 'utf8'), 'child\n');
+    assert.equal(store.policy('master')?.archiveWhenIdle, true);
+    assert.equal((await service.cycle()).deferredReasons?.['reopened-descendant'], 1);
   } finally { await service.quiesce(); }
 }));
