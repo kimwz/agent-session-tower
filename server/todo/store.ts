@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { TowerError } from '../../shared/errors.js';
 import type { TodoOp, TodoOpName, TodoOpOf, TodoRequest } from '../../shared/todo/ops.js';
-import type { TodoAvailability, TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoRestoreProgress, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import type { TodoAvailability, TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoRestoreProgress, TodoSubtaskCount, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { nodeVerified, sqlitePatched } from '../storage/runtime.js';
 import { TodoContext } from './context.js';
 import { checkTodoFileRow, todoFilePath, usableContent } from './files.js';
@@ -12,7 +12,7 @@ import { createComment, deleteComment, updateComment } from './ops/comments.js';
 import { attachFile, checkAttachable, deleteFile, restoreFile, type NewTodoFile } from './ops/files.js';
 import { createLink, deleteLink } from './ops/links.js';
 import { MAX_PROJECT_LEVELS, createLabel, createProject, createSection, deleteLabel, deleteProject, deleteSection, moveLabel, moveProject, moveSection, restoreLabel, restoreProject, restoreSection, updateLabel, updateProject, updateSection } from './ops/projects.js';
-import { MAX_TASK_DEPTH, completeTask, createTask, deleteTask, moveTask, restoreTask, uncompleteTask, updateTask } from './ops/tasks.js';
+import { MAX_TASK_DEPTH, completeTask, createTask, deleteTask, duplicateTask, moveTask, restoreTask, uncompleteTask, updateTask } from './ops/tasks.js';
 import { TASK_COLUMNS, VISIBLE_FILE, commentOf, completionOf, eventOf, fileOf, labelOf, linkOf, projectOf, sectionOf, taskOf } from './rows.js';
 import { TODO_DATA_TABLES, TODO_SCHEMA, TODO_SCHEMA_STEP, minWriterAt } from './schema.js';
 
@@ -32,6 +32,7 @@ const OPERATIONS: { [N in TodoOpName]: Handler } = {
   'task.create': handler<'task.create'>((ctx, op) => createTask(ctx, op, INBOX_ID)),
   'task.update': handler(updateTask),
   'task.move': handler(moveTask),
+  'task.duplicate': handler(duplicateTask),
   'task.complete': handler(completeTask),
   'task.uncomplete': handler(uncompleteTask),
   'task.delete': handler(deleteTask),
@@ -211,7 +212,7 @@ export class TodoStore {
   }
 
   overview(): TodoOverview {
-    if (!this.db || this.state.state === 'unavailable') return { availability: this.state, revision: this.revisionValue, projects: [], sections: [], labels: [], tasks: [], links: [], commentCounts: {}, fileCounts: {} };
+    if (!this.db || this.state.state === 'unavailable') return { availability: this.state, revision: this.revisionValue, projects: [], sections: [], labels: [], tasks: [], links: [], commentCounts: {}, fileCounts: {}, subtaskCounts: {} };
     const tasks = this.all(`SELECT ${TASK_COLUMNS} FROM todo_tasks t JOIN todo_projects p ON p.id = t.project_id AND p.deleted_at IS NULL WHERE t.deleted_at IS NULL AND t.completed_at IS NULL`).map(taskOf);
     const links = this.all(`SELECT k.* FROM todo_links k JOIN todo_tasks a ON a.id = k.from_task_id AND a.deleted_at IS NULL JOIN todo_tasks b ON b.id = k.to_task_id AND b.deleted_at IS NULL
       WHERE a.completed_at IS NULL OR b.completed_at IS NULL`).map(linkOf);
@@ -224,8 +225,25 @@ export class TodoStore {
       projects: this.all('SELECT * FROM todo_projects WHERE deleted_at IS NULL ORDER BY sort_key').map(projectOf),
       sections: this.all('SELECT * FROM todo_sections WHERE deleted_at IS NULL ORDER BY sort_key').map(sectionOf),
       labels: this.all('SELECT * FROM todo_labels WHERE deleted_at IS NULL ORDER BY sort_key').map(labelOf),
-      tasks, links, commentCounts, fileCounts, ...(this.restoreProgress ? { restore: { ...this.restoreProgress } } : {}),
+      tasks, links, commentCounts, fileCounts, subtaskCounts: this.subtaskCounts(), ...(this.restoreProgress ? { restore: { ...this.restoreProgress } } : {}),
     };
+  }
+
+  /** Direct sub-tasks not deleted, and how many are completed: of every open task that has any, or of `parents`. */
+  private subtaskCounts(parents?: Set<string>): Record<string, TodoSubtaskCount> {
+    const counts: Record<string, TodoSubtaskCount> = {};
+    if (parents) {
+      for (const id of parents) {
+        const row = this.get<{ done: number | null; total: number }>('SELECT SUM(completed_at IS NOT NULL) AS done, COUNT(*) AS total FROM todo_tasks WHERE parent_id = ? AND deleted_at IS NULL', id)!;
+        counts[id] = { done: Number(row.done ?? 0), total: Number(row.total) };
+      }
+      return counts;
+    }
+    for (const row of this.all<{ parent_id: string; done: number; total: number }>(`SELECT c.parent_id, SUM(c.completed_at IS NOT NULL) AS done, COUNT(*) AS total
+      FROM todo_tasks c JOIN todo_tasks p ON p.id = c.parent_id WHERE c.deleted_at IS NULL AND p.deleted_at IS NULL AND p.completed_at IS NULL GROUP BY c.parent_id`)) {
+      counts[row.parent_id] = { done: Number(row.done), total: Number(row.total) };
+    }
+    return counts;
   }
 
   private task(id: string): TodoTask | undefined {
@@ -254,7 +272,7 @@ export class TodoStore {
   }
 
   /** Completions newest first. `before` is the cursor a page answered (`<time>~<row>`), so rows of one time never fall between pages. */
-  completed(input: { projectId?: string; before?: string; limit?: number }): TodoCompletedPage {
+  completed(input: { projectId?: string; labelId?: string; before?: string; limit?: number }): TodoCompletedPage {
     this.readable();
     const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
     const cursor = input.before ? TODO_COMPLETED_CURSOR.exec(input.before) : undefined;
@@ -263,8 +281,9 @@ export class TodoStore {
     const rows = this.all<Record<string, unknown>>(`SELECT c.rowid AS c_row, c.id AS c_id, c.task_id AS c_task_id, c.occurrence_date AS c_occurrence_date, c.completed_at AS c_completed_at, ${TASK_COLUMNS}
       FROM todo_completions c JOIN todo_tasks t ON t.id = c.task_id JOIN todo_projects p ON p.id = t.project_id AND p.deleted_at IS NULL
       WHERE c.undone_at IS NULL AND t.deleted_at IS NULL AND (? IS NULL OR t.project_id = ?)
+        AND (? IS NULL OR EXISTS (SELECT 1 FROM todo_task_labels tl WHERE tl.task_id = t.id AND tl.label_id = ?))
         AND (? IS NULL OR c.completed_at < ? OR (c.completed_at = ? AND c.rowid < ?))
-      ORDER BY c.completed_at DESC, c.rowid DESC LIMIT ?`, input.projectId ?? null, input.projectId ?? null, at, at, at, row, limit + 1);
+      ORDER BY c.completed_at DESC, c.rowid DESC LIMIT ?`, input.projectId ?? null, input.projectId ?? null, input.labelId ?? null, input.labelId ?? null, at, at, at, row, limit + 1);
     const page = rows.slice(0, limit);
     const items = page.map(item => ({
       completion: completionOf({ id: item.c_id, task_id: item.c_task_id, occurrence_date: item.c_occurrence_date, completed_at: item.c_completed_at }), task: taskOf(item),
@@ -362,16 +381,20 @@ export class TodoStore {
 
   private changes(ctx: TodoContext, revision: number): TodoChanges {
     const rows = (table: string, ids: Set<string>) => [...ids].map(id => this.get(`SELECT * FROM ${table} WHERE id = ?`, id)).filter((row): row is Record<string, unknown> => !!row);
+    const tasks = [...ctx.touched.tasks].map(id => this.task(id)).filter((task): task is TodoTask => !!task);
+    // A touched task's parent, and one it moved away from, may count its sub-tasks differently now.
+    const parents = new Set([...ctx.parents, ...tasks.flatMap(task => task.parentId ? [task.parentId] : [])]);
     return {
       revision,
       projects: rows('todo_projects', ctx.touched.projects).map(projectOf),
       sections: rows('todo_sections', ctx.touched.sections).map(sectionOf),
       labels: rows('todo_labels', ctx.touched.labels).map(labelOf),
-      tasks: [...ctx.touched.tasks].map(id => this.task(id)).filter((task): task is TodoTask => !!task),
+      tasks,
       links: rows('todo_links', ctx.touched.links).map(linkOf),
       removedLinks: ctx.removedLinks,
       comments: rows('todo_comments', ctx.touched.comments).map(commentOf),
       files: rows('todo_files', ctx.touched.files).map(fileOf),
+      ...(parents.size ? { subtaskCounts: this.subtaskCounts(parents) } : {}),
     };
   }
 

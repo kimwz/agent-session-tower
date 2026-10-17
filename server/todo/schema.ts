@@ -85,6 +85,9 @@ export const TODO_SCHEMA: readonly TodoSchemaStep[] = [
     CREATE INDEX todo_files_comment ON todo_files(comment_id);
     CREATE INDEX todo_files_sha256 ON todo_files(sha256);
   ` },
+  // A task's place among the tasks of its date (shared/todo/day-order.ts). It names the date it belongs to, so an
+  // older build that changes a date without knowing it leaves nothing wrong behind.
+  { sql: 'ALTER TABLE todo_tasks ADD COLUMN day_order TEXT;' },
 ];
 
 export const TODO_SCHEMA_STEP = TODO_SCHEMA.length;

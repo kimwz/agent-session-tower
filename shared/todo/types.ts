@@ -73,8 +73,16 @@ export interface TodoTask extends Stamped {
   deadlineDate: string | null;
   labelIds: string[];
   sortKey: string;
+  /**
+   * Its place among the tasks of its date, set by hand in the date lists: `<YYYY-MM-DD>|<sortKey>`. It counts only while
+   * the date is the task's date (see shared/todo/day-order.ts), so moving or repeating a task needs no reset.
+   */
+  dayOrder: string | null;
   completedAt: string | null;
 }
+
+/** A task's direct sub-tasks that are not deleted, and how many of them are completed. */
+export interface TodoSubtaskCount { done: number; total: number }
 
 /** One task follows another (`next`): an order only, never a condition on either task. */
 export interface TodoLink {
@@ -162,6 +170,8 @@ export interface TodoOverview {
   commentCounts: Record<string, number>;
   /** Attachments that show, per open task that has any (its description's and its comments' together). */
   fileCounts: Record<string, number>;
+  /** Sub-tasks per open task that has any. */
+  subtaskCounts: Record<string, TodoSubtaskCount>;
   /** Present after a backup was restored here, while and after its attachments are brought back. */
   restore?: TodoRestoreProgress;
 }
@@ -179,6 +189,8 @@ export interface TodoChanges {
   comments: TodoComment[];
   /** Files added, deleted (with `deletedAt`) or restored. */
   files: TodoFile[];
+  /** The sub-task counts now of every task whose sub-tasks the request changed; `total` 0 when none is left. */
+  subtaskCounts?: Record<string, TodoSubtaskCount>;
 }
 
 export interface TodoTaskDetail {

@@ -11,8 +11,8 @@ export const section = (id: string, projectId: string, patch: Partial<TodoSectio
 export const label = (id: string, patch: Partial<TodoLabel> = {}): TodoLabel => ({ id, name: id, color: 'red', favorite: false, sortKey: id, createdAt: at, updatedAt: at, deletedAt: null, ...patch });
 export const task = (id: string, patch: Partial<TodoTask> = {}): TodoTask => ({
   id, projectId: 'inbox', sectionId: null, parentId: null, content: id, description: '', priority: 4, dueDate: null, dueTime: null, recurrence: null, durationMin: null,
-  deadlineDate: null, labelIds: [], sortKey: id, completedAt: null, createdAt: at, updatedAt: at, deletedAt: null, ...patch,
+  deadlineDate: null, labelIds: [], sortKey: id, dayOrder: null, completedAt: null, createdAt: at, updatedAt: at, deletedAt: null, ...patch,
 });
 export const overview = (tasks: TodoTask[], patch: Partial<TodoOverview> = {}): TodoOverview => ({
-  availability: { state: 'ready' }, revision: 1, projects: [project('inbox', { inbox: true, name: 'Inbox' })], sections: [], labels: [], tasks, links: [], commentCounts: {}, fileCounts: {}, ...patch,
+  availability: { state: 'ready' }, revision: 1, projects: [project('inbox', { inbox: true, name: 'Inbox' })], sections: [], labels: [], tasks, links: [], commentCounts: {}, fileCounts: {}, subtaskCounts: {}, ...patch,
 });

@@ -1,6 +1,7 @@
 import type { Direction } from './todo-shortcuts';
 import { liveProjectIds } from '../../../shared/todo/compose';
 import { addDays } from '../../../shared/todo/dates';
+import { compareDay } from '../../../shared/todo/day-order';
 import type { TodoOp } from '../../../shared/todo/ops';
 import type { TodoPriority, TodoProject, TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
@@ -78,7 +79,8 @@ export function groupingsFor(view: TodoView): GroupKey[] {
     case 'project': case 'inbox': return ['section', 'priority', 'date'];
     case 'today': return ['date', 'priority', 'project'];
     case 'upcoming': return ['date'];
-    case 'label': case 'search': return ['project', 'priority'];
+    case 'label': return ['project', 'priority', 'date'];
+    case 'search': return ['project', 'priority'];
   }
 }
 export const defaultDisplay = (view: TodoView): DisplaySettings => ({ group: groupingsFor(view)[0], sort: 'manual', completed: false, calendar: 'month', future: true, colorBy: 'priority' });
@@ -116,16 +118,20 @@ const SORTS: Record<SortKey, (a: TodoTask, b: TodoTask) => number> = {
   priority: (a, b) => a.priority - b.priority || byOrder(a, b),
   name: (a, b) => a.content.localeCompare(b.content) || byOrder(a, b),
 };
-/** Within a day, timed tasks come first by time, then by priority. */
-const DAY_ORDER = (a: TodoTask, b: TodoTask) => compare(a.dueTime ?? '99', b.dueTime ?? '99') || a.priority - b.priority || byOrder(a, b);
+/** Outside sections and dates, timed tasks come first by time, then by priority. */
+const BY_TIME = (a: TodoTask, b: TodoTask) => compare(a.dueTime ?? '99', b.dueTime ?? '99') || a.priority - b.priority || byOrder(a, b);
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 
+/** Date columns keep the order put by hand within each date (shared/todo/day-order.ts). */
 export function sortTasks(tasks: TodoTask[], sort: SortKey, group: GroupKey): TodoTask[] {
-  return [...tasks].sort(sort === 'manual' && group !== 'section' ? DAY_ORDER : SORTS[sort]);
+  return [...tasks].sort(sort !== 'manual' || group === 'section' ? SORTS[sort] : group === 'date' ? compareDay : BY_TIME);
 }
 
-/** Whether cards can be put in order by hand: only among siblings, in their own order. */
-export const manualOrder = (display: DisplaySettings) => display.group === 'section' && display.sort === 'manual';
+/**
+ * Whether cards can be put in order by hand: among siblings in section columns, and among the tasks of one date in
+ * date columns.
+ */
+export const manualOrder = (display: DisplaySettings) => (display.group === 'section' || display.group === 'date') && display.sort === 'manual';
 
 type Grouping = (view: TodoView, tasks: TodoTask[], context: ViewContext) => BoardColumn[];
 
@@ -200,7 +206,10 @@ export function dropOps(task: TodoTask, drop: ColumnDrop, afterId?: string | nul
     case 'section':
       if (task.projectId === drop.projectId && task.sectionId === drop.sectionId && afterId === undefined) return [];
       return [{ op: 'task.move', id: task.id, projectId: drop.projectId, sectionId: drop.sectionId, parentId: null, ...(afterId !== undefined ? { afterId } : {}) }];
-    case 'date': return task.dueDate === drop.date ? [] : [{ op: 'task.update', id: task.id, patch: { dueDate: drop.date } }];
+    // Within its own date, a placed card is put in order among that date's tasks; elsewhere it takes the column's date.
+    case 'date':
+      if (task.dueDate !== drop.date) return [{ op: 'task.update', id: task.id, patch: { dueDate: drop.date } }];
+      return drop.date && afterId !== undefined && afterId !== task.id ? [{ op: 'task.move', id: task.id, dayAfterId: afterId }] : [];
     case 'priority': return task.priority === drop.priority ? [] : [{ op: 'task.update', id: task.id, patch: { priority: drop.priority } }];
     case 'project': return task.projectId === drop.projectId ? [] : [{ op: 'task.move', id: task.id, projectId: drop.projectId, sectionId: null, parentId: null }];
   }
