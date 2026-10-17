@@ -78,6 +78,8 @@ export class TodoClient {
   private reading = false;
   private wantRead = false;
   private detailRead = 0;
+  /** Each completed-list load takes a number; an answer to an older one than the latest is dropped. */
+  private completedRead = 0;
   private lastUndo: { ops: TodoOp[]; action: Action } | null = null;
   private toastId = 0;
   private toastTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -168,18 +170,19 @@ export class TodoClient {
     const current = this.state.completed;
     const before = more && current?.projectId === projectId ? current.before : undefined;
     if (more && !before) return;
+    const ticket = ++this.completedRead;
     this.set({ completed: { projectId, items: more && current ? current.items : current?.projectId === projectId ? current.items : [], before: current?.before, loading: true, error: '' } });
     try {
       const page = await this.transport.completed({ projectId: projectId || undefined, before });
-      if (this.state.completed?.projectId !== projectId) return;
+      if (ticket !== this.completedRead || this.state.completed?.projectId !== projectId) return;
       const items = more ? [...this.state.completed.items, ...page.items] : page.items;
       this.set({ completed: { projectId, items, before: page.before, loading: false, error: '' } });
     } catch (error) {
-      if (this.state.completed?.projectId !== projectId) return;
+      if (ticket !== this.completedRead || this.state.completed?.projectId !== projectId) return;
       this.set({ completed: { ...this.state.completed, loading: false, error: message(error) } });
     }
   }
-  hideCompleted() { if (this.state.completed) this.set({ completed: null }); }
+  hideCompleted() { this.completedRead++; if (this.state.completed) this.set({ completed: null }); }
 
   search(query: string, completed = false) { return this.transport.search(query, completed); }
   /** A task's detail without opening it: its latest completion, to reopen it. */

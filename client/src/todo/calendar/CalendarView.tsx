@@ -10,7 +10,7 @@ import type { QuickAddPreset } from '../QuickAdd';
 import { colorOf, dateLabel, longDate, monthDay, weekdayName } from '../todo-format';
 import { useTodoSensors } from '../todo-dnd';
 import type { TodoWorld } from '../todo-model';
-import { cellEntries, DAY_MINUTES, DEFAULT_DURATION, dayEntries, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, timeOf, visibleRange, yToMinutes, type CalendarEntry, type CalendarMode, type DayEntries } from './calendar-layout';
+import { cellEntries, resizeCommit, DAY_MINUTES, DEFAULT_DURATION, dayEntries, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, timeOf, visibleRange, yToMinutes, type CalendarEntry, type CalendarMode, type DayEntries } from './calendar-layout';
 
 /**
  * The calendar layout of a list: a month of days, or a week (three days on a phone) with an all-day row over a time
@@ -45,8 +45,8 @@ export function dropPatch(task: TodoTask, drop: Drop, start?: number): Extract<T
   if (drop.kind === 'allday') return task.dueDate === drop.date && !task.dueTime ? null : { dueDate: drop.date, dueTime: null };
   const dueTime = timeOf(start ?? 0);
   if (task.dueDate === drop.date && task.dueTime === dueTime) return null;
-  // A task without a time placed in a slot takes half an hour, as Quick Add's slots do.
-  return { dueDate: drop.date, dueTime, ...(task.durationMin ? {} : { durationMin: DEFAULT_DURATION }) };
+  // An all-day or undated task placed in a slot takes that time and half an hour (design 7.4); a timed one keeps its length.
+  return { dueDate: drop.date, dueTime, ...(task.dueTime ? {} : { durationMin: DEFAULT_DURATION }) };
 }
 
 function useColor(colorBy: CalendarProps['colorBy'], world: TodoWorld) {
@@ -54,6 +54,19 @@ function useColor(colorBy: CalendarProps['colorBy'], world: TodoWorld) {
 }
 
 function Entry({ entry, color, onOpen, draggable, compact }: { entry: CalendarEntry; color: string; onOpen: (id: string) => void; draggable: boolean; compact?: boolean }) {
+  if (entry.kind === 'future') return <FutureEntry entry={entry} color={color} compact={compact} />;
+  return <TaskEntry entry={entry} color={color} onOpen={onOpen} draggable={draggable} compact={compact} />;
+}
+
+/** A later occurrence of a repeating task: shown only, never opened or moved, since any change would change the real one. */
+function FutureEntry({ entry, color, compact }: { entry: CalendarEntry; color: string; compact?: boolean }) {
+  const { task } = entry;
+  return <span className={`todo-cal-entry future ${compact ? 'compact' : ''}`} style={{ '--entry-color': color } as CSSProperties} title={t('“{0}”의 다음 반복 (예정)', { 0: task.content })}>
+    <i />{task.dueTime && <time>{task.dueTime}</time>}<span>{task.content}</span><Repeat size={10} />
+  </span>;
+}
+
+function TaskEntry({ entry, color, onOpen, draggable, compact }: { entry: CalendarEntry; color: string; onOpen: (id: string) => void; draggable: boolean; compact?: boolean }) {
   const { task } = entry;
   const drag = useDraggable({ id: `${entry.kind}:${task.id}:${entry.date}`, data: { task }, disabled: !draggable || entry.kind !== 'task' });
   return <button ref={drag.setNodeRef} type="button" className={`todo-cal-entry ${entry.kind} ${drag.isDragging ? 'dragging' : ''} ${compact ? 'compact' : ''}`} style={{ '--entry-color': color } as CSSProperties}
@@ -139,15 +152,25 @@ function Block({ entry, placed, color, props, preview }: { entry: CalendarEntry;
     if (!column) return;
     const handle = event.currentTarget;
     handle.setPointerCapture(event.pointerId);
-    let value = span.end - span.start;
-    const move = (next: PointerEvent) => { value = resizeMinutes(span.start, next.clientY - column.top); setResize(value); };
-    const end = () => {
+    const from = event.clientY;
+    // Null until the edge really moves: a press alone, or a block clipped at midnight, keeps its duration.
+    let value: number | null = null;
+    const move = (next: PointerEvent) => {
+      if (value === null && Math.abs(next.clientY - from) < 3) return;
+      value = resizeMinutes(span.start, next.clientY - column.top);
+      setResize(value);
+    };
+    const end = (finish: PointerEvent) => {
       handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end);
       setResize(null);
-      if (value !== (task.durationMin ?? DEFAULT_DURATION)) props.onChange([{ op: 'task.update', id: task.id, patch: { durationMin: value } }]);
+      const durationMin = resizeCommit(task.durationMin ?? DEFAULT_DURATION, value, finish.type === 'pointercancel');
+      if (durationMin !== null) props.onChange([{ op: 'task.update', id: task.id, patch: { durationMin } }]);
     };
     handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end);
   };
+  if (entry.kind === 'future') return <div className={`todo-cal-block future ${length < 45 ? 'short' : ''}`} style={style} title={t('“{0}”의 다음 반복 (예정)', { 0: task.content })} onClick={event => event.stopPropagation()}>
+    <time>{timeOf(start)}</time><span>{task.content}</span>
+  </div>;
   return <div ref={drag.setNodeRef} className={`todo-cal-block ${entry.kind} ${drag.isDragging ? 'dragging' : ''} ${length < 45 ? 'short' : ''}`} style={style} title={task.content}
     onClick={event => { event.stopPropagation(); props.onOpen(task.id); }} {...drag.attributes} {...drag.listeners} role="button">
     <time>{timeOf(start)}{length >= 45 && `–${timeOf(Math.min(DAY_MINUTES - 1, start + length))}`}</time>

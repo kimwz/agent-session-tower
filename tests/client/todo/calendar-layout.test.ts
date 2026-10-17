@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cellEntries, dayEntries, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, visibleRange, yToMinutes } from '../../../client/src/todo/calendar/calendar-layout.js';
+import { cellEntries, dayEntries, occurrencesIn, resizeCommit, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, visibleRange, yToMinutes } from '../../../client/src/todo/calendar/calendar-layout.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { CalendarView, dropPatch, periodTitle } from '../../../client/src/todo/calendar/CalendarView.js';
@@ -36,6 +36,9 @@ test('times and grid positions convert both ways, snapped and kept inside the da
   assert.equal(resizeMinutes(600, minutesToY(11 * 60 + 40)), 105);
   assert.equal(resizeMinutes(600, minutesToY(9 * 60)), 15);
   assert.equal(resizeMinutes(23 * 60, minutesToY(26 * 60)), 60);
+  // The latest start near midnight stays on the quarter hour.
+  assert.equal(yToMinutes(minutesToY(23 * 60 + 45), 37), 23 * 60 + 15);
+  assert.equal(yToMinutes(minutesToY(23 * 60 + 45), 0), 23 * 60 + 45);
 });
 
 test('overlapping blocks share the width; separate clusters each use the full width', () => {
@@ -76,6 +79,8 @@ test('a drop sets the day, clears the time in the all-day row, and gives a slot 
   assert.deepEqual(dropPatch(timed, { kind: 'allday', date: '2026-10-14' }), { dueDate: '2026-10-14', dueTime: null });
   assert.deepEqual(dropPatch(allDay, { kind: 'time', date: '2026-10-16' }, 600), { dueDate: '2026-10-16', dueTime: '10:00', durationMin: 30 });
   assert.deepEqual(dropPatch(timed, { kind: 'time', date: '2026-10-14' }, 615), { dueDate: '2026-10-14', dueTime: '10:15' });
+  // An all-day task with a duration still takes half an hour in a slot.
+  assert.deepEqual(dropPatch({ ...allDay, durationMin: 90 }, { kind: 'time', date: '2026-10-14' }, 600), { dueDate: '2026-10-14', dueTime: '10:00', durationMin: 30 });
   assert.equal(dropPatch(timed, { kind: 'time', date: '2026-10-14' }, 540), null);
 });
 
@@ -96,4 +101,32 @@ test('the calendar draws a month with +n and faded repeats, and a week with bloc
   assert.equal(periodTitle('2026-10-30', '2026-11-01'), '10월 30일 – 11월 1일');
   assert.match(week, new RegExp(`class="todo-cal-block task[^"]*" style="[^"]*top:${minutesToY(570)}px;height:${minutesToY(90) - 2}px`));
   assert.match(week, /09:30–11:00/);
+});
+
+test('a resize saves only after the edge moved, never on cancel, and not when it comes back', () => {
+  // 23:30 with 90 minutes shows clipped to 30; a press alone must not save that.
+  assert.equal(resizeCommit(90, null, false), null);
+  assert.equal(resizeCommit(90, 45, true), null);
+  assert.equal(resizeCommit(90, 90, false), null);
+  assert.equal(resizeCommit(90, 45, false), 45);
+});
+
+test('repeats long before the range still show in it', () => {
+  assert.deepEqual(occurrencesIn({ freq: 'day', interval: 1 }, '2026-01-01', '2026-10-12', '2026-10-14'), ['2026-10-12', '2026-10-13', '2026-10-14']);
+  assert.deepEqual(occurrencesIn({ freq: 'week', interval: 1, weekdays: [3] }, '2026-10-14', '2026-10-12', '2026-10-28'), ['2026-10-21', '2026-10-28']);
+  assert.deepEqual(occurrencesIn({ freq: 'day', interval: 1, until: '2026-03-01' }, '2026-01-01', '2026-10-12', '2026-10-14'), []);
+  const days = dayEntries([task('d', { dueDate: '2026-01-01', recurrence: { freq: 'day', interval: 1 } })], '2026-10-12', '2026-10-18', { future: true });
+  assert.equal([...days.values()].flatMap(day => day.allDay).filter(entry => entry.kind === 'future').length, 7);
+});
+
+test('a later occurrence is drawn without a way to open or move it', () => {
+  const world = worldFromOverview(overview([]));
+  const tasks = [task('w', { dueDate: '2026-10-13', dueTime: '09:30', content: '회의', recurrence: { freq: 'day', interval: 1 } })];
+  const base = { tasks, world, today: '2026-10-14', future: true, colorBy: 'priority' as const, mobile: false, readOnly: false, onMode() {}, onOpen() {}, onAdd() {}, onChange() {} };
+  for (const mode of ['month', 'week'] as const) {
+    const markup = renderToStaticMarkup(createElement(CalendarView, { ...base, mode }));
+    const future = markup.match(/<(\w+)[^>]*class="todo-cal-(?:entry|block) future[^"]*"[^>]*>/g) ?? [];
+    assert.ok(future.length > 0);
+    for (const tag of future) assert.doesNotMatch(tag, /^<button|role="button"|tabindex|aria-roledescription/);
+  }
 });

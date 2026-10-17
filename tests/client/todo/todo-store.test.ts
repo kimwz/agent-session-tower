@@ -19,13 +19,14 @@ class FakeTransport implements TodoTransport {
   hold?: Promise<void>;
   overviewHold?: Promise<void>;
   completions: Record<string, string[]> = {};
+  completedPages: (() => Promise<TodoCompletedPage>)[] = [];
   async overview() { this.reads.overview++; const answer = structuredClone(this.current); if (this.overviewHold) await this.overviewHold; return answer; }
   async detail(id: string): Promise<TodoTaskDetail> {
     this.reads.detail++;
     const completions = (this.completions[id] ?? []).map(completion => ({ id: completion, taskId: id, occurrenceDate: null, completedAt: 'x' }));
     return { task: this.current.tasks.find(item => item.id === id)!, subtasks: [], comments: [], completions, events: [], previous: [], next: [] };
   }
-  async completed(): Promise<TodoCompletedPage> { this.reads.completed++; return { items: [] }; }
+  async completed(): Promise<TodoCompletedPage> { this.reads.completed++; const next = this.completedPages.shift(); return next ? next() : { items: [] }; }
   async search(): Promise<TodoTask[]> { return []; }
   async apply(request: TodoRequest) { this.requests.push(request); if (this.hold) await this.hold; return this.answer(request); }
 }
@@ -235,4 +236,22 @@ test('reopening sends the completion of the row chosen, or the task’s latest r
   await actions.reopen(task);
   await settle();
   assert.deepEqual(transport.requests.flatMap(request => request.ops).map(op => 'completionId' in op ? op.completionId : ''), ['c-old', 'c-new']);
+});
+
+test('a late answer to an older completed-list load never replaces a newer one', async () => {
+  const transport = new FakeTransport();
+  const { client } = await ready(transport);
+  let releaseOld!: () => void;
+  const done = { completion: { id: 'c1', taskId: 'a', occurrenceDate: null, completedAt: 'x' }, task: transport.current.tasks[0] };
+  transport.completedPages = [
+    () => new Promise(resolve => { releaseOld = () => resolve({ items: [] }); }),
+    async () => ({ items: [done] }),
+  ];
+  const old = client.readCompleted('');
+  await client.readCompleted('');
+  assert.equal(client.getState().completed?.items.length, 1);
+  releaseOld();
+  await old;
+  assert.equal(client.getState().completed?.items.length, 1);
+  assert.equal(client.getState().completed?.loading, false);
 });

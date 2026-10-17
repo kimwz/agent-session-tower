@@ -2666,6 +2666,7 @@ export const english: Record<string, string> = {
   "보관함을 열면 붙여넣은 값과 저장한 시크릿을 사용할 수 있습니다.": "Open the vault to use the pasted value and saved secrets.",
 
   // Todo page
+  "“{0}”의 다음 반복 (예정)": "Upcoming repeat of “{0}”",
   "“{0}” 섹션 메뉴": "“{0}” section menu",
   "반복 기준": "Repeat by",
   "날짜 기준": "Day of month",

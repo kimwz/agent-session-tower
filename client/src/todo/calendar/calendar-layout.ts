@@ -1,6 +1,6 @@
 import { addDays, addMonths, dateParts, formatDate, weekday } from '../../../../shared/todo/dates';
-import { futureOccurrences } from '../../../../shared/todo/recurrence';
-import type { TodoTask } from '../../../../shared/todo/types';
+import { futureOccurrences, nextOccurrence } from '../../../../shared/todo/recurrence';
+import type { TodoRecurrence, TodoTask } from '../../../../shared/todo/types';
 
 /**
  * The calendar's arithmetic, apart from drawing: which dates a month or week shows, where a time sits in the time grid
@@ -55,13 +55,23 @@ export const minutesToY = (minutes: number) => minutes / 60 * HOUR_HEIGHT;
 /** The time at `y` pixels into the grid, snapped, kept so the day still holds `length` minutes after it. */
 export function yToMinutes(y: number, length = 0, snap = SNAP_MINUTES): number {
   const raw = Math.round(y / HOUR_HEIGHT * 60 / snap) * snap;
-  return Math.min(Math.max(0, raw), DAY_MINUTES - Math.max(snap, Math.min(length, DAY_MINUTES)));
+  // The latest start is itself on the grid, so a 37-minute task near midnight lands on 23:15, not 23:23.
+  const latest = Math.floor((DAY_MINUTES - Math.max(snap, Math.min(length, DAY_MINUTES))) / snap) * snap;
+  return Math.min(Math.max(0, raw), Math.max(0, latest));
 }
 
 /** The duration a block's bottom edge at `bottom` pixels gives, from its start; at least one snap, at most to midnight. */
 export function resizeMinutes(start: number, bottom: number, snap = SNAP_MINUTES): number {
   const end = Math.round(bottom / HOUR_HEIGHT * 60 / snap) * snap;
   return Math.min(Math.max(snap, end - start), DAY_MINUTES - start);
+}
+
+/**
+ * The duration a resize saves when it ends: only after the edge really moved (`value` is null until then), never when
+ * the gesture was cancelled, and nothing when it comes back to where it was.
+ */
+export function resizeCommit(original: number, value: number | null, cancelled: boolean): number | null {
+  return cancelled || value === null || value === original ? null : value;
 }
 
 /** The slot a click at `y` falls in: its start, on the half hour. */
@@ -106,6 +116,17 @@ export function spanOf(task: TodoTask): { start: number; end: number } {
   return { start, end: Math.min(DAY_MINUTES, start + (task.durationMin ?? DEFAULT_DURATION)) };
 }
 
+/**
+ * Later occurrences of a repeating task from `from` to `to`. A task whose date is long before the range starts from
+ * its first occurrence in the range, so a daily task from January still shows in October.
+ */
+export function occurrencesIn(rule: TodoRecurrence, due: string, from: string, to: string): string[] {
+  if (due >= from) return futureOccurrences(rule, due, to, 400);
+  const first = nextOccurrence(rule, due, addDays(from, -1));
+  if (!first || first > to) return [];
+  return [first, ...futureOccurrences(rule, first, to, 400)];
+}
+
 /** Everything each day from `from` to `to` holds: all-day tasks, timed tasks by time, and deadlines. */
 export function dayEntries(tasks: readonly TodoTask[], from: string, to: string, options: { future: boolean }): Map<string, DayEntries> {
   const days = new Map<string, DayEntries>();
@@ -118,7 +139,7 @@ export function dayEntries(tasks: readonly TodoTask[], from: string, to: string,
   for (const task of tasks) {
     if (task.dueDate) {
       add({ kind: 'task', task, date: task.dueDate });
-      if (options.future && task.recurrence && task.dueDate <= to) for (const date of futureOccurrences(task.recurrence, task.dueDate, to, 120)) add({ kind: 'future', task, date });
+      if (options.future && task.recurrence && task.dueDate <= to) for (const date of occurrencesIn(task.recurrence, task.dueDate, from, to)) add({ kind: 'future', task, date });
     }
     if (task.deadlineDate) add({ kind: 'deadline', task, date: task.deadlineDate });
   }
