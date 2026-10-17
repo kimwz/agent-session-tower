@@ -271,3 +271,19 @@ export function cardContext(world: TodoWorld, today: string, showProject: boolea
   for (const link of Object.values(world.links)) if (isOpen(world.tasks[link.toTaskId]) && !world.tasks[link.fromTaskId]?.deletedAt) next.set(link.fromTaskId, (next.get(link.fromTaskId) ?? 0) + 1);
   return { world, today, showProject, children, next };
 }
+
+/**
+ * The card an arrow key goes to on the board: up and down within a column, left and right to the next column that has
+ * cards (the same place, or its last card). Without a chosen card (or one no longer shown), the first card there is.
+ */
+export function moveSelection(columns: readonly Pick<BoardColumn, 'tasks'>[], from: string | null, direction: 'up' | 'down' | 'left' | 'right'): string | null {
+  const filled = columns.map(column => column.tasks.map(task => task.id)).filter(ids => ids.length);
+  if (!filled.length) return null;
+  const column = from ? filled.findIndex(ids => ids.includes(from)) : -1;
+  if (column < 0) return filled[0][0];
+  const ids = filled[column], row = ids.indexOf(from!);
+  if (direction === 'up') return ids[Math.max(0, row - 1)];
+  if (direction === 'down') return ids[Math.min(ids.length - 1, row + 1)];
+  const next = filled[column + (direction === 'left' ? -1 : 1)];
+  return next ? next[Math.min(row, next.length - 1)] : from;
+}

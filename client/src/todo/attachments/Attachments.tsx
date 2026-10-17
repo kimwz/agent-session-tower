@@ -48,10 +48,13 @@ export function UploadRows({ jobs, onCancel, onRetry }: { jobs: readonly UploadJ
 }
 
 /** A button opening the file picker (a phone offers its camera, photos and files). */
-export function AttachButton({ onFiles, disabled, children }: { onFiles: (files: File[]) => void; disabled?: boolean; children?: ReactNode }) {
+/** Picks files to attach; `compact` is a paperclip alone (its name stays for screen readers and as a tooltip). */
+export function AttachButton({ onFiles, disabled, children, compact }: { onFiles: (files: File[]) => void; disabled?: boolean; children?: ReactNode; compact?: boolean }) {
   const input = useRef<HTMLInputElement>(null);
   return <>
-    <button type="button" className="todo-link-button" disabled={disabled} onClick={() => input.current?.click()}><Paperclip size={13} />{children ?? t('파일 첨부')}</button>
+    {compact
+      ? <button type="button" className="icon-button todo-attach-icon" disabled={disabled} aria-label={t('파일 첨부')} title={t('파일 첨부')} onClick={() => input.current?.click()}><Paperclip size={14} /></button>
+      : <button type="button" className="todo-link-button" disabled={disabled} onClick={() => input.current?.click()}><Paperclip size={13} />{children ?? t('파일 첨부')}</button>}
     <input ref={input} type="file" multiple hidden onChange={event => { const files = [...(event.target.files ?? [])]; event.target.value = ''; if (files.length) onFiles(files); }} />
   </>;
 }

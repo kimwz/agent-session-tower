@@ -153,9 +153,9 @@
 .todo-split .todo-split-main { border-radius:7px 0 0 7px; }
 .todo-split-more { padding:0 7px; border-left:0; border-radius:0 7px 7px 0; }
 .todo-split-main:hover:not(:disabled), .todo-split-more:hover:not(:disabled) { background:#203149; }
-.todo-detail-body { display:grid; grid-template-columns:minmax(0, 1fr) 208px; column-gap:28px; align-content:start; flex:1; padding:22px 26px 40px; overflow-y:auto; }
-.todo-detail-body > * { grid-column:1; }
-.todo-detail-body > .todo-properties { grid-column:2; grid-row:1 / span 20; align-self:start; }
+.todo-detail-body { display:grid; grid-template-columns:minmax(0, 1fr) 212px; column-gap:24px; align-content:start; flex:1; padding:22px 22px 48px 26px; overflow-y:auto; }
+.todo-detail-body > * { grid-column:1; min-width:0; }
+.todo-detail-body > .todo-properties { grid-column:2; grid-row:1 / span 20; align-self:start; position:sticky; top:0; }
 .todo-detail-empty { display:flex; justify-content:center; padding:40px; color:#6d7c92; }
 .todo-detail-heading { display:flex; align-items:flex-start; gap:12px; }
 .todo-detail-heading .todo-check { width:21px; height:21px; margin-top:5px; }
@@ -169,21 +169,29 @@
 .todo-markdown { font-size:13px; line-height:1.55; }
 .todo-markdown > :first-child { margin-top:0; }
 .todo-markdown > :last-child { margin-bottom:0; }
-.todo-properties { margin:0; display:flex; flex-direction:column; gap:2px; padding:4px 0 0; }
-.todo-property { display:flex; flex-direction:column; gap:3px; padding:8px 0; border-bottom:1px solid #1b2533; }
-.todo-property dt { display:flex; align-items:center; gap:6px; color:#6d7c92; font-size:11px; }
-.todo-property dd { margin:0; }
-.todo-property-value { display:inline-flex; flex-wrap:wrap; align-items:center; gap:6px; max-width:100%; min-height:28px; margin-left:-6px; padding:3px 6px; border-radius:6px; color:#d0dbe8; font-size:12.5px; text-align:left; }
+/* Properties: a quiet card on the right, the most used first; rarely used ones without a value are one row of additions. */
+.todo-properties { margin:0; padding:6px; border:1px solid #1c2736; border-radius:10px; background:#111a26; }
+.todo-property { display:grid; grid-template-columns:62px minmax(0, 1fr); align-items:center; gap:4px; min-height:34px; padding:0 4px 0 8px; }
+.todo-property dt { color:#6d7c92; font-size:11.5px; }
+.todo-property dd { display:flex; align-items:center; min-width:0; margin:0; }
+.todo-property-icon { display:none; }
+.todo-property-value { display:inline-flex; flex-wrap:wrap; align-items:center; gap:6px; max-width:100%; min-height:28px; padding:3px 7px; border-radius:6px; color:#d0dbe8; font-size:12.5px; text-align:left; }
 select.todo-property-value { border:0; background:none; }
-.todo-property-value:hover:not(:disabled) { background:#18222f; }
-.todo-property-value.empty { color:#5f6d82; }
+.todo-property-value:hover:not(:disabled) { background:#1a2533; }
+.todo-property-value.empty { color:#66758b; }
+.todo-property-adds { display:flex; flex-wrap:wrap; gap:2px 6px; margin-top:4px; padding:6px 4px 2px; border-top:1px solid #1c2736; }
+.todo-property-adds .todo-property-value { min-height:26px; font-size:12px; }
 .todo-property-value.overdue { color:var(--p1); }
 .todo-property-value.priority svg { color:var(--p4); }
 .todo-property-value.priority.p1 svg { color:var(--p1); }
 .todo-property-value.priority.p2 svg { color:var(--p2); }
 .todo-property-value.priority.p3 svg { color:var(--p3); }
-.todo-detail-section { margin:22px 0 0 33px; }
-.todo-detail-section h4 { display:flex; align-items:center; gap:7px; margin:0 0 8px; color:#8a98ac; font-size:12px; font-weight:600; }
+/* Sections: the same spacing and a thin line between them; headers are small and quiet. */
+.todo-detail-section { margin:22px 0 0 33px; padding-top:16px; border-top:1px solid #1a2432; }
+.todo-detail-section h4 { display:flex; align-items:center; gap:7px; margin:0 0 10px; color:#8492a6; font-size:11.5px; font-weight:600; letter-spacing:.02em; }
+.todo-detail-quiet { margin:14px 0 0 33px; }
+.todo-attach-icon { width:28px; height:28px; color:#6d7c92; }
+.todo-attach-icon:hover:not(:disabled) { color:#e6a16f; }
 .todo-detail-section h4 span, .todo-section-toggle span { color:#5f6d82; font-weight:400; font-variant-numeric:tabular-nums; }
 .todo-subtask-list, .todo-flow ul, .todo-comments, .todo-activity { list-style:none; margin:0; padding:0; }
 .todo-subtask-list li { display:flex; align-items:center; gap:9px; min-height:32px; border-bottom:1px solid #18212d; }
@@ -201,14 +209,15 @@ select.todo-property-value { border:0; background:none; }
 .todo-flow li > button:not(.icon-button):hover { color:var(--bright); text-decoration:underline; }
 .todo-unlink { width:22px; height:22px; opacity:0; }
 .todo-flow li:hover .todo-unlink, .todo-unlink:focus-visible { opacity:1; }
-.todo-flow-actions { display:flex; flex-wrap:wrap; gap:4px 14px; }
+.todo-flow-actions, .todo-flow > .todo-flow-actions { display:flex; flex-direction:row; flex-wrap:wrap; gap:4px 14px; }
 .todo-comments { display:flex; flex-direction:column; gap:12px; margin-bottom:10px; }
 .todo-comments > li { padding:10px 12px; border:1px solid #1e2937; border-radius:9px; background:#111a26; }
 .todo-comment-meta { display:flex; align-items:center; gap:2px; margin-bottom:4px; color:#6d7c92; font-size:11px; }
 .todo-comment-actions { display:flex; gap:6px; }
 .todo-comment-meta .icon-button { width:22px; height:22px; opacity:0; }
 .todo-comments > li:hover .todo-comment-meta .icon-button { opacity:1; }
-.todo-comment-form { display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
+.todo-comment-form { display:flex; flex-direction:column; gap:6px; }
+.todo-comment-form .todo-comment-actions { align-items:center; }
 .todo-comment-form textarea { width:100%; padding:9px 11px; border:1px solid #2a3546; border-radius:8px; background:#0a111b; color:var(--text); line-height:1.5; resize:vertical; }
 .todo-comment-form textarea:focus { border-color:#3a5476; outline:none; }
 .todo-section-toggle { display:inline-flex; align-items:center; gap:7px; color:#8a98ac; font-size:12px; font-weight:600; }
@@ -327,7 +336,7 @@ select.todo-property-value { border:0; background:none; }
 /* Attachments */
 .todo-description-area { border-radius:9px; transition:box-shadow .12s, background .12s; }
 .todo-description-area.drop-target, .todo-comment-form.drop-target { background:#13233a; box-shadow:inset 0 0 0 1px #3e5f8a; }
-.todo-description-files { display:flex; flex-direction:column; gap:8px; margin:2px 0 4px 33px; }
+.todo-description-files { display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:0 0 4px 33px; }
 .todo-files { display:flex; flex-direction:column; gap:8px; }
 .todo-file-thumbs { display:grid; grid-template-columns:repeat(auto-fill, minmax(104px, 1fr)); gap:8px; list-style:none; margin:0; padding:0; }
 .todo-file-thumbs li { position:relative; aspect-ratio:1; overflow:hidden; border:1px solid #243041; border-radius:8px; background:#0e1520; }
@@ -468,11 +477,20 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-detail-close { display:none; }
   .todo-detail-bar { padding:0 10px; padding-top:env(safe-area-inset-top); height:calc(52px + env(safe-area-inset-top)); }
   .todo-detail-body { display:block; padding:16px 16px 40px; }
-  .todo-properties { margin:12px 0 0; }
-  .todo-property { flex-direction:row; align-items:center; gap:10px; }
-  .todo-property dt { flex:0 0 96px; }
-  .todo-property dd { flex:1; min-width:0; }
-  .todo-property-value { margin-left:0; }
+  /* On a phone the properties are a line of chips under the title; rarely used ones without a value are dashed. */
+  .todo-detail-body > .todo-properties { position:static; }
+  .todo-properties { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 4px; padding:0; border:0; background:none; }
+  .todo-property { display:block; min-height:0; padding:0; }
+  .todo-property dt { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+  .todo-property dd { padding-left:9px; border:1px solid #243246; border-radius:999px; background:#121b28; }
+  .todo-property-icon { display:inline-flex; color:#7c8aa0; }
+  /* The priority flag and the project's dot already say what the chip is. */
+  .todo-property.priority .todo-property-icon, .todo-property.project .todo-property-icon { display:none; }
+  .todo-property-value { min-height:32px; padding:3px 11px 3px 6px; border-radius:999px; }
+  .todo-property-adds { display:contents; }
+  .todo-property-adds > span { display:inline-flex; border:1px dashed #2a3a50; border-radius:999px; }
+  .todo-property-adds .todo-property-value { min-height:32px; padding:3px 11px; }
+  .todo-detail-quiet { margin-left:0; }
   .todo-detail-section, .todo-description, .todo-description-editor { margin-left:0; }
   .todo-description-editor { width:100%; }
   .todo-modal-scrim { align-items:flex-start; padding:calc(8px + env(safe-area-inset-top)) 8px 8px; }

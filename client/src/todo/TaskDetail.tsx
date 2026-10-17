@@ -17,14 +17,20 @@ import { newId, type TodoClient } from './todo-store';
 import { projectTree } from './todo-views';
 
 /**
- * One task: its title and description, properties, sub-tasks, the tasks before and after it, comments and activity.
- * Properties are a list of rows (`DETAIL_PROPERTIES`), so a new property is one entry. Every edit is an operation
- * through the store, shown at once.
+ * One task, what is used most first and largest: its title, properties, description, sub-tasks and comments; then the
+ * tasks before and after it and its activity, small. Properties are a list of rows (`DETAIL_PROPERTIES`), so a new
+ * property is one entry; a rarely used one shows only with a value, and otherwise as one small "add" among the others.
+ * On a phone the same rows read as a line of chips under the title (todo.css). Every edit is an operation through the
+ * store, shown at once.
  */
 
 export interface DetailContext { task: TodoTask; world: TodoWorld; today: string; client: TodoClient; actions: TodoActions; readOnly: boolean; uploads: TodoUploads }
 
-export interface PropertyRow { key: string; label: string; icon: ReactNode; render: (context: DetailContext) => ReactNode }
+export interface PropertyRow {
+  key: string; label: string; icon: ReactNode; render: (context: DetailContext) => ReactNode;
+  /** Rarely used: shown only with a value; without one, its control sits in the row of additions. */
+  rare?: { empty: (task: TodoTask) => boolean };
+}
 
 const PRIORITIES: TodoPriority[] = [1, 2, 3, 4];
 
@@ -32,8 +38,8 @@ function DateProperty({ task, today, actions, deadline, readOnly }: DetailContex
   const popover = usePopover();
   const value: DateValue = deadline ? { dueDate: task.deadlineDate, dueTime: null, durationMin: null, recurrence: null } : { dueDate: task.dueDate, dueTime: task.dueTime, durationMin: task.durationMin, recurrence: task.recurrence };
   const label = deadline
-    ? task.deadlineDate ? monthDay(task.deadlineDate, today) : t('없음')
-    : task.dueDate ? [dateLabel(task.dueDate, today), task.dueTime, task.recurrence && recurrenceLabel(task.recurrence)].filter(Boolean).join(' · ') : t('날짜 없음');
+    ? task.deadlineDate ? monthDay(task.deadlineDate, today) : t('＋ 마감일')
+    : task.dueDate ? [dateLabel(task.dueDate, today), task.dueTime, task.recurrence && recurrenceLabel(task.recurrence)].filter(Boolean).join(' · ') : t('날짜 추가');
   const overdue = deadline ? !!task.deadlineDate && task.deadlineDate < today : !!task.dueDate && task.dueDate < today;
   return <>
     <button ref={popover.anchor} type="button" className={`todo-property-value ${overdue ? 'overdue' : ''} ${(deadline ? task.deadlineDate : task.dueDate) ? '' : 'empty'}`} disabled={readOnly} onClick={popover.toggle}>{label}</button>
@@ -75,7 +81,7 @@ function PriorityProperty({ task, actions, readOnly }: DetailContext) {
   const popover = usePopover();
   return <>
     <button ref={popover.anchor} type="button" className={`todo-property-value priority p${task.priority}`} disabled={readOnly} onClick={popover.toggle}><Flag size={12} />{priorityName(task.priority)}</button>
-    {popover.open && <Menu anchor={popover.anchor} onClose={popover.close} label={t('우선순위')} items={PRIORITIES.map(priority => ({ key: String(priority), label: priorityName(priority), hint: String(priority),
+    {popover.open && <Menu anchor={popover.anchor} onClose={popover.close} label={t('우선순위')} items={PRIORITIES.map(priority => ({ key: String(priority), label: priorityName(priority),
       icon: <Flag size={13} className={`p${priority}`} />, run: () => actions.priority(task, priority) }))} />}
   </>;
 }
@@ -101,7 +107,7 @@ function LabelsProperty({ task, world, client, readOnly }: DetailContext) {
   const popover = usePopover();
   return <>
     <button ref={popover.anchor} type="button" className={`todo-property-value ${task.labelIds.length ? '' : 'empty'}`} disabled={readOnly} onClick={popover.toggle}>
-      {task.labelIds.length ? task.labelIds.map(id => world.labels.find(label => label.id === id)).filter(label => !!label).map(label => <span key={label!.id} className="todo-chip label" style={{ color: colorOf(label!.color) }}>@{label!.name}</span>) : t('없음')}
+      {task.labelIds.length ? task.labelIds.map(id => world.labels.find(label => label.id === id)).filter(label => !!label).map(label => <span key={label!.id} className="todo-chip label" style={{ color: colorOf(label!.color) }}>@{label!.name}</span>) : t('라벨 추가')}
     </button>
     {popover.open && <LabelPicker anchor={popover.anchor} onClose={popover.close} world={world} selected={task.labelIds}
       onChange={labelIds => client.apply([{ op: 'task.update', id: task.id, patch: { labelIds } }])}
@@ -110,20 +116,32 @@ function LabelsProperty({ task, world, client, readOnly }: DetailContext) {
 }
 
 function DurationProperty({ task, actions, readOnly }: DetailContext) {
-  return <select className="todo-property-value" value={task.durationMin ?? ''} disabled={readOnly} aria-label={t('소요 시간')} onChange={event => actions.update(task, { durationMin: event.target.value ? Number(event.target.value) : null })}>
-    <option value="">{t('없음')}</option>
+  return <select className={`todo-property-value ${task.durationMin ? '' : 'empty'}`} value={task.durationMin ?? ''} disabled={readOnly} aria-label={t('소요 시간')} onChange={event => actions.update(task, { durationMin: event.target.value ? Number(event.target.value) : null })}>
+    <option value="">{task.durationMin ? t('없음') : t('＋ 소요 시간')}</option>
     {[...new Set([15, 30, 45, 60, 90, 120, 180, 240, 480, ...(task.durationMin ? [task.durationMin] : [])])].sort((a, b) => a - b).map(minutes => <option key={minutes} value={minutes}>{durationLabel(minutes)}</option>)}
   </select>;
 }
 
+/** In the order they are used: the date and priority most, then labels and the project; deadline and duration rarely. */
 export const DETAIL_PROPERTIES: PropertyRow[] = [
-  { key: 'project', label: '프로젝트', icon: <Hash size={13} />, render: context => <ProjectProperty {...context} /> },
   { key: 'date', label: '날짜', icon: <CalendarDays size={13} />, render: context => <DateProperty {...context} /> },
-  { key: 'deadline', label: '마감일', icon: <Flag size={13} />, render: context => <DateProperty {...context} deadline /> },
-  { key: 'duration', label: '소요 시간', icon: <Clock3 size={13} />, render: context => <DurationProperty {...context} /> },
   { key: 'priority', label: '우선순위', icon: <Flag size={13} />, render: context => <PriorityProperty {...context} /> },
   { key: 'labels', label: '라벨', icon: <Tag size={13} />, render: context => <LabelsProperty {...context} /> },
+  { key: 'project', label: '프로젝트', icon: <Hash size={13} />, render: context => <ProjectProperty {...context} /> },
+  { key: 'deadline', label: '마감일', icon: <Flag size={13} />, render: context => <DateProperty {...context} deadline />, rare: { empty: task => !task.deadlineDate } },
+  { key: 'duration', label: '소요 시간', icon: <Clock3 size={13} />, render: context => <DurationProperty {...context} />, rare: { empty: task => !task.durationMin } },
 ];
+
+function Properties(context: DetailContext) {
+  const adding = (row: PropertyRow) => !!row.rare?.empty(context.task);
+  const additions = DETAIL_PROPERTIES.filter(adding);
+  return <dl className="todo-properties">
+    {DETAIL_PROPERTIES.filter(row => !adding(row)).map(row => <div key={row.key} className={`todo-property ${row.key}`}>
+      <dt>{t(row.label)}</dt><dd><span className="todo-property-icon" aria-hidden="true">{row.icon}</span>{row.render(context)}</dd>
+    </div>)}
+    {additions.length > 0 && !context.readOnly && <div className="todo-property-adds">{additions.map(row => <span key={row.key}>{row.render(context)}</span>)}</div>}
+  </dl>;
+}
 
 function EditableTitle({ task, actions, readOnly }: { task: TodoTask; actions: TodoActions; readOnly: boolean }) {
   const [value, setValue] = useState(task.content);
@@ -219,6 +237,13 @@ function Flow({ task, world, client, onOpen, onFollowUp, readOnly }: DetailConte
   const detail = world.detail?.task.id === task.id ? world.detail : null;
   const link = usePopover();
   if (!detail) return null;
+  const actions = !readOnly && <div className="todo-flow-actions">
+    <button type="button" className="todo-link-button" onClick={() => onFollowUp(task, false)}><Plus size={13} />{t('후속 작업 추가')}</button>
+    <button ref={link.anchor} type="button" className="todo-link-button" onClick={link.toggle}><Link2 size={13} />{t('기존 작업 연결')}</button>
+  </div>;
+  const search = link.open && <LinkSearch task={task} client={client} anchor={link.anchor} onClose={link.close} />;
+  // Without tasks before or after it, the flow is a quiet line of its two actions.
+  if (!detail.previous.length && !detail.next.length) return actions ? <div className="todo-detail-quiet">{actions}{search}</div> : null;
   const item = (entry: { link: { id: string }; task: TodoTask }, direction: 'previous' | 'next') => <li key={entry.link.id} className={entry.task.completedAt ? 'done' : ''}>
     {direction === 'previous' ? <ArrowLeft size={13} /> : <ArrowRight size={13} />}
     <button type="button" onClick={() => onOpen(entry.task.id)}>{entry.task.content}</button>
@@ -228,14 +253,9 @@ function Flow({ task, world, client, onOpen, onFollowUp, readOnly }: DetailConte
   return <section className="todo-detail-section todo-flow">
     <h4>{t('흐름')}</h4>
     {detail.previous.length > 0 && <div><span className="todo-flow-label">{t('이전')}</span><ul>{detail.previous.map(entry => item(entry, 'previous'))}</ul></div>}
-    <div><span className="todo-flow-label">{t('다음')}</span>
-      {detail.next.length > 0 && <ul>{detail.next.map(entry => item(entry, 'next'))}</ul>}
-      {!readOnly && <div className="todo-flow-actions">
-        <button type="button" className="todo-link-button" onClick={() => onFollowUp(task, false)}><Plus size={13} />{t('후속 작업 추가')}</button>
-        <button ref={link.anchor} type="button" className="todo-link-button" onClick={link.toggle}><Link2 size={13} />{t('기존 작업 연결')}</button>
-      </div>}
-    </div>
-    {link.open && <LinkSearch task={task} client={client} anchor={link.anchor} onClose={link.close} />}
+    {detail.next.length > 0 && <div><span className="todo-flow-label">{t('다음')}</span><ul>{detail.next.map(entry => item(entry, 'next'))}</ul></div>}
+    {actions}
+    {search}
   </section>;
 }
 
@@ -275,7 +295,7 @@ function Comments({ task, world, client, readOnly, uploads }: DetailContext) {
     if (attach.length) uploads.add(attach, { taskId: task.id, commentId: id });
   };
   return <section className="todo-detail-section">
-    <h4><MessageSquare size={13} />{t('댓글')}{comments.length > 0 && <span>{comments.length}</span>}</h4>
+    <h4>{t('댓글')}{comments.length > 0 && <span>{comments.length}</span>}</h4>
     {comments.length > 0 && <ul className="todo-comments">{comments.map(comment => <li key={comment.id}>
       <div className="todo-comment-meta"><time dateTime={comment.createdAt} title={new Date(comment.createdAt).toLocaleString()}>{relativeTime(comment.createdAt)}{comment.updatedAt !== comment.createdAt && ` · ${t('고침')}`}</time>
         <span className="todo-spacer" />
@@ -289,14 +309,14 @@ function Comments({ task, world, client, readOnly, uploads }: DetailContext) {
       <UploadRows jobs={jobs.filter(job => job.commentId === comment.id)} onCancel={key => uploads.cancel(key)} onRetry={key => uploads.retry(key)} />
     </li>)}</ul>}
     {!readOnly && <form className={`todo-comment-form ${drop.over ? 'drop-target' : ''}`} onSubmit={event => { event.preventDefault(); void send(); }} {...drop.handlers}>
-      <textarea value={body} rows={body.includes('\n') ? 4 : 2} maxLength={15_000} placeholder={t('댓글 (Markdown)')} aria-label={t('댓글')} onChange={event => setBody(event.target.value)}
+      <textarea value={body} rows={body.includes('\n') ? 4 : 2} maxLength={15_000} placeholder={t('댓글 쓰기 (Markdown)')} aria-label={t('댓글')} onChange={event => setBody(event.target.value)}
         onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }} />
       {pending.length > 0 && <ul className="todo-pending-files">{pending.map((file, index) => <li key={`${file.name}-${index}`}>
         <Paperclip size={12} /><span>{file.name}</span><small>{sizeLabel(file.size)}</small>
         <button type="button" className="icon-button" aria-label={t('“{0}” 빼기', { 0: file.name })} onClick={() => setPending(previous => previous.filter((_, position) => position !== index))}><X size={12} /></button>
       </li>)}</ul>}
       <div className="todo-comment-actions">
-        <AttachButton onFiles={add} />
+        <AttachButton onFiles={add} compact />
         <span className="todo-spacer" />
         {(body.trim() || pending.length > 0) && <button type="submit" className="todo-primary" disabled={sending}>{t('댓글 달기')}</button>}
       </div>
@@ -316,7 +336,7 @@ function DescriptionFiles({ task, world, client, readOnly, uploads }: DetailCont
   return <div className="todo-description-files">
     <AttachmentList files={files} onDelete={readOnly ? undefined : file => removeFile(client, file)} />
     <UploadRows jobs={jobs} onCancel={key => uploads.cancel(key)} onRetry={key => uploads.retry(key)} />
-    {!readOnly && <AttachButton onFiles={picked => uploads.add(picked, { taskId: task.id })} />}
+    {!readOnly && <AttachButton onFiles={picked => uploads.add(picked, { taskId: task.id })} compact />}
   </div>;
 }
 
@@ -388,21 +408,19 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
       ]} />}
     </header>
     {!task || !context ? <div className="todo-detail-empty">{error ? <p className="todo-error" role="alert">{error}</p> : <LoaderCircle className="spin" size={18} />}</div> : <div key={task.id} className="todo-detail-body">
-      {/* One column on a narrow panel; on a wide one the properties stand on the right (todo.css). */}
+      {/* A wide panel puts the properties in a card on the right; a phone shows them as chips under the title (todo.css). */}
       <div className="todo-detail-heading">
         <CheckCircle task={task} onComplete={() => actions.complete(task)} onCompleteNext={() => onFollowUp(task, true)} onReopen={() => void actions.reopen(task)} />
         <EditableTitle key={task.id} task={task} actions={actions} readOnly={readOnly} />
       </div>
+      <Properties {...context} />
       <div className={`todo-description-area ${drop.over ? 'drop-target' : ''}`} {...drop.handlers}>
         <Description key={`d-${task.id}`} task={task} client={client} readOnly={readOnly} />
         <DescriptionFiles {...context} />
       </div>
-      <dl className="todo-properties">
-        {DETAIL_PROPERTIES.map(row => <div key={row.key} className="todo-property"><dt>{row.icon}{t(row.label)}</dt><dd>{row.render(context)}</dd></div>)}
-      </dl>
       <Subtasks {...context} onOpen={onOpen} />
-      <Flow {...context} onOpen={onOpen} onFollowUp={onFollowUp} />
       <Comments {...context} />
+      <Flow {...context} onOpen={onOpen} onFollowUp={onFollowUp} />
       <Activity {...context} />
       {error && <p className="todo-error" role="alert">{error}</p>}
     </div>}

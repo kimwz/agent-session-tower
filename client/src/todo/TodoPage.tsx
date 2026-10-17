@@ -18,7 +18,7 @@ import { longDate, priorityName } from './todo-format';
 import { readShortcut, typingIn } from './todo-shortcuts';
 import { httpTransport, localToday, newId, TodoClient, useTodoState } from './todo-store';
 import { isTodoPage, readTodoLocation, todoSearch, viewKey, type TodoLocation, type TodoView } from './todo-url';
-import { boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
+import { boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
 import { CalendarView } from './calendar/CalendarView';
 import type { TodoLayout } from '../../../shared/todo/types';
 
@@ -143,8 +143,19 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   }, [readOnly]);
 
   const target = (): TodoTask | undefined => (openTaskId ? world.tasks[openTaskId] : undefined) ?? (selectedId ? world.tasks[selectedId] : undefined);
-  const shortcutState = useRef({ target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout });
-  shortcutState.current = { target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout };
+  /** Chooses a card and puts the keyboard on it, so Enter and Space act on the card that shows chosen. */
+  const choose = (id: string) => {
+    setSelectedId(id);
+    requestAnimationFrame(() => {
+      const card = document.querySelector<HTMLElement>(`.todo-board .todo-card[data-task="${CSS.escape(id)}"]`);
+      card?.focus({ preventScroll: true });
+      card?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    });
+  };
+  const setCalendar = (mode: DisplaySettings['calendar']) => { setLayout('calendar'); if (display.calendar !== mode) setDisplay({ ...display, calendar: mode }); };
+  const state0 = { target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout, setCalendar, columns, selectedId, choose };
+  const shortcutState = useRef(state0);
+  shortcutState.current = state0;
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const current = shortcutState.current;
@@ -155,7 +166,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       const shortcut = read.shortcut;
       if (!shortcut) { if (read.pending) event.preventDefault(); return; }
       const task = current.target();
-      const taskAction = ['complete', 'complete-next', 'add-next', 'priority', 'open'].includes(shortcut.action);
+      const taskAction = ['complete', 'complete-next', 'add-next', 'open'].includes(shortcut.action);
       if (taskAction && !task) return;
       switch (shortcut.action) {
         case 'add': current.openAdd(); break;
@@ -168,16 +179,32 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
         case 'complete': if (task && !task.completedAt) current.actions.complete(task); break;
         case 'complete-next': if (task) current.followUp(task, true); break;
         case 'add-next': if (task) current.followUp(task, false); break;
-        case 'priority': if (task) current.actions.priority(task, shortcut.priority); break;
+        case 'move': {
+          // The board's cards only, never while a card is being dragged with the keys or from inside the task's detail.
+          if (current.layout !== 'board' || document.querySelector('.todo-board.dragging') || (event.target instanceof Element && event.target.closest('.todo-detail'))) return;
+          const next = moveSelection(current.columns, current.openTaskId ?? current.selectedId, shortcut.direction);
+          if (!next) return;
+          if (current.openTaskId) current.closeTask();
+          current.choose(next);
+          break;
+        }
         // Enter on a focused button or link is that control's, not the task under the mouse.
         case 'open': if (task && !current.openTaskId && !(event.target instanceof Element && event.target.closest('button, a, select, summary, [role="button"]'))) current.openTask(task.id); else return; break;
         case 'close':
           if (current.openTaskId) current.closeTask();
           else if (current.drawer && current.sidebarOpen) current.onSidebarOpen(false);
-          else return;
+          else if (current.selectedId) {
+            // Lets go of the chosen card, and of the keyboard on it.
+            setSelectedId(null);
+            if (document.activeElement instanceof HTMLElement && document.activeElement.closest('.todo-card')) document.activeElement.blur();
+          } else return;
           break;
         case 'undo': if (!current.client.undo()) return; break;
         case 'layout': current.setLayout(current.layout === 'board' ? 'calendar' : 'board'); break;
+        case 'board': current.setLayout('board'); break;
+        case 'calendar': current.setLayout('calendar'); break;
+        case 'week': current.setCalendar('week'); break;
+        case 'month': current.setCalendar('month'); break;
       }
       event.preventDefault();
     };
@@ -206,7 +233,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     { key: 'tomorrow', label: t('내일'), icon: <CalendarDays size={13} />, run: () => actions.date(task, addDays(today, 1)) },
     { key: 'none', label: t('날짜 없음'), icon: <CalendarDays size={13} />, run: () => actions.date(task, null) },
     'separator',
-    ...([1, 2, 3, 4] as const).map(priority => ({ key: `p${priority}`, label: priorityName(priority), hint: String(priority), icon: <Flag size={13} className={`p${priority}`} />, checked: undefined, run: () => actions.priority(task, priority) })),
+    ...([1, 2, 3, 4] as const).map(priority => ({ key: `p${priority}`, label: priorityName(priority), icon: <Flag size={13} className={`p${priority}`} />, checked: undefined, run: () => actions.priority(task, priority) })),
     'separator',
     { key: 'delete', label: t('삭제'), danger: true, icon: <Trash2 size={13} />, run: () => actions.remove(task) },
   ];
@@ -250,13 +277,19 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   return <div className={`todo-page ${sidebarOpen ? 'with-sidebar' : ''} ${drawer ? 'drawer' : ''} ${openTaskId ? 'with-detail' : ''}`}>
     {drawer && sidebarOpen && <button type="button" className="todo-scrim" aria-label={t('목록 닫기')} onClick={() => onSidebarOpen(false)} />}
     {sidebarOpen && state.phase === 'ready' && <TodoSidebar world={world} counts={counts} view={view} query={query} client={client} readOnly={readOnly} searchRef={searchRef} onNavigate={goTo} onAdd={() => { openAdd(); if (drawer) onSidebarOpen(false); }} />}
-    <main className="todo-main" aria-label={title}>
+    <main className="todo-main" aria-label={title} onClickCapture={event => {
+      // With a task open, a click on the page's empty space closes it and does nothing else; a card opens that card.
+      if (!openTaskId || !(event.target instanceof Element) || !event.currentTarget.contains(event.target)) return;
+      if (event.target.closest('.todo-card, .todo-cal-entry, .todo-cal-block, button, a, input, textarea, select, label, summary, [role="button"], [role="tab"], [role="radio"], .todo-popover')) return;
+      event.preventDefault(); event.stopPropagation();
+      closeTask();
+    }}>
       <header className="todo-main-head">
         <div className="todo-title"><h2>{title}</h2>{view.kind === 'today' && <span>{longDate(today)}</span>}</div>
         <div className="todo-tools">
           {state.phase === 'ready' && <div className="todo-segmented todo-layout-switch" role="radiogroup" aria-label={t('레이아웃')}>
-            <button type="button" role="radio" aria-checked={layout === 'board'} title={`${t('보드')} (Shift+V)`} onClick={() => setLayout('board')}><Columns3 size={13} /><span>{t('보드')}</span></button>
-            <button type="button" role="radio" aria-checked={layout === 'calendar'} title={`${t('캘린더')} (Shift+V)`} onClick={() => setLayout('calendar')}><CalendarDays size={13} /><span>{t('캘린더')}</span></button>
+            <button type="button" role="radio" aria-checked={layout === 'board'} title={`${t('보드')} (B)`} onClick={() => setLayout('board')}><Columns3 size={13} /><span>{t('보드')}</span></button>
+            <button type="button" role="radio" aria-checked={layout === 'calendar'} title={`${t('캘린더')} (C)`} onClick={() => setLayout('calendar')}><CalendarDays size={13} /><span>{t('캘린더')}</span></button>
           </div>}
           {view.kind === 'upcoming' && layout === 'board' && <div className="todo-week-nav">
             <button type="button" className="icon-button" aria-label={t('이전 주')} disabled={start <= today} onClick={() => setStart(value => addDays(value, -7) < today ? today : addDays(value, -7))}><ChevronLeft size={15} /></button>

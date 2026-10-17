@@ -1,12 +1,16 @@
 /**
- * The Todo page's keys (design 7.6): `Q` add, `/` search, `Shift+V` board or calendar, `G` then `T`/`U`/`I` today,
- * upcoming, inbox; on the chosen task `E` complete, `Shift+E` complete and add the next, `N` add the next, `1`–`4`
- * priority, `Enter` open; `Esc` close; `⌘Z`/`Ctrl+Z` undo the last change.
+ * The Todo page's keys: `Q` add, `/` search, `B` board, `C` calendar, `W`/`M` calendar by week or month, `Shift+V`
+ * board or calendar, `G` then `T`/`U`/`I` today, upcoming, inbox; arrows move the chosen task on the board; on the
+ * chosen task `E` complete, `Shift+E` complete and add the next, `N` add the next, `Enter` open; `Esc` close, or let
+ * go of the chosen task; `⌘Z`/`Ctrl+Z` undo the last change. `1` and `2` switch pages (app/page-shortcuts.ts).
  */
 
+export type Direction = 'up' | 'down' | 'left' | 'right';
 export type TodoShortcut =
-  | { action: 'add' | 'search' | 'layout' | 'today' | 'upcoming' | 'inbox' | 'complete' | 'complete-next' | 'add-next' | 'open' | 'close' | 'undo' }
-  | { action: 'priority'; priority: 1 | 2 | 3 | 4 };
+  | { action: 'add' | 'search' | 'layout' | 'board' | 'calendar' | 'week' | 'month' | 'today' | 'upcoming' | 'inbox' | 'complete' | 'complete-next' | 'add-next' | 'open' | 'close' | 'undo' }
+  | { action: 'move'; direction: Direction };
+
+const ARROWS: Record<string, Direction> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
 
 export interface ShortcutKey { key: string; code?: string; shiftKey: boolean; metaKey: boolean; ctrlKey: boolean; altKey: boolean; isComposing?: boolean }
 
@@ -33,10 +37,13 @@ export function readShortcut(event: ShortcutKey, pending: boolean): { shortcut?:
     case 'g': return { pending: true };
     case 'e': return { shortcut: { action: 'complete' }, pending: false };
     case 'n': return { shortcut: { action: 'add-next' }, pending: false };
-    case '1': case '2': case '3': case '4': return { shortcut: { action: 'priority', priority: Number(key) as 1 | 2 | 3 | 4 }, pending: false };
+    case 'b': return { shortcut: { action: 'board' }, pending: false };
+    case 'c': return { shortcut: { action: 'calendar' }, pending: false };
+    case 'w': return { shortcut: { action: 'week' }, pending: false };
+    case 'm': return { shortcut: { action: 'month' }, pending: false };
     case 'Enter': return { shortcut: { action: 'open' }, pending: false };
     case 'Escape': return { shortcut: { action: 'close' }, pending: false };
-    default: return { pending: false };
+    default: return ARROWS[key] ? { shortcut: { action: 'move', direction: ARROWS[key] }, pending: false } : { pending: false };
   }
 }
 

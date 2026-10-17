@@ -8,6 +8,7 @@ import { english } from '../../../client/src/i18n/messages.js';
 import { getLanguage, setLanguage } from '../../../client/src/i18n/i18n.js';
 import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
 import { readShortcut } from '../../../client/src/todo/todo-shortcuts.js';
+import { moveSelection } from '../../../client/src/todo/todo-views.js';
 import { isTodoPage, pageSearch, readTodoLocation, todoSearch } from '../../../client/src/todo/todo-url.js';
 import { boardColumns, cardContext, defaultDisplay, dropOps, manualOrder, projectOrder, sectionMoveTarget, sidebarCounts, type ViewContext } from '../../../client/src/todo/todo-views.js';
 import { nthOf } from '../../../client/src/todo/DatePicker.js';
@@ -135,7 +136,16 @@ test('keys: a G chord, task keys, and undo', () => {
   assert.deepEqual(readShortcut(key('u'), true), { shortcut: { action: 'upcoming' }, pending: false });
   assert.deepEqual(readShortcut(key('u'), false), { pending: false });
   assert.deepEqual(readShortcut(key('E', { shiftKey: true }), false), { shortcut: { action: 'complete-next' }, pending: false });
-  assert.deepEqual(readShortcut(key('3'), false), { shortcut: { action: 'priority', priority: 3 }, pending: false });
+  assert.deepEqual(readShortcut(key('3'), false), { pending: false }, 'numbers switch pages now (app/page-shortcuts.ts), never priorities');
+  for (const [letter, action] of [['b', 'board'], ['c', 'calendar'], ['w', 'week'], ['m', 'month']] as const) {
+    assert.deepEqual(readShortcut(key(letter), false), { shortcut: { action }, pending: false });
+    // A Korean input mode gives another letter for the same key: the key's place decides.
+    assert.deepEqual(readShortcut({ ...key('ㅠ'), code: `Key${letter.toUpperCase()}` }, false), { shortcut: { action }, pending: false });
+  }
+  assert.deepEqual(readShortcut(key('b'), true), { pending: false }, 'after G only T, U and I count');
+  assert.deepEqual(readShortcut(key('M', { shiftKey: true }), false), { pending: false }, 'Shift+M stays the master\'s');
+  assert.deepEqual(readShortcut(key('ArrowDown'), false), { shortcut: { action: 'move', direction: 'down' }, pending: false });
+  assert.deepEqual(readShortcut(key('ArrowLeft'), false), { shortcut: { action: 'move', direction: 'left' }, pending: false });
   assert.deepEqual(readShortcut(key('z', { metaKey: true }), false), { shortcut: { action: 'undo' }, pending: false });
   assert.deepEqual(readShortcut(key('q', { metaKey: true }), false), { pending: false });
 });
@@ -166,4 +176,17 @@ test('moving a section one place names the section it goes after, and nothing pa
 test('a custom monthly repeat starts from the weekday its date is', () => {
   assert.deepEqual(nthOf('2026-10-12'), { n: 2, weekday: 1 });
   assert.deepEqual(nthOf('2026-10-30'), { n: -1, weekday: 5 });
+});
+
+test('arrow keys move the chosen card through columns that have cards, from the first card when none is chosen', () => {
+  const columns = [{ tasks: [] }, { tasks: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] }, { tasks: [] }, { tasks: [{ id: 'x' }] }, { tasks: [{ id: 'p' }, { id: 'q' }] }] as never[];
+  assert.equal(moveSelection(columns, null, 'down'), 'a');
+  assert.equal(moveSelection(columns, 'gone', 'right'), 'a', 'a card no longer shown starts over');
+  assert.equal(moveSelection(columns, 'a', 'down'), 'b');
+  assert.equal(moveSelection(columns, 'c', 'down'), 'c', 'the last card stays');
+  assert.equal(moveSelection(columns, 'a', 'up'), 'a');
+  assert.equal(moveSelection(columns, 'c', 'right'), 'x', 'an empty column is passed over, the last card taken when shorter');
+  assert.equal(moveSelection(columns, 'x', 'right'), 'p');
+  assert.equal(moveSelection(columns, 'b', 'left'), 'b', 'nothing further left');
+  assert.equal(moveSelection([{ tasks: [] }] as never[], null, 'down'), null);
 });

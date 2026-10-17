@@ -113,16 +113,17 @@ export function BoardView(board: BoardProps) {
   const tabMenu = useRef<HTMLButtonElement>(null);
   const sectionIds = useMemo(() => columns.filter(column => column.sectionId).map(column => sectionDrag(column.sectionId!)), [columns]);
 
-  // A phone shows one column at a time; the tabs follow the swipes.
+  // A phone shows one column at a time; the tabs follow the swipes (and the arrow keys), by where each column starts.
+  const columnStarts = () => { const element = scroller.current; const all = element ? [...element.querySelectorAll<HTMLElement>(':scope > .todo-column')] : []; return all.map(column => column.offsetLeft - (all[0]?.offsetLeft ?? 0)); };
   useEffect(() => {
     const element = scroller.current;
     if (!mobile || !element) return;
-    const onScroll = () => { const width = element.clientWidth || 1; setCurrent(Math.round(element.scrollLeft / width)); };
+    const onScroll = () => { const starts = columnStarts(); let nearest = 0; starts.forEach((start, index) => { if (Math.abs(start - element.scrollLeft) < Math.abs(starts[nearest] - element.scrollLeft)) nearest = index; }); setCurrent(nearest); };
     element.addEventListener('scroll', onScroll, { passive: true });
     return () => element.removeEventListener('scroll', onScroll);
   }, [mobile]);
   useEffect(() => { if (current >= columns.length) setCurrent(Math.max(0, columns.length - 1)); }, [columns.length, current]);
-  const pick = (index: number) => { setCurrent(index); scroller.current?.scrollTo({ left: index * (scroller.current.clientWidth || 0), behavior: 'smooth' }); };
+  const pick = (index: number) => { setCurrent(index); scroller.current?.scrollTo({ left: columnStarts()[index] ?? 0, behavior: 'smooth' }); };
 
   const columnOf = (data: Record<string, unknown> | undefined) => data?.column as BoardColumn | undefined;
   const onStart = (event: DragStartEvent) => {
