@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { Archive, ArchiveRestore, ArrowRight, CalendarDays, Check, CheckCheck, ChevronsDownUp, ChevronsUpDown, Columns3, ChevronLeft, ChevronRight, Flag, LoaderCircle, Pencil, Plus, RefreshCw, Trash2, TriangleAlert, X } from 'lucide-react';
 import { liveProjectIds } from '../../../shared/todo/compose';
 import { addDays } from '../../../shared/todo/dates';
-import type { TodoProject, TodoSection, TodoTask } from '../../../shared/todo/types';
+import type { TodoProject, TodoTask } from '../../../shared/todo/types';
 import { useMediaQuery } from '../common/use-media-query';
 import { translate as t, useI18n } from '../i18n/i18n';
 import { BoardView } from './BoardView';
@@ -20,7 +20,7 @@ import { readShortcut, typingIn } from './todo-shortcuts';
 import { httpTransport, localToday, newId, TodoClient, useTodoState } from './todo-store';
 import { isTodoPage, readTodoLocation, todoSearch, viewKey, type TodoLocation, type TodoView } from './todo-url';
 import { isOpen } from './todo-model';
-import { boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, groupingsFor, GROUPINGS, manualOrder, moveSelection, projectOf, sidebarCounts, sortTasks, viewTitle, type BoardColumn, type DisplaySettings, type ViewContext } from './todo-views';
+import { archivedColumns, shapeSections, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
 import { CalendarView } from './calendar/CalendarView';
 import type { TodoLayout } from '../../../shared/todo/types';
 
@@ -43,43 +43,12 @@ export interface TodoPageProps {
  * The completed list of a project ('' for all), of one label's tasks when given: the server filters them, so every
  * page is full. (`TodoClient.readCompleted` takes the label as its third argument.)
  */
-type CompletedReader = { readCompleted(projectId: string, more?: boolean, labelId?: string): Promise<void> };
-const readCompleted = (client: TodoClient, projectId: string, more: boolean, labelId?: string) => (client as unknown as CompletedReader).readCompleted(projectId, more, labelId);
+const readCompleted = (client: TodoClient, projectId: string, more: boolean, labelId?: string) => client.readCompleted(projectId, more, labelId);
 
 /**
  * An archived project's board, to read: its open top-level tasks (the lists leave out archived projects' tasks), in
  * the columns its grouping makes, none of which takes a card or a new task.
  */
-export function archivedColumns(view: TodoView, display: DisplaySettings, context: ViewContext, projectId: string): BoardColumn[] {
-  const group = groupingsFor(view).includes(display.group) ? display.group : groupingsFor(view)[0];
-  const tasks = Object.values(context.world.tasks).filter(task => isOpen(task) && task.projectId === projectId && !task.parentId);
-  return GROUPINGS[group](view, tasks, context).map(column => ({ ...column, drop: null, sectionId: undefined, tasks: sortTasks(column.tasks, display.sort, group) }));
-}
-
-/**
- * A project's section columns as its sections say: a collapsed one shows its header and count only (a card still
- * drops on it), and an archived one leaves the board with its tasks, to show read-only after the others when asked.
- */
-export function shapeSections(columns: readonly BoardColumn[], sections: readonly TodoSection[], options: { collapse: boolean; showArchived: boolean }): { columns: BoardColumn[]; archived: number } {
-  const archived = sections.filter(section => section.archivedAt).sort((a, b) => a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0);
-  const archivedIds = new Set(archived.map(section => section.id));
-  const byId = new Map(sections.map(section => [section.id, section]));
-  const stored: TodoTask[] = [];
-  const shaped = columns.map(column => {
-    if (column.id === 'section:none' && archivedIds.size) {
-      stored.push(...column.tasks.filter(task => task.sectionId && archivedIds.has(task.sectionId)));
-      return { ...column, tasks: column.tasks.filter(task => !task.sectionId || !archivedIds.has(task.sectionId)) };
-    }
-    const section = column.sectionId ? byId.get(column.sectionId) : undefined;
-    if (options.collapse && section?.collapsed) return { ...column, tasks: [], note: t('접힘 · {0}', { 0: column.tasks.length }) };
-    return column;
-  });
-  if (options.showArchived) for (const section of archived) shaped.push({
-    id: `section:${section.id}`, title: section.name, note: t('보관됨'), sectionId: section.id, drop: null, preset: {}, tasks: stored.filter(task => task.sectionId === section.id),
-  });
-  return { columns: shaped, archived: archived.length };
-}
-
 /** The archived project that hides `project`: itself, or the one above it that was archived. */
 const archivedHolder = (projects: readonly TodoProject[], project: TodoProject) => {
   let current: TodoProject | undefined = project;

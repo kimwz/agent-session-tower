@@ -560,3 +560,6 @@ a.todo-file-name:hover { text-decoration:underline; }
 .todo-banner.archived .todo-tool { height:26px; }
 .todo-column-empty { padding:6px 4px; font-size:12px; }
 @media (hover:none) { .todo-subtask-list li > button.todo-subtask-grip { opacity:.6; } }
+/* A collapsed section keeps a small drop area under its header; locked columns (archived) read a little quieter. */
+.todo-column.collapsed .todo-column-cards { min-height:44px; }
+.todo-column.locked .todo-column-head h3 { color:#8a98ac; }

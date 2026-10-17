@@ -22,7 +22,6 @@ export interface ActionHost {
  * `task.duplicate` copies a task and its open sub-tasks right after it in one request; the server makes the copies'
  * ids below the copy, so it is sent as it is and shown from the answer.
  */
-type DuplicateOp = { op: 'task.duplicate'; id: string; copyId: string };
 
 /** The address that opens `id` on the Todo page, in the list shown now. */
 export function taskLink(place: Pick<Location, 'origin' | 'pathname' | 'search'>, id: string): string {
@@ -62,8 +61,7 @@ export function createActions(client: TodoClient, host: ActionHost) {
     update(task: TodoTask, patch: Extract<TodoOp, { op: 'task.update' }>['patch']) { client.apply([{ op: 'task.update', id: task.id, patch }]); },
     duplicate(task: TodoTask) {
       const copyId = newId();
-      const op: DuplicateOp = { op: 'task.duplicate', id: task.id, copyId };
-      if (client.apply([op as unknown as TodoOp])) client.toast(t('“{0}” 복제', { 0: task.content }), 'info', [...client.undoActions(), { label: t('열기'), run: () => host.openTask(copyId) }]);
+      if (client.apply([{ op: 'task.duplicate', id: task.id, copyId }])) client.toast(t('“{0}” 복제', { 0: task.content }), 'info', [...client.undoActions(), { label: t('열기'), run: () => host.openTask(copyId) }]);
     },
     async copyLink(task: TodoTask, place: Pick<Location, 'origin' | 'pathname' | 'search'> = window.location, clipboard: Pick<Clipboard, 'writeText'> | undefined = navigator.clipboard) {
       try {

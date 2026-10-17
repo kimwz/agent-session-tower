@@ -32,11 +32,10 @@ export const CARD_META: MetaChip[] = [
 ];
 
 /** Done and all sub-tasks of each task, from the server (`TodoWorld.subtaskCounts`, which may not have come yet). */
-type SubtaskCounts = { subtaskCounts?: Record<string, { done: number; total: number }> };
 
 /** The sub-task toggle's words: done of all from the server's counts, else the open ones the card lists. */
 export function subtaskToggleText(world: TodoWorld, taskId: string, open: number): string {
-  const count = (world as TodoWorld & SubtaskCounts).subtaskCounts?.[taskId];
+  const count = world.subtaskCounts[taskId];
   return count && count.total > 0 ? t('하위 작업 {0}/{1}', { 0: count.done, 1: count.total }) : t('하위 작업 {0}', { 0: open });
 }
 

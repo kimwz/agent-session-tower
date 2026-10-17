@@ -3,7 +3,7 @@ import { liveProjectIds } from '../../../shared/todo/compose';
 import { addDays } from '../../../shared/todo/dates';
 import { compareDay } from '../../../shared/todo/day-order';
 import type { TodoOp } from '../../../shared/todo/ops';
-import type { TodoPriority, TodoProject, TodoTask } from '../../../shared/todo/types';
+import type { TodoPriority, TodoProject, TodoSection, TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { byOrder, isOpen, type TodoWorld } from './todo-model';
 import { dateLabel, longDate, priorityName } from './todo-format';
@@ -35,6 +35,10 @@ export interface BoardColumn {
   drop: ColumnDrop | null;
   /** A section column, whose header can be dragged and renamed. */
   sectionId?: string;
+  /** Read only: an archived project's or section's tasks, shown but never moved, completed or changed here. */
+  locked?: boolean;
+  /** A collapsed section: its header and count only; a card still drops on it. */
+  collapsed?: boolean;
   /** What a task added in this column starts with. */
   preset: { projectId?: string; sectionId?: string | null; dueDate?: string; priority?: TodoPriority };
 }
@@ -298,4 +302,34 @@ export function moveSelection(columns: readonly Pick<BoardColumn, 'tasks'>[], fr
   if (direction === 'down') return ids[Math.min(ids.length - 1, row + 1)];
   const next = filled[column + (direction === 'left' ? -1 : 1)];
   return next ? next[Math.min(row, next.length - 1)] : from;
+}
+
+export function archivedColumns(view: TodoView, display: DisplaySettings, context: ViewContext, projectId: string): BoardColumn[] {
+  const group = groupingsFor(view).includes(display.group) ? display.group : groupingsFor(view)[0];
+  const tasks = Object.values(context.world.tasks).filter(task => isOpen(task) && task.projectId === projectId && !task.parentId);
+  return GROUPINGS[group](view, tasks, context).map(column => ({ ...column, drop: null, sectionId: undefined, locked: true, tasks: sortTasks(column.tasks, display.sort, group) }));
+}
+
+/**
+ * A project's section columns as its sections say: a collapsed one shows its header and count only (a card still
+ * drops on it), and an archived one leaves the board with its tasks, to show read-only after the others when asked.
+ */
+export function shapeSections(columns: readonly BoardColumn[], sections: readonly TodoSection[], options: { collapse: boolean; showArchived: boolean }): { columns: BoardColumn[]; archived: number } {
+  const archived = sections.filter(section => section.archivedAt).sort((a, b) => a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0);
+  const archivedIds = new Set(archived.map(section => section.id));
+  const byId = new Map(sections.map(section => [section.id, section]));
+  const stored: TodoTask[] = [];
+  const shaped = columns.map(column => {
+    if (column.id === 'section:none' && archivedIds.size) {
+      stored.push(...column.tasks.filter(task => task.sectionId && archivedIds.has(task.sectionId)));
+      return { ...column, tasks: column.tasks.filter(task => !task.sectionId || !archivedIds.has(task.sectionId)) };
+    }
+    const section = column.sectionId ? byId.get(column.sectionId) : undefined;
+    if (options.collapse && section?.collapsed) return { ...column, tasks: [], collapsed: true, note: t('접힘 · {0}', { 0: column.tasks.length }) };
+    return column;
+  });
+  if (options.showArchived) for (const section of archived) shaped.push({
+    id: `section:${section.id}`, title: section.name, note: t('보관됨'), sectionId: section.id, drop: null, locked: true, preset: {}, tasks: stored.filter(task => task.sectionId === section.id),
+  });
+  return { columns: shaped, archived: archived.length };
 }

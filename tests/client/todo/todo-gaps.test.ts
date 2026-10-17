@@ -7,7 +7,7 @@ import { saveWithFiles } from '../../../client/src/todo/QuickAdd.js';
 import { activityText, shareItems } from '../../../client/src/todo/TaskDetail.js';
 import { subtaskToggleText } from '../../../client/src/todo/TaskCard.js';
 import { CalendarView } from '../../../client/src/todo/calendar/CalendarView.js';
-import { archivedColumns, shapeSections } from '../../../client/src/todo/TodoPage.js';
+import { archivedColumns, shapeSections } from '../../../client/src/todo/todo-views.js';
 import { createActions, taskLink } from '../../../client/src/todo/todo-actions.js';
 import { emptyWorld, worldFromOverview, type TodoWorld } from '../../../client/src/todo/todo-model.js';
 import { labelStepOp, moveUnderCandidates, outOfParentOp, parentCandidates, projectStepOp, subtaskReorderOp } from '../../../client/src/todo/todo-moves.js';
