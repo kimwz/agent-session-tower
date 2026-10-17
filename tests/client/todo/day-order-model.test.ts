@@ -89,6 +89,7 @@ test('a label’s completed list is read for that label, and more of it keeps th
     completed: async input => { asked.push(input); return input.before ? { items: [done('two')] } : { items: [done('one')], before: 'cursor' }; },
     search: async () => [],
     apply: async () => changes(1),
+    startAgent: async () => undefined,
   };
   const client = new TodoClient(transport, { batchMs: 5, toastMs: 60_000 });
   try {

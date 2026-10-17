@@ -563,3 +563,27 @@ a.todo-file-name:hover { text-decoration:underline; }
 /* A collapsed section keeps a small drop area under its header; locked columns (archived) read a little quieter. */
 .todo-column.collapsed .todo-column-cards { min-height:44px; }
 .todo-column.locked .todo-column-head h3 { color:#8a98ac; }
+
+/* A task's issue chat. On the card, right of its menu: the issue master's state as the chat header shows a session,
+   or, without one, a speech bubble offered to a mouse over the card (a phone starts one from the detail's chat tab). */
+.todo-card-chat { width:28px; height:28px; margin:-5px -4px 0 0; padding:0; opacity:0; }
+.todo-card-chat.active, .todo-card:hover .todo-card-chat, .todo-card:focus-within .todo-card-chat { opacity:1; }
+@media (hover:none) { .todo-card-chat:not(.active) { display:none; } }
+.todo-agent-icon { position:relative; padding:0; }
+.todo-agent-flag { position:absolute; top:-2px; right:-2px; width:8px; height:8px; border-radius:50%; background:var(--flag); box-shadow:0 0 0 2px var(--todo-card); }
+.todo-agent-flag.needsOwner { --flag:#ffa24c; }
+.todo-agent-flag.blocked, .todo-agent-flag.error { --flag:#ff6b6b; }
+.todo-detail-tabs { display:flex; gap:2px; padding:0 18px; border-bottom:1px solid #1f2a39; }
+.todo-detail-tabs button { display:inline-flex; align-items:center; gap:7px; height:36px; margin-bottom:-1px; padding:0 10px; border-bottom:2px solid transparent; border-radius:0; color:#8492a6; font-size:12.5px; font-weight:600; }
+.todo-detail-tabs button:hover { color:var(--text); }
+.todo-detail-tabs button[aria-selected="true"] { color:var(--bright); border-bottom-color:#5b8fd6; }
+.todo-detail-tabs .agent-orb-wrap.compact, .todo-detail-tabs .agent-orb-wrap.compact .agent-orb { width:18px; height:18px; }
+.todo-detail-tabs .agent-orb-wrap.compact .session-context-ring { width:24px; height:24px; }
+.todo-agent-start { padding:22px 26px; }
+.todo-agent-start > p { margin:0 0 4px; color:#93a3b8; font-size:12.5px; line-height:1.55; }
+.todo-agent-starting { flex-direction:row; align-items:center; gap:8px; color:#93a3b8; font-size:12.5px; }
+/* The conversation fills the panel below its tabs, as the canvas's fills the right of the canvas. */
+.todo-detail-chat { display:flex; flex:1; min-height:0; }
+.todo-detail-chat .chat-panel-spacer, .todo-detail-chat .chat-resize-handle, .todo-detail-chat .chat-panel .chat-header-actions .close-chat { display:none; }
+.todo-detail-chat .chat-panel { position:relative; inset:auto; flex:1 1 0; width:auto; min-width:0; max-width:none; height:auto; min-height:0; z-index:auto; border-left:0; box-shadow:none; }
+@media (max-width:680px) { .todo-agent-start { padding:16px; } .todo-detail-tabs { padding:0 10px; } }

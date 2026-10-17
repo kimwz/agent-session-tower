@@ -2,10 +2,10 @@ import { useSyncExternalStore } from 'react';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { formatDate } from '../../../shared/todo/dates';
 import type { TodoOp, TodoRequest } from '../../../shared/todo/ops';
-import type { TodoChanges, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../../shared/todo/types';
+import type { TodoAgent, TodoChanges, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../../shared/todo/types';
 import { api, ApiError } from '../common/lib';
 import { translate as t, translateMessage } from '../i18n/i18n';
-import { applyOps, emptyWorld, inverseOps, mergeChanges, touchesDetail, withDetail, worldFromOverview, type TodoWorld } from './todo-model';
+import { applyOps, emptyWorld, inverseOps, mergeChanges, touchesDetail, withAgents, withDetail, worldFromOverview, type TodoWorld } from './todo-model';
 
 /**
  * The Todo page's data. A change shows at once, goes to the server with the changes of the next 300 ms as one request,
@@ -20,6 +20,8 @@ export interface TodoTransport {
   completed(input: { projectId?: string; labelId?: string; before?: string }): Promise<TodoCompletedPage>;
   search(query: string, completed: boolean): Promise<TodoTask[]>;
   apply(request: TodoRequest): Promise<TodoChanges>;
+  /** Starts a todo's issue master with the owner's first message; the answer may name the agent it recorded. */
+  startAgent(taskId: string, text: string): Promise<{ agent?: TodoAgent } | undefined>;
 }
 
 export function httpTransport(token: () => string): TodoTransport {
@@ -36,6 +38,7 @@ export function httpTransport(token: () => string): TodoTransport {
     },
     search: async (query, completed) => (await api<{ tasks: TodoTask[] }>(`/api/todos/search?${new URLSearchParams({ q: query, ...(completed ? { completed: '1' } : {}) })}`)).tasks,
     apply: request => post('/api/todos/ops', request),
+    startAgent: (taskId, text) => api<{ agent?: TodoAgent } | undefined>(`/api/todos/tasks/${encodeURIComponent(taskId)}/agent`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token() }, body: JSON.stringify({ text }) }),
   };
 }
 
@@ -313,6 +316,21 @@ export class TodoClient {
     return id;
   }
   dismiss(id: number) { if (this.state.toasts.some(toast => toast.id === id)) this.set({ toasts: this.state.toasts.filter(toast => toast.id !== id) }); }
+
+  /**
+   * Starts the todo's issue master. It shows as soon as the server answers; the overview is read again for what the
+   * server recorded. A refusal throws, so the page keeps the message to send again.
+   */
+  async startAgent(taskId: string, text: string): Promise<void> {
+    const answer = await this.transport.startAgent(taskId, text);
+    const agent = answer?.agent;
+    if (agent?.taskId === taskId) {
+      this.base = { ...this.base, agents: withAgents(this.base.agents, { [taskId]: agent }) };
+      this.publish();
+    }
+    this.wantRead = true;
+    this.pump();
+  }
 
   /** Requests not answered yet, for tests and for leaving the page. */
   pending() { return this.queue.length + (this.inflight?.length ?? 0); }

@@ -4,9 +4,10 @@ import { nodeOf } from '../remote/scope';
 /**
  * The sessions this computer's page needs: the list's time window (`period` in days, or 'all'), the archived list
  * when it is open, and the opened conversation's family. A joined computer's conversation is not this computer's to send.
+ * The Todo page (`masters`) also holds every open master session, for its cards' issue masters.
  */
-export function pageScope(period: string, showClosed: boolean, activeChatId: string | null | undefined): SessionScope {
-  return { ...(period === 'all' ? {} : { days: Number(period) }), closed: showClosed, ...(activeChatId && !nodeOf(activeChatId) ? { focus: activeChatId } : {}) };
+export function pageScope(period: string, showClosed: boolean, activeChatId: string | null | undefined, masters = false): SessionScope {
+  return { ...(period === 'all' ? {} : { days: Number(period) }), closed: showClosed, ...(activeChatId && !nodeOf(activeChatId) ? { focus: activeChatId } : {}), ...(masters ? { masters: true as const } : {}) };
 }
 
 /** The archived list is open but the sessions it lists have not arrived yet. */

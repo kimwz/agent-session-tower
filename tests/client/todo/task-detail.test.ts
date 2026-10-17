@@ -13,7 +13,7 @@ const render = (item: ReturnType<typeof task>) => {
   const world = withDetail(worldFromOverview(overview([item]), emptyWorld()), { task: item, subtasks: [], comments: [], files: [], completions: [], events: [], previous: [], next: [] });
   const uploads = { subscribe: () => () => undefined, getJobs: () => [], add() {}, cancel() {}, retry() {} };
   return renderToStaticMarkup(createElement(TaskDetail, { taskId: item.id, world, error: '', today: '2026-10-14', client: { today: () => '2026-10-14' } as never, actions: {} as never,
-    readOnly: false, uploads: uploads as never, onClose() {}, onOpen() {}, onProject() {}, onFollowUp() {} }));
+    readOnly: false, uploads: uploads as never, onClose() {}, onOpen() {}, onProject() {}, onFollowUp() {}, tab: 'detail', onTab() {} }));
 };
 
 test('the detail puts the most used properties first; rare ones without a value become one row of additions', () => {

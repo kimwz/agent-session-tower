@@ -38,9 +38,9 @@ function tabId(): string {
  * master's settings slide out beside the button; the microphone turns voice on, and then the button (a microphone
  * itself) turns it off, with the live voice bar beside it; with the conversation closed, the bar offers to open it
  * again above the settings icon. Hidden when this Tower has no master. `sessionId` is the
- * open conversation.
+ * open conversation; `issueChat`, a todo's issue master shown on the Todo page, which works the screen the same way.
  */
-export function MasterDock({ token, controls, sessionId }: { token: string; controls: MasterControls; sessionId: string | null }) {
+export function MasterDock({ token, controls, sessionId, issueChat = false }: { token: string; controls: MasterControls; sessionId: string | null; issueChat?: boolean }) {
   const words = useWords();
   const [open, setOpen] = useState(false);
   const [room, setRoom] = useState<RoomState>({});
@@ -94,14 +94,15 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
     return () => { cancelled = true; release(); if (retry) clearTimeout(retry); follow.current?.stop(); voiceRef.current?.stop(); };
   }, []);
 
-  // A tab showing the master's conversation is where its screen commands go.
+  // A tab showing the master's conversation, or an issue master's, is where its screen commands go.
+  const present = masterOpen || issueChat;
   useEffect(() => {
-    if (!masterOpen) return;
+    if (!present) return;
     const tell = () => { void post('/api/master/presence', tokenRef.current, { tabId: tab.current }).catch(() => {}); };
     tell();
     const timer = setInterval(tell, PRESENCE_MS);
     return () => clearInterval(timer);
-  }, [masterOpen]);
+  }, [present]);
 
   voiceSettings.current = overview?.settings.voice ?? DEFAULT_MASTER_VOICE;
   // Called straight from the owner's click, so the browser lets what is read aloud play later.

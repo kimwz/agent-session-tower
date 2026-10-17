@@ -8,6 +8,8 @@ test('the page asks for its time window, the archived list when open, and the op
   assert.deepEqual(pageScope('all', false, undefined), { closed: false });
   // A joined computer's conversation comes with that computer's own feed.
   assert.deepEqual(pageScope('7', false, `@${'a'.repeat(32)}/claude:b`), { days: 7, closed: false });
+  // The Todo page also holds the master sessions, for its issue masters.
+  assert.deepEqual(pageScope('7', false, 'claude:issue', true), { days: 7, closed: false, focus: 'claude:issue', masters: true });
 });
 
 test('the archived list waits for its sessions instead of saying there are none', () => {

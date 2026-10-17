@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { closestCenter, DndContext, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
-import { ArrowLeft, ArrowRight, ArrowUpFromLine, CalendarDays, Check, CheckCheck, ChevronDown, Clock3, Copy, CornerDownRight, Flag, GripVertical, History, Link, Link2, LoaderCircle, MoreHorizontal, Paperclip, Pencil, Plus, Tag, Trash2, X } from 'lucide-react';
-import type { TodoEvent, TodoFile, TodoPriority, TodoTask } from '../../../shared/todo/types';
+import { ArrowLeft, ArrowRight, ArrowUpFromLine, CalendarDays, Check, CheckCheck, ChevronDown, Clock3, Copy, CornerDownRight, Flag, GripVertical, History, Link, Link2, LoaderCircle, MoreHorizontal, Paperclip, Pencil, Plus, Send, Tag, Trash2, X } from 'lucide-react';
+import type { TodoAgent, TodoEvent, TodoFile, TodoPriority, TodoTask } from '../../../shared/todo/types';
 import { liveProjectIds } from '../../../shared/todo/compose';
 import { relativeTime } from '../common/lib';
 import { getLanguage, translate as t } from '../i18n/i18n';
 import { DatePicker, type DateValue } from './DatePicker';
 import { Menu, Popover, usePopover, type MenuItem } from './Popover';
-import { CheckCircle } from './TaskCard';
+import { AgentIcon, CheckCircle } from './TaskCard';
+import { TodoAgentContext } from './todo-agents';
 import { TodoMarkdown } from './TodoMarkdown';
 import { AttachButton, AttachmentList, UploadRows, useFileDrop } from './attachments/Attachments';
 import { sizeLabel } from './attachments/upload';
@@ -479,6 +480,49 @@ export function CompleteButton({ task, actions, onFollowUp, readOnly }: { task: 
   </div>;
 }
 
+/** The issue master's first message: the server starts it with the todo's content attached (`POST …/agent`). */
+const AGENT_TEXT_MAX = 32_000;
+
+function AgentStart({ task, client, readOnly }: { task: TodoTask; client: TodoClient; readOnly: boolean }) {
+  const [text, setText] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
+  const closed = !isOpen(task);
+  const disabled = readOnly || closed || sending;
+  const send = async () => {
+    const message = text.trim();
+    if (!message || disabled) return;
+    setSending(true); setError('');
+    try { await client.startAgent(task.id, message); setText(''); }
+    // The message stays, to send again.
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setSending(false); }
+  };
+  return <form className="todo-comment-form todo-agent-start" onSubmit={event => { event.preventDefault(); void send(); }}>
+    <p>{closed ? t('완료하거나 지운 할 일은 채팅을 시작할 수 없습니다. 다시 열면 시작할 수 있습니다.') : t('첫 메시지를 보내면 이 할 일 전용 마스터가 이슈 내용과 첨부를 먼저 읽고 시작합니다.')}</p>
+    <textarea autoFocus={!disabled} value={text} rows={5} maxLength={AGENT_TEXT_MAX} disabled={disabled} placeholder={t('이슈 마스터에게 보낼 첫 메시지')} aria-label={t('이슈 마스터에게 보낼 첫 메시지')}
+      onChange={event => setText(event.target.value)}
+      onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
+    {error && <p className="todo-error" role="alert">{error}</p>}
+    <div className="todo-comment-actions">
+      <span className="todo-muted"><kbd>⌘</kbd><kbd>Enter</kbd> {t('전송')}</span>
+      <span className="todo-spacer" />
+      <button type="submit" className="todo-primary" disabled={disabled || !text.trim()}>{sending ? <LoaderCircle className="spin" size={13} /> : <Send size={13} />}{sending ? t('시작하는 중') : t('보내기')}</button>
+    </div>
+  </form>;
+}
+
+/** The chat tab: the issue master's conversation once it has a session, the first message before it has one. */
+function AgentChat({ task, agent, client, readOnly, onLeave }: { task: TodoTask; agent: TodoAgent | undefined; client: TodoClient; readOnly: boolean; onLeave: () => void }) {
+  const { chat } = useContext(TodoAgentContext);
+  if (agent?.sessionId) return <div className="todo-detail-chat">{chat(agent.sessionId, onLeave)}</div>;
+  if (agent) return <div className="todo-agent-start todo-agent-starting" role="status"><LoaderCircle className="spin" size={16} /><span>{t('이슈 마스터를 시작하는 중입니다.')}</span></div>;
+  return <AgentStart key={task.id} task={task} client={client} readOnly={readOnly} />;
+}
+
+/** The detail's tabs: the task itself, or its issue chat. The one chosen stays while the page is open. */
+export type DetailTab = 'detail' | 'chat';
+
 export interface TaskDetailProps {
   taskId: string;
   world: TodoWorld;
@@ -492,9 +536,11 @@ export interface TaskDetailProps {
   onOpen: (id: string) => void;
   onProject: (projectId: string) => void;
   onFollowUp: (task: TodoTask, complete: boolean) => void;
+  tab: DetailTab;
+  onTab: (tab: DetailTab) => void;
 }
 
-export function TaskDetail({ taskId, world, error, today, client, actions, readOnly, uploads, onClose, onOpen, onProject, onFollowUp }: TaskDetailProps) {
+export function TaskDetail({ taskId, world, error, today, client, actions, readOnly, uploads, onClose, onOpen, onProject, onFollowUp, tab, onTab }: TaskDetailProps) {
   const task = world.tasks[taskId] ?? (world.detail?.task.id === taskId ? world.detail.task : undefined);
   const more = usePopover();
   // Choosing where to move it opens once the menu has closed, from the same button.
@@ -505,9 +551,11 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
   const project = task && world.projects.find(item => item.id === task.projectId);
   const parent = task?.parentId ? world.tasks[task.parentId] : undefined;
   const context: DetailContext | undefined = task && { task, world, today, client, actions, readOnly, uploads };
-  // Files pasted or dropped anywhere in it go to the description (the comment box keeps its own).
-  const drop = useFileDrop(files => task && uploads.add(files, { taskId: task.id }), readOnly || !task);
-  return <aside ref={panel} className={`todo-detail ${drop.over ? 'drop-target' : ''}`} aria-label={task ? task.content : t('작업')} tabIndex={-1} {...drop.handlers}>
+  const agent = world.agents[taskId];
+  const chatting = tab === 'chat';
+  // Files pasted or dropped anywhere in it go to the description (the comment box keeps its own); the chat takes its own.
+  const drop = useFileDrop(files => task && uploads.add(files, { taskId: task.id }), readOnly || !task || chatting);
+  return <aside ref={panel} className={`todo-detail ${drop.over ? 'drop-target' : ''} ${chatting ? 'chatting' : ''}`} aria-label={task ? task.content : t('작업')} tabIndex={-1} {...drop.handlers}>
     <header className="todo-detail-bar">
       <button type="button" className="icon-button todo-detail-back" aria-label={t('닫기')} onClick={onClose}><ArrowLeft size={17} /></button>
       {project && <button type="button" className="todo-breadcrumb" onClick={() => onProject(project.id)}><i className="todo-dot" style={{ background: colorOf(project.color) }} />{project.inbox ? t('관리함') : project.name}</button>}
@@ -527,7 +575,12 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
       ]} />}
       {moving && !more.open && task && <MoveUnderSearch task={task} world={world} client={client} anchor={more.anchor} onClose={() => setMoving(false)} />}
     </header>
-    {!task || !context ? <div className="todo-detail-empty">{error ? <p className="todo-error" role="alert">{error}</p> : <LoaderCircle className="spin" size={18} />}</div> : <div key={task.id} className="todo-detail-body">
+    <div className="todo-detail-tabs" role="tablist" aria-label={t('작업 보기')}>
+      <button type="button" role="tab" aria-selected={!chatting} onClick={() => onTab('detail')}>{t('상세')}</button>
+      <button type="button" role="tab" aria-selected={chatting} onClick={() => onTab('chat')}>{agent && <AgentIcon agent={agent} />}{t('채팅')}</button>
+    </div>
+    {chatting && task ? <AgentChat task={task} agent={agent} client={client} readOnly={readOnly} onLeave={() => onTab('detail')} />
+    : !task || !context ? <div className="todo-detail-empty">{error ? <p className="todo-error" role="alert">{error}</p> : <LoaderCircle className="spin" size={18} />}</div> : <div key={task.id} className="todo-detail-body">
       {/* A wide panel puts the properties in a card on the right; a phone shows them as chips under the title (todo.css). */}
       <div className="todo-detail-heading">
         <CheckCircle task={task} disabled={readOnly} onComplete={() => actions.complete(task)} onCompleteNext={() => onFollowUp(task, true)} onReopen={() => void actions.reopen(task)} />

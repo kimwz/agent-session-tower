@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { TodoRequest } from '../../../shared/todo/ops.js';
-import type { TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoTask, TodoTaskDetail } from '../../../shared/todo/types.js';
+import type { TodoAgent, TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoTask, TodoTaskDetail } from '../../../shared/todo/types.js';
 import { ApiError } from '../../../client/src/common/lib.js';
 import { TodoClient, type TodoTransport } from '../../../client/src/todo/todo-store.js';
 import { applyOps, inverseOps, mergeChanges, withDetail, worldFromOverview } from '../../../client/src/todo/todo-model.js';
@@ -29,6 +29,9 @@ class FakeTransport implements TodoTransport {
   async completed(): Promise<TodoCompletedPage> { this.reads.completed++; const next = this.completedPages.shift(); return next ? next() : { items: [] }; }
   async search(): Promise<TodoTask[]> { return []; }
   async apply(request: TodoRequest) { this.requests.push(request); if (this.hold) await this.hold; return this.answer(request); }
+  started: { taskId: string; text: string }[] = [];
+  startAnswer: (taskId: string) => Promise<{ agent?: TodoAgent } | undefined> = async () => undefined;
+  async startAgent(taskId: string, text: string) { this.started.push({ taskId, text }); return this.startAnswer(taskId); }
 }
 
 const clients: TodoClient[] = [];
@@ -382,4 +385,33 @@ test('an undo is used once: a toast pressed after ⌘Z took it back sends nothin
   assert.ok(client.getState().world.tasks.a.deletedAt, 'the second delete stays');
   await settle();
   assert.deepEqual(transport.requests.flatMap(request => request.ops).map(op => op.op), ['task.delete', 'task.restore', 'task.delete']);
+});
+
+const agent = (taskId: string, patch: Partial<TodoAgent> = {}): TodoAgent => ({ taskId, provider: 'claude', state: 'active', sessionId: `claude:${taskId}`, createdAt: 'x', updatedAt: 'x', ...patch });
+
+test('issue masters come with the overview and follow each answer; one closed or gone leaves', () => {
+  let world = worldFromOverview(overview([task('a'), task('b')], { agents: { a: agent('a'), b: agent('b', { state: 'closing' }) } }));
+  assert.deepEqual(Object.keys(world.agents), ['a', 'b']);
+  world = mergeChanges(world, changes(2, { agents: { a: null, b: agent('b', { state: 'closed' }), c: agent('c', { state: 'starting', sessionId: undefined }) } }));
+  assert.deepEqual(Object.keys(world.agents), ['c'], 'null and closed both take one away');
+  assert.deepEqual(worldFromOverview(overview([])).agents, {}, 'an older server sends none');
+});
+
+test('starting an issue master shows the agent the server recorded and reads the overview again', async () => {
+  const { client, transport } = await ready();
+  // The server records it before it answers, so the overview read next has it too.
+  transport.startAnswer = async taskId => { transport.current.agents = { [taskId]: agent(taskId) }; return { agent: agent(taskId) }; };
+  const reads = transport.reads.overview;
+  await client.startAgent('a', 'Look into it');
+  assert.deepEqual(transport.started, [{ taskId: 'a', text: 'Look into it' }]);
+  assert.equal(client.getState().world.agents.a?.sessionId, 'claude:a');
+  await settle();
+  assert.equal(transport.reads.overview, reads + 1);
+});
+
+test('a refused start throws and shows nothing', async () => {
+  const { client, transport } = await ready();
+  transport.startAnswer = async () => { throw new ApiError('already has one', 409); };
+  await assert.rejects(client.startAgent('a', 'Again'), /already has one/);
+  assert.deepEqual(client.getState().world.agents, {});
 });
