@@ -60,6 +60,16 @@ test('the todo routes take the page token and JSON, check every change, and have
   assert.equal((await fetch(`${base}/api/todos/completed?before=yesterday`)).status, 400);
   assert.equal((await fetch(`${base}/api/todos/elsewhere`)).status, 404);
 
+  // The completed list of one label, and search with completed tasks.
+  assert.equal((await send({ requestId: randomUUID(), ops: [{ op: 'label.create', id: 'call', name: 'call' }, { op: 'task.create', id: 'b', content: 'Task b', labelIds: ['call'] },
+    { op: 'task.complete', id: 'b', completionId: 'cb', occurrence: null, today: '2026-10-17' }, { op: 'task.complete', id: 'a', completionId: 'ca', occurrence: null, today: '2026-10-17' }] })).status, 200);
+  const done = async (query: string) => (await (await fetch(`${base}/api/todos/completed?${query}`)).json() as { items: { task: { id: string } }[] }).items.map(item => item.task.id).sort();
+  assert.deepEqual(await done('labelId=call'), ['b']);
+  assert.deepEqual(await done(''), ['a', 'b']);
+  assert.equal((await fetch(`${base}/api/todos/completed?labelId=${encodeURIComponent('a b')}`)).status, 400);
+  const found = (await (await fetch(`${base}/api/todos/search?q=task&completed=1`)).json() as { tasks: { id: string; completedAt: string | null }[] }).tasks;
+  assert.deepEqual(found.map(task => [task.id, typeof task.completedAt]).sort(), [['a', 'string'], ['b', 'string']]);
+
   // Far more changes than the page's general budget of 30 a minute, and the general budget is still untouched.
   for (let index = 0; index < 60; index++) assert.equal((await create(`bulk-${index}`)).status, 200);
   const other = await fetch(`${base}/api/groups`, { method: 'POST', headers, body: JSON.stringify({ cwd: '/tmp/x', title: 'X' }) });

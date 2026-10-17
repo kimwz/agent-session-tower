@@ -187,6 +187,31 @@ const repeatMatcher: Matcher<TodoRecurrence> = first<TodoRecurrence>(
   word('every (\\d{1,3}) (days?|weeks?|months?|years?)', match => Number(match[1]) >= 1 ? { freq: unit(match[2]), interval: Number(match[1]) } : undefined),
 );
 
+/**
+ * When a repeat starts and ends, read right after it: `<date>부터`/`starting <date>`, then `<date>까지`/`until <date>`.
+ * `untilAt` is where the end begins, so an end that cannot be kept is cut off and left as text.
+ */
+function repeatBounds(rest: string, today: string, startFree: boolean): { length: number; start?: string; until?: string; untilAt?: number } {
+  const bounds: { length: number; start?: string; until?: string; untilAt?: number } = { length: 0 };
+  for (const kind of ['start', 'until'] as const) {
+    const at = bounds.length;
+    const space = /^\s+/.exec(rest.slice(at));
+    if (!space) break;
+    const text = rest.slice(at + space[0].length);
+    let date: string | undefined, length = 0;
+    const korean = new RegExp(`^(\\S.{0,29}?)\\s?${kind === 'start' ? '부터' : '까지'}(?=\\s|$)`).exec(text);
+    const found = korean && dateMatchers(korean[1], today);
+    if (korean && found && found.length === korean[1].length) { date = found.value; length = korean[0].length; }
+    const english = !date ? new RegExp(`^${kind === 'start' ? 'starting' : 'until'}\\s+`, 'i').exec(text) : null;
+    const after = english && dateMatchers(text.slice(english[0].length), today);
+    if (english && after) { date = after.value; length = english[0].length + after.length; }
+    if (!date || (kind === 'start' && !startFree) || (kind === 'until' && bounds.start && date < bounds.start)) continue;
+    if (kind === 'start') bounds.start = date; else { bounds.until = date; bounds.untilAt = at; }
+    bounds.length = at + space[0].length + length;
+  }
+  return bounds;
+}
+
 /** The first date on or after `today` that a rule without a date of its own falls on. */
 export function firstOccurrence(rule: TodoRecurrence, today: string): string {
   const fits = (date: string) => {
@@ -221,6 +246,8 @@ export function parseQuickAdd(input: string, context: QuickAddContext): QuickAdd
   const { today, ignored } = context;
   const tokens: QuickAddToken[] = [];
   const result: QuickAddResult = { content: '', tokens, labelIds: [], newLabels: [] };
+  /** The repeat's own start and where its end begins in its token (see repeatBounds). */
+  let repeatStart: string | undefined, repeatUntilAt: number | undefined;
   const starts = [...input.matchAll(/(?:^|\s)(?=\S)/g)].map(match => match.index + match[0].length);
   const taken = (kind: QuickAddKind) => tokens.some(token => token.kind === kind);
   const keyOf = (kind: QuickAddKind, text: string) => `${kind}:${lower(text)}`;
@@ -236,18 +263,20 @@ export function parseQuickAdd(input: string, context: QuickAddContext): QuickAdd
   const sectionProject = projectId ?? context.defaultProjectId;
 
   let cursor = 0;
+  /** Text read as words to keep: a repeat turned back into text keeps its start and end as text too. */
+  let skip = 0;
   for (const start of starts) {
     if (start < cursor) continue;
     const rest = input.slice(start);
     const found = readToken(rest);
-    if (!found) continue;
+    if (!found) { if (skip) { cursor = start + skip; skip = 0; } continue; }
     const text = rest.slice(0, found.length);
-    tokens.push({ kind: found.kind, start, end: start + found.length, text, key: keyOf(found.kind, text) });
+    tokens.push({ kind: found.kind, start, end: start + found.length, text, key: found.key ?? keyOf(found.kind, text) });
     found.apply();
     cursor = start + found.length;
   }
 
-  function readToken(rest: string): { kind: QuickAddKind; length: number; apply: () => void } | undefined {
+  function readToken(rest: string): { kind: QuickAddKind; length: number; apply: () => void; key?: string } | undefined {
     const attempt = <T>(kind: QuickAddKind, read: Read<T> | undefined, apply: (value: T) => void) =>
       read && free(kind, rest.slice(0, read.length)) ? { kind, length: read.length, apply: () => apply(read.value) } : undefined;
     const head = rest[0];
@@ -280,16 +309,39 @@ export function parseQuickAdd(input: string, context: QuickAddContext): QuickAdd
       const found = attempt('priority', match ? { length: 2, value: Number(match[1]) as TodoPriority } : undefined, value => { result.priority = value; });
       if (found) return found;
     }
-    if (!taken('repeat')) { const found = attempt('repeat', repeatMatcher(rest, today), value => { result.recurrence = value; }); if (found) return found; }
-    if (!taken('date')) { const found = attempt('date', dateMatchers(rest, today), value => { result.dueDate = value; }); if (found) return found; }
+    if (!taken('repeat')) {
+      // Its start and end belong to it: turning the repeat back into text turns them too.
+      const read = repeatMatcher(rest, today);
+      const found = attempt('repeat', read, value => { result.recurrence = value; });
+      // Turned back into text, nothing else is read inside it.
+      if (read && !found) { skip = read.length + repeatBounds(rest.slice(read.length), today, true).length; return undefined; }
+      if (read && found) {
+        const bounds = repeatBounds(rest.slice(read.length), today, !taken('date'));
+        return { ...found, length: read.length + bounds.length, key: keyOf('repeat', rest.slice(0, read.length)), apply: () => {
+          found.apply();
+          if (bounds.until) { result.recurrence = { ...result.recurrence!, until: bounds.until }; repeatUntilAt = read.length + bounds.untilAt!; }
+          repeatStart = bounds.start;
+        } };
+      }
+    }
+    // A repeat's start is its date.
+    if (!taken('date') && !repeatStart) { const found = attempt('date', dateMatchers(rest, today), value => { result.dueDate = value; }); if (found) return found; }
     if (!taken('time')) { const found = attempt('time', timeMatcher(rest, today), value => { result.dueTime = value; }); if (found) return found; }
     if (!taken('duration')) { const found = attempt('duration', durationMatcher(rest, today), value => { result.durationMin = value; }); if (found) return found; }
     return undefined;
   }
 
   if (result.projectId === undefined && result.sectionId) result.projectId = sectionProject;
-  // A time or a repeat needs a date: today, or the repeat's first date.
-  if (!result.dueDate && result.recurrence) result.dueDate = firstOccurrence(result.recurrence, today);
+  // A time or a repeat needs a date: today, or the repeat's first date (from its start, when it has one).
+  if (!result.dueDate && result.recurrence) result.dueDate = firstOccurrence(result.recurrence, repeatStart ?? today);
+  // A repeat that would end before its first date keeps going, and its end stays text.
+  if (result.recurrence?.until && result.dueDate && result.recurrence.until < result.dueDate) {
+    const { until: _, ...rule } = result.recurrence;
+    result.recurrence = rule;
+    const token = tokens.find(item => item.kind === 'repeat')!;
+    token.end = token.start + repeatUntilAt!;
+    token.text = input.slice(token.start, token.end);
+  }
   if (!result.dueDate && result.dueTime) result.dueDate = today;
   let content = '', last = 0;
   for (const token of tokens) { content += `${input.slice(last, token.start)} `; last = token.end; }

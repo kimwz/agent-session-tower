@@ -17,7 +17,7 @@ import { applyOps, emptyWorld, inverseOps, mergeChanges, touchesDetail, withDeta
 export interface TodoTransport {
   overview(): Promise<TodoOverview>;
   detail(id: string): Promise<TodoTaskDetail>;
-  completed(input: { projectId?: string; before?: string }): Promise<TodoCompletedPage>;
+  completed(input: { projectId?: string; labelId?: string; before?: string }): Promise<TodoCompletedPage>;
   search(query: string, completed: boolean): Promise<TodoTask[]>;
   apply(request: TodoRequest): Promise<TodoChanges>;
 }
@@ -27,9 +27,10 @@ export function httpTransport(token: () => string): TodoTransport {
   return {
     overview: () => api<TodoOverview>('/api/todos'),
     detail: id => api<TodoTaskDetail>(`/api/todos/tasks/${encodeURIComponent(id)}`),
-    completed: ({ projectId, before }) => {
+    completed: ({ projectId, labelId, before }) => {
       const params = new URLSearchParams({ limit: '50' });
       if (projectId) params.set('projectId', projectId);
+      if (labelId) params.set('labelId', labelId);
       if (before) params.set('before', before);
       return api<TodoCompletedPage>(`/api/todos/completed?${params}`);
     },
@@ -44,6 +45,8 @@ export interface TodoToast { id: number; message: string; tone: 'info' | 'error'
 export interface CompletedList {
   /** A project id, or '' for every project. */
   projectId: string;
+  /** Only tasks with this label, when set (a label's list). */
+  labelId?: string;
   items: TodoCompletedPage['items'];
   before?: string;
   loading: boolean;
@@ -142,7 +145,7 @@ export class TodoClient {
       this.reading = false;
     }
     if (this.state.detailId) void this.readDetail(this.state.detailId);
-    if (this.state.completed) void this.readCompleted(this.state.completed.projectId);
+    if (this.state.completed) this.rereadCompleted();
     this.pump();
   }
 
@@ -169,22 +172,32 @@ export class TodoClient {
     }
   }
 
-  /** Shows completed tasks of a project ('' for all); `more` adds the next page. */
-  async readCompleted(projectId: string, more = false) {
+  /**
+   * Shows completed tasks of a project ('' for all), only those with `labelId` when it is given; `more` adds the next
+   * page of the list shown (its label unless another is given).
+   */
+  async readCompleted(projectId: string, more = false, labelId?: string) {
     const current = this.state.completed;
-    const before = more && current?.projectId === projectId ? current.before : undefined;
+    const label = (more ? labelId ?? current?.labelId : labelId) || undefined;
+    const same = (list: CompletedList | null | undefined): list is CompletedList => !!list && list.projectId === projectId && (list.labelId || undefined) === label;
+    const before = more && same(current) ? current.before : undefined;
     if (more && !before) return;
     const ticket = ++this.completedRead;
-    this.set({ completed: { projectId, items: more && current ? current.items : current?.projectId === projectId ? current.items : [], before: current?.before, loading: true, error: '' } });
+    this.set({ completed: { projectId, ...(label ? { labelId: label } : {}), items: same(current) ? current.items : [], before: current?.before, loading: true, error: '' } });
     try {
-      const page = await this.transport.completed({ projectId: projectId || undefined, before });
-      if (ticket !== this.completedRead || this.state.completed?.projectId !== projectId) return;
+      const page = await this.transport.completed({ projectId: projectId || undefined, ...(label ? { labelId: label } : {}), before });
+      if (ticket !== this.completedRead || !same(this.state.completed)) return;
       const items = more ? [...this.state.completed.items, ...page.items] : page.items;
-      this.set({ completed: { projectId, items, before: page.before, loading: false, error: '' } });
+      this.set({ completed: { projectId, ...(label ? { labelId: label } : {}), items, before: page.before, loading: false, error: '' } });
     } catch (error) {
-      if (ticket !== this.completedRead || this.state.completed?.projectId !== projectId) return;
+      if (ticket !== this.completedRead || !same(this.state.completed)) return;
       this.set({ completed: { ...this.state.completed, loading: false, error: message(error) } });
     }
+  }
+  /** Reads the completed list shown again, as it was asked for. */
+  private rereadCompleted() {
+    const list = this.state.completed;
+    if (list) void this.readCompleted(list.projectId, false, list.labelId);
   }
   hideCompleted() { this.completedRead++; if (this.state.completed) this.set({ completed: null }); }
 
@@ -234,7 +247,7 @@ export class TodoClient {
     this.base = mergeChanges(this.base, changes);
     this.publish();
     if (this.state.detailId && touchesDetail(this.base.detail, changes)) void this.readDetail(this.state.detailId);
-    if (this.state.completed && touchesCompleted(this.state.completed, ops)) void this.readCompleted(this.state.completed.projectId);
+    if (this.state.completed && touchesCompleted(this.state.completed, ops)) this.rereadCompleted();
     this.pump();
   }
 

@@ -1,8 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ArrowLeft, ArrowRight, CalendarDays, Check, ChevronDown, Clock3, Flag, History, Link2, LoaderCircle, MoreHorizontal, Paperclip, Pencil, Plus, Tag, Trash2, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { closestCenter, DndContext, type DragEndEvent } from '@dnd-kit/core';
+import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { ArrowLeft, ArrowRight, ArrowUpFromLine, CalendarDays, Check, CheckCheck, ChevronDown, Clock3, Copy, CornerDownRight, Flag, GripVertical, History, Link, Link2, LoaderCircle, MoreHorizontal, Paperclip, Pencil, Plus, Tag, Trash2, X } from 'lucide-react';
 import type { TodoEvent, TodoFile, TodoPriority, TodoTask } from '../../../shared/todo/types';
+import { liveProjectIds } from '../../../shared/todo/compose';
 import { relativeTime } from '../common/lib';
-import { translate as t } from '../i18n/i18n';
+import { getLanguage, translate as t } from '../i18n/i18n';
 import { DatePicker, type DateValue } from './DatePicker';
 import { Menu, Popover, usePopover, type MenuItem } from './Popover';
 import { CheckCircle } from './TaskCard';
@@ -11,10 +14,12 @@ import { AttachButton, AttachmentList, UploadRows, useFileDrop } from './attachm
 import { sizeLabel } from './attachments/upload';
 import { useUploads, type TodoUploads } from './attachments/uploads';
 import type { TodoActions } from './todo-actions';
+import { useTodoSensors } from './todo-dnd';
 import { colorOf, dateLabel, durationLabel, monthDay, priorityName, recurrenceLabel } from './todo-format';
 import { byOrder, isOpen, visibleFiles, type TodoWorld } from './todo-model';
+import { moveUnderCandidates, outOfParentOp, subtaskReorderOp } from './todo-moves';
 import { newId, type TodoClient } from './todo-store';
-import { projectTree } from './todo-views';
+import { archivedSectionIds, projectTree } from './todo-views';
 
 /**
  * One task, what is used most first and largest: its title, properties, description, sub-tasks and comments; then the
@@ -191,9 +196,22 @@ function Description({ task, client, readOnly }: { task: TodoTask; client: TodoC
   </div>;
 }
 
+/** A sub-task's row, put in order among its siblings by its grip. */
+function SubtaskRow({ task, depth, readOnly, actions, client, onOpen }: { task: TodoTask; depth: number; readOnly: boolean; actions: TodoActions; client: TodoClient; onOpen: (id: string) => void }) {
+  const sortable = useSortable({ id: task.id, data: { parentId: task.parentId }, disabled: readOnly });
+  const style: CSSProperties = { paddingLeft: depth * 20, transform: sortable.transform ? `translate3d(0, ${Math.round(sortable.transform.y)}px, 0)` : undefined, transition: sortable.transition, opacity: sortable.isDragging ? 0.4 : undefined };
+  return <li ref={sortable.setNodeRef} className={task.completedAt ? 'done' : ''} style={style}>
+    {!readOnly && <button type="button" className="todo-subtask-grip" aria-label={t('“{0}” 순서 바꾸기', { 0: task.content })} {...sortable.attributes} {...sortable.listeners}><GripVertical size={12} /></button>}
+    <CheckCircle task={task} size="small" disabled={readOnly} onComplete={() => actions.complete(task)} onReopen={() => void actions.reopen(task)} />
+    <button type="button" onClick={() => onOpen(task.id)}>{task.content}</button>
+    {task.dueDate && <span className="todo-chip">{dateLabel(task.dueDate, client.today())}</span>}
+  </li>;
+}
+
 function Subtasks({ task, world, actions, client, onOpen, readOnly }: DetailContext & { onOpen: (id: string) => void }) {
   const [name, setName] = useState('');
   const [adding, setAdding] = useState(false);
+  const sensors = useTodoSensors();
   const rows = useMemo(() => {
     const result: { task: TodoTask; depth: number }[] = [];
     const walk = (parent: string, depth: number) => {
@@ -202,15 +220,25 @@ function Subtasks({ task, world, actions, client, onOpen, readOnly }: DetailCont
     walk(task.id, 0);
     return result;
   }, [world.tasks, task.id]);
-  const open = rows.filter(row => isOpen(row.task)).length;
+  // Its own sub-tasks are counted, as on the card.
+  const own = rows.filter(row => row.depth === 0);
+  const open = own.filter(row => isOpen(row.task)).length;
   const add = () => { const content = name.trim(); if (!content) return; client.apply([{ op: 'task.create', id: newId(), parentId: task.id, content: content.slice(0, 500) }]); setName(''); };
+  // Dragged among its siblings only: a row let go over another parent's sub-task stays where it was.
+  const onEnd = ({ active, over }: DragEndEvent) => {
+    if (!over || active.id === over.id) return;
+    const moved = world.tasks[String(active.id)], target = world.tasks[String(over.id)];
+    if (!moved || !target || moved.parentId !== target.parentId) return;
+    const op = subtaskReorderOp(Object.values(world.tasks).filter(item => item.parentId === moved.parentId && !item.deletedAt), moved.id, target.id);
+    if (op) client.apply([op]);
+  };
   return <section className="todo-detail-section">
-    <h4>{t('하위 작업')}{rows.length > 0 && <span>{open}/{rows.length}</span>}</h4>
-    {rows.length > 0 && <ul className="todo-subtask-list">{rows.map(({ task: child, depth }) => <li key={child.id} className={child.completedAt ? 'done' : ''} style={{ paddingLeft: depth * 20 }}>
-      <CheckCircle task={child} size="small" onComplete={() => actions.complete(child)} onReopen={() => void actions.reopen(child)} />
-      <button type="button" onClick={() => onOpen(child.id)}>{child.content}</button>
-      {child.dueDate && <span className="todo-chip">{dateLabel(child.dueDate, client.today())}</span>}
-    </li>)}</ul>}
+    <h4>{t('하위 작업')}{own.length > 0 && <span>{own.length - open}/{own.length}</span>}</h4>
+    {rows.length > 0 && <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onEnd}>
+      <SortableContext items={rows.map(row => row.task.id)} strategy={verticalListSortingStrategy}>
+        <ul className="todo-subtask-list">{rows.map(({ task: child, depth }) => <SubtaskRow key={child.id} task={child} depth={depth} readOnly={readOnly} actions={actions} client={client} onOpen={onOpen} />)}</ul>
+      </SortableContext>
+    </DndContext>}
     {!readOnly && !task.completedAt && (adding ? <form className="todo-inline-add" onSubmit={event => { event.preventDefault(); add(); }}>
       <input autoFocus value={name} maxLength={500} placeholder={t('하위 작업 이름')} aria-label={t('하위 작업 이름')} onChange={event => setName(event.target.value)}
         onBlur={() => { add(); setAdding(false); }} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); setName(''); setAdding(false); } }} />
@@ -239,6 +267,34 @@ function LinkSearch({ task, client, anchor, onClose }: { task: TodoTask; client:
       <ArrowRight size={13} /><span>{item.content}</span>
     </button>)}</div>
     {query.trim() && !results.length && !error && <p className="todo-muted todo-menu-note">{t('찾은 작업이 없습니다')}</p>}
+  </Popover>;
+}
+
+/** Choosing the task this one goes under, by searching: never itself or one of its own sub-tasks. */
+function MoveUnderSearch({ task, world, client, anchor, onClose }: { task: TodoTask; world: TodoWorld; client: TodoClient; anchor: React.RefObject<HTMLElement | null>; onClose: () => void }) {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<TodoTask[]>([]);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    const text = query.trim();
+    if (!text) { setResults([]); return; }
+    let live = true;
+    const timer = setTimeout(() => {
+      client.search(text).then(found => { if (live) { setResults(found); setError(''); } })
+        .catch(reason => { if (live) setError(reason instanceof Error ? reason.message : String(reason)); });
+    }, 200);
+    return () => { live = false; clearTimeout(timer); };
+  }, [query, client]);
+  const live = liveProjectIds(world.projects), archived = archivedSectionIds(world);
+  const shown = moveUnderCandidates(world.tasks, task, results.map(item => world.tasks[item.id] ?? item), item => !live.has(item.projectId) || (!!item.sectionId && archived.has(item.sectionId)));
+  return <Popover anchor={anchor} onClose={onClose} label={t('다른 작업 아래로 옮기기')} className="todo-menu" align="end">
+    <div className="todo-menu-search"><input autoFocus value={query} placeholder={t('위에 둘 작업 검색')} aria-label={t('위에 둘 작업 검색')} onChange={event => setQuery(event.target.value)} /></div>
+    {error && <p className="todo-error" role="alert">{error}</p>}
+    {/* The server refuses a fifth level, and says so. */}
+    <div role="menu">{shown.map(item => <button key={item.id} type="button" role="menuitem" onClick={() => { client.apply([{ op: 'task.move', id: task.id, parentId: item.id }]); onClose(); }}>
+      <CornerDownRight size={13} /><span>{item.content}</span>
+    </button>)}</div>
+    {query.trim() && !shown.length && !error && <p className="todo-muted todo-menu-note">{t('찾은 작업이 없습니다')}</p>}
   </Popover>;
 }
 
@@ -287,7 +343,8 @@ function Comments({ task, world, client, readOnly, uploads }: DetailContext) {
   const comments = world.detail?.task.id === task.id ? world.detail.comments : [];
   const files = visibleFiles(world.detail?.task.id === task.id ? world.detail.files : [], new Set(comments.map(comment => comment.id)));
   const add = (picked: File[]) => setPending(previous => [...previous, ...picked]);
-  const drop = useFileDrop(add, readOnly);
+  // The detail takes files anywhere for the description; the comment box keeps its own.
+  const drop = useFileDrop(add, readOnly, { inner: true });
   // A comment's files are uploaded once the comment is saved: the server attaches them to a comment that exists.
   const send = async () => {
     const text = body.trim() || pending.map(file => file.name).join(', ');
@@ -338,7 +395,7 @@ function removeFile(client: TodoClient, file: TodoFile) {
   if (client.apply([{ op: 'file.delete', id: file.id }])) client.toast(t('“{0}” 삭제', { 0: file.name }), 'info', client.undoActions());
 }
 
-/** The description's attachments: listed under it, added with the button, by dropping files on the description or pasting them. */
+/** The description's attachments: listed under it, added with the button, or by dropping or pasting files anywhere in the detail. */
 function DescriptionFiles({ task, world, client, readOnly, uploads }: DetailContext) {
   const jobs = useUploads(uploads).filter(job => job.taskId === task.id && job.commentId === null);
   const files = (world.detail?.task.id === task.id ? world.detail.files : []).filter(file => file.commentId === null && !file.deletedAt);
@@ -354,14 +411,59 @@ const EVENT_LABELS: Record<TodoEvent['kind'], string> = {
   linked: '연결했습니다', unlinked: '연결을 해제했습니다', commented: '댓글을 달았습니다', attached: '파일을 첨부했습니다',
 };
 
+/** What a change touched, by the field names the server records (`detail.fields`). */
+const FIELD_LABELS: Record<string, string> = {
+  content: '제목', description: '설명', priority: '우선순위', dueDate: '날짜', dueTime: '시간', recurrence: '반복', durationMin: '소요 시간', deadlineDate: '마감일', labelIds: '라벨',
+};
+
+/** The object particle a Korean word takes: 을 after a final consonant, else 를. */
+const objectParticle = (word: string) => { const code = word.charCodeAt(word.length - 1) - 0xac00; return code >= 0 && code < 11172 && code % 28 ? '을' : '를'; };
+
+/**
+ * One line of the activity: what happened, with the fields an update touched (the server names them) and a move
+ * within a date said as such (its detail is `{ day }`).
+ */
+export function activityText(event: Pick<TodoEvent, 'kind' | 'detail'>): string {
+  if (event.kind === 'moved' && event.detail.day) return t('순서를 바꿨습니다');
+  const fields = event.kind === 'updated' && Array.isArray(event.detail.fields) ? [...new Set(event.detail.fields.map(field => FIELD_LABELS[String(field)]).filter(Boolean))] : [];
+  if (!fields.length) return t(EVENT_LABELS[event.kind]);
+  if (getLanguage() === 'en') return t('{0}을 고쳤습니다', { 0: fields.map(field => t(field).toLocaleLowerCase()).join(', ') });
+  const names = fields.join('·');
+  return objectParticle(names) === '을' ? t('{0}을 고쳤습니다', { 0: names }) : t('{0}를 고쳤습니다', { 0: names });
+}
+
 function Activity({ task, world }: DetailContext) {
   const [open, setOpen] = useState(false);
   const events = world.detail?.task.id === task.id ? world.detail.events : [];
   if (!events.length) return null;
   return <section className="todo-detail-section">
     <button type="button" className="todo-section-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}><History size={13} />{t('활동')}<span>{events.length}</span><ChevronDown size={12} /></button>
-    {open && <ul className="todo-activity">{events.map(event => <li key={event.id}><span>{t(EVENT_LABELS[event.kind])}</span><time dateTime={event.at} title={new Date(event.at).toLocaleString()}>{relativeTime(event.at)}</time></li>)}</ul>}
+    {open && <ul className="todo-activity">{events.map(event => <li key={event.id}><span>{activityText(event)}</span><time dateTime={event.at} title={new Date(event.at).toLocaleString()}>{relativeTime(event.at)}</time></li>)}</ul>}
   </section>;
+}
+
+/** A repeating task's completions, newest first; the newest can be taken back here. */
+function Completions({ task, world, today, actions, readOnly }: DetailContext) {
+  const [open, setOpen] = useState(false);
+  const completions = world.detail?.task.id === task.id ? world.detail.completions : [];
+  if (!task.recurrence || !completions.length) return null;
+  const list = [...completions].sort((a, b) => a.completedAt < b.completedAt ? 1 : a.completedAt > b.completedAt ? -1 : 0);
+  return <section className="todo-detail-section">
+    <button type="button" className="todo-section-toggle" aria-expanded={open} onClick={() => setOpen(value => !value)}><CheckCheck size={13} />{t('완료 기록')}<span>{list.length}</span><ChevronDown size={12} /></button>
+    {open && <ul className="todo-activity todo-completions">{list.map((completion, index) => <li key={completion.id}>
+      <span>{completion.occurrenceDate ? dateLabel(completion.occurrenceDate, today) : t('날짜 없음')}</span>
+      <time dateTime={completion.completedAt} title={new Date(completion.completedAt).toLocaleString()}>{new Date(completion.completedAt).toLocaleString(getLanguage() === 'en' ? 'en' : 'ko', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time>
+      {index === 0 && !readOnly && <button type="button" className="todo-link-button" onClick={() => void actions.reopen(task, completion.id)}>{t('되돌리기')}</button>}
+    </li>)}</ul>}
+  </section>;
+}
+
+/** Copying a task and its link, offered in every task menu (the card's and the detail's). */
+export function shareItems(task: TodoTask, actions: Pick<TodoActions, 'duplicate' | 'copyLink'>): MenuItem[] {
+  return [
+    { key: 'duplicate', label: t('복제'), icon: <Copy size={13} />, run: () => actions.duplicate(task) },
+    { key: 'copy-link', label: t('링크 복사'), icon: <Link size={13} />, run: () => void actions.copyLink(task) },
+  ];
 }
 
 export function CompleteButton({ task, actions, onFollowUp, readOnly }: { task: TodoTask; actions: TodoActions; onFollowUp: (task: TodoTask, complete: boolean) => void; readOnly: boolean }) {
@@ -395,13 +497,17 @@ export interface TaskDetailProps {
 export function TaskDetail({ taskId, world, error, today, client, actions, readOnly, uploads, onClose, onOpen, onProject, onFollowUp }: TaskDetailProps) {
   const task = world.tasks[taskId] ?? (world.detail?.task.id === taskId ? world.detail.task : undefined);
   const more = usePopover();
+  // Choosing where to move it opens once the menu has closed, from the same button.
+  const [moving, setMoving] = useState(false);
+  useEffect(() => { setMoving(false); }, [taskId]);
   const panel = useRef<HTMLElement>(null);
   useEffect(() => { panel.current?.focus({ preventScroll: true }); }, [taskId]);
   const project = task && world.projects.find(item => item.id === task.projectId);
   const parent = task?.parentId ? world.tasks[task.parentId] : undefined;
   const context: DetailContext | undefined = task && { task, world, today, client, actions, readOnly, uploads };
+  // Files pasted or dropped anywhere in it go to the description (the comment box keeps its own).
   const drop = useFileDrop(files => task && uploads.add(files, { taskId: task.id }), readOnly || !task);
-  return <aside ref={panel} className="todo-detail" aria-label={task ? task.content : t('작업')} tabIndex={-1}>
+  return <aside ref={panel} className={`todo-detail ${drop.over ? 'drop-target' : ''}`} aria-label={task ? task.content : t('작업')} tabIndex={-1} {...drop.handlers}>
     <header className="todo-detail-bar">
       <button type="button" className="icon-button todo-detail-back" aria-label={t('닫기')} onClick={onClose}><ArrowLeft size={17} /></button>
       {project && <button type="button" className="todo-breadcrumb" onClick={() => onProject(project.id)}><i className="todo-dot" style={{ background: colorOf(project.color) }} />{project.inbox ? t('관리함') : project.name}</button>}
@@ -412,24 +518,30 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
       <button type="button" className="icon-button todo-detail-close" aria-label={t('닫기')} title={`${t('닫기')} (Esc)`} onClick={onClose}><X size={17} /></button>
       {more.open && task && <Menu anchor={more.anchor} onClose={more.close} label={t('작업 메뉴')} align="end" items={[
         { key: 'next', label: t('후속 작업 추가'), hint: 'N', icon: <ArrowRight size={13} />, run: () => onFollowUp(task, false) },
+        ...shareItems(task, actions),
+        'separator',
+        { key: 'move-under', label: t('다른 작업 아래로 옮기기'), icon: <CornerDownRight size={13} />, run: () => setMoving(true) },
+        ...(task.parentId ? [{ key: 'out', label: t('하위 작업에서 빼기'), icon: <ArrowUpFromLine size={13} />, run: () => { const op = outOfParentOp(world.tasks, task); if (op) client.apply([op]); } }] : []),
         'separator',
         { key: 'delete', label: t('삭제'), danger: true, icon: <Trash2 size={13} />, run: () => { actions.remove(task); onClose(); } },
       ]} />}
+      {moving && !more.open && task && <MoveUnderSearch task={task} world={world} client={client} anchor={more.anchor} onClose={() => setMoving(false)} />}
     </header>
     {!task || !context ? <div className="todo-detail-empty">{error ? <p className="todo-error" role="alert">{error}</p> : <LoaderCircle className="spin" size={18} />}</div> : <div key={task.id} className="todo-detail-body">
       {/* A wide panel puts the properties in a card on the right; a phone shows them as chips under the title (todo.css). */}
       <div className="todo-detail-heading">
-        <CheckCircle task={task} onComplete={() => actions.complete(task)} onCompleteNext={() => onFollowUp(task, true)} onReopen={() => void actions.reopen(task)} />
+        <CheckCircle task={task} disabled={readOnly} onComplete={() => actions.complete(task)} onCompleteNext={() => onFollowUp(task, true)} onReopen={() => void actions.reopen(task)} />
         <EditableTitle key={task.id} task={task} actions={actions} readOnly={readOnly} />
       </div>
       <Properties {...context} />
-      <div className={`todo-description-area ${drop.over ? 'drop-target' : ''}`} {...drop.handlers}>
+      <div className="todo-description-area">
         <Description key={`d-${task.id}`} task={task} client={client} readOnly={readOnly} />
         <DescriptionFiles {...context} />
       </div>
       <Subtasks {...context} onOpen={onOpen} />
       <Comments {...context} />
       <Flow {...context} onOpen={onOpen} onFollowUp={onFollowUp} />
+      <Completions {...context} />
       <Activity {...context} />
       {error && <p className="todo-error" role="alert">{error}</p>}
     </div>}

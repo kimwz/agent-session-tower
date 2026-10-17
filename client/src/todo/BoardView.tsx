@@ -6,7 +6,7 @@ import { GripVertical, MoreHorizontal, Plus } from 'lucide-react';
 import type { TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { TaskCard, type TaskCardProps } from './TaskCard';
-import type { BoardColumn, CardContext } from './todo-views';
+import { dayAfterOf, type BoardColumn, type CardContext } from './todo-views';
 
 /**
  * Columns of cards. Cards are dragged with a mouse, a held touch or the keyboard: within a column to put them in order
@@ -17,7 +17,10 @@ import type { BoardColumn, CardContext } from './todo-views';
 export interface BoardProps {
   columns: BoardColumn[];
   context: CardContext;
-  /** Cards can be put in order within a column. */
+  /**
+   * Cards can be put in order within a column: siblings in a section column, the tasks of one date in a date column
+   * (`onDrop` then gets the card before the drop, and `dropOps` makes it a move within that date).
+   */
   manual: boolean;
   /** Section columns can be put in order and a section added. */
   sections: boolean;
@@ -26,6 +29,10 @@ export interface BoardProps {
   card: Omit<TaskCardProps, 'task' | 'context' | 'selected'>;
   onAdd: (column: BoardColumn) => void;
   onDrop: (task: TodoTask, column: BoardColumn, afterId: string | null | undefined) => void;
+  /** A card put in order among its own date's tasks in a column of several dates. */
+  onDayMove?: (task: TodoTask, afterId: string | null) => void;
+  /** Read-only tasks (archived project or section) wherever they show: never picked up, changed or attached to. */
+  taskLocked?: (task: TodoTask) => boolean;
   onSectionMove: (sectionId: string, afterId: string | null) => void;
   onAddSection: (name: string) => void;
   onSectionMenu: (sectionId: string, anchor: HTMLElement) => void;
@@ -55,7 +62,8 @@ const transformOf = (transform: { x: number; y: number } | null) => transform ? 
 function SortableCard({ task, column, ...props }: { task: TodoTask; column: BoardColumn } & Omit<TaskCardProps, 'task'>) {
   // A column that stands for no value (overdue, later) stays a target, so a card put back where it was lands on its own
   // column (which the drop then ignores) rather than on the nearest other one.
-  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: cardId(task.id), data: { type: 'task', task, column } });
+  // A locked column's cards (an archived project or section) are shown, never picked up.
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: cardId(task.id), data: { type: 'task', task, column }, disabled: { draggable: !!column.locked, droppable: false } });
   const style: CSSProperties = { transform: transformOf(transform), transition, opacity: isDragging ? 0.35 : undefined };
   const control = (target: EventTarget) => target instanceof Element && !!target.closest('button, a, input, textarea');
   return <div ref={setNodeRef} style={style} className="todo-sortable" {...attributes} {...listeners} tabIndex={-1} role={undefined}
@@ -70,9 +78,9 @@ function Column({ column, board, active, over, children }: { column: BoardColumn
   const sortable = useSortable({ id: sectionDrag(column.sectionId ?? column.id), data: { type: 'section', column }, disabled: !board.sections || !column.sectionId });
   const menu = useRef<HTMLButtonElement>(null);
   const style: CSSProperties = { transform: transformOf(sortable.transform), transition: sortable.transition };
-  return <section ref={sortable.setNodeRef} style={style} className={`todo-column ${column.tone ?? ''} ${over && active && column.drop ? 'drop-target' : ''} ${sortable.isDragging ? 'dragging' : ''}`} data-column={column.id} aria-label={column.title}>
+  return <section ref={sortable.setNodeRef} style={style} className={`todo-column ${column.tone ?? ''} ${column.collapsed ? 'collapsed' : ''} ${column.locked ? 'locked' : ''} ${over && active && column.drop ? 'drop-target' : ''} ${sortable.isDragging ? 'dragging' : ''}`} data-column={column.id} aria-label={column.title}>
     <header className="todo-column-head">
-      {board.sections && column.sectionId && <button type="button" className="todo-column-grip" aria-label={t('“{0}” 섹션 옮기기', { 0: column.title })} {...sortable.attributes} {...sortable.listeners}><GripVertical size={13} /></button>}
+      {board.sections && column.sectionId && !column.locked && <button type="button" className="todo-column-grip" aria-label={t('“{0}” 섹션 옮기기', { 0: column.title })} {...sortable.attributes} {...sortable.listeners}><GripVertical size={13} /></button>}
       <h3>{column.title}</h3>
       <span className="todo-column-count">{column.tasks.length || ''}</span>
       {column.note && <span className="todo-column-note">{column.note}</span>}
@@ -88,7 +96,7 @@ function Column({ column, board, active, over, children }: { column: BoardColumn
 function ColumnTab({ column, index, current, onPick }: { column: BoardColumn; index: number; current: boolean; onPick: (index: number) => void }) {
   const { setNodeRef, isOver } = useDroppable({ id: `tab:${column.id}`, data: { type: 'column', column }, disabled: !column.drop });
   return <button ref={setNodeRef} type="button" role="tab" aria-selected={current} className={`${current ? 'current' : ''} ${isOver ? 'drop-target' : ''} ${column.tone ?? ''}`} onClick={() => onPick(index)}>
-    {column.title}{column.tasks.length > 0 && <b>{column.tasks.length}</b>}
+    {column.title}{(column.count ?? column.tasks.length) > 0 && <b>{column.count ?? column.tasks.length}</b>}
   </button>;
 }
 
@@ -150,10 +158,18 @@ export function BoardView(board: BoardProps) {
     }
     if (data?.type !== 'task') return;
     const task = data.task as TodoTask, source = columnOf(data)!, target = columnOf(over.data.current);
+    const overTask = over.data.current?.type === 'task' ? (over.data.current.task as TodoTask) : undefined;
+    // In a column of several dates (overdue, the next days, later), a card put among its own date's tasks takes its
+    // place there; it never changes its date by being dropped in the column it came from.
+    if (manual && target && !target.drop && target.id === source.id && !target.locked && overTask) {
+      const afterId = dayAfterOf(target.tasks, task.id, overTask.id);
+      if (afterId !== undefined) board.onDayMove?.(task, afterId);
+      return;
+    }
     if (!target?.drop) return;
     const list = target.tasks.filter(item => item.id !== task.id);
-    const overTask = over.data.current?.type === 'task' ? (over.data.current.task as TodoTask) : undefined;
-    if (!manual) { if (target.id !== source.id) board.onDrop(task, target, undefined); return; }
+    // A folded column hides its tasks: what is let go on it goes last.
+    if (!manual || target.collapsed) { if (target.id !== source.id) board.onDrop(task, target, undefined); return; }
     let index = overTask ? target.tasks.findIndex(item => item.id === overTask.id) : list.length;
     if (target.id === source.id) {
       const from = source.tasks.findIndex(item => item.id === task.id);
@@ -164,7 +180,8 @@ export function BoardView(board: BoardProps) {
 
   const renderColumn = (column: BoardColumn) => <Column key={column.id} column={column} board={board} active={!!activeTask} over={overColumn === column.id}>
     <SortableContext items={column.tasks.map(task => cardId(task.id))} strategy={verticalListSortingStrategy}>
-      {column.tasks.map(task => <SortableCard key={task.id} task={task} column={column} context={context} selected={board.selectedId === task.id} {...board.card} />)}
+      {column.tasks.map(task => <SortableCard key={task.id} task={task} column={column.locked || !board.taskLocked?.(task) ? column : { ...column, locked: true }} context={context} selected={board.selectedId === task.id} {...board.card}
+        {...(column.locked || board.taskLocked?.(task) ? { readOnly: true } : {})} />)}
     </SortableContext>
   </Column>;
 

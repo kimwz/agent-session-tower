@@ -24,7 +24,7 @@ export const TODO_TOOLS_PATH = '/api/todos/agent';
 export interface TodoToolStore {
   overview(): TodoOverview;
   detail(id: string): TodoTaskDetail;
-  completed(input: { projectId?: string; before?: string; limit?: number }): TodoCompletedPage;
+  completed(input: { projectId?: string; labelId?: string; before?: string; limit?: number }): TodoCompletedPage;
   search(query: string, input: { completed?: boolean; limit?: number }): TodoTask[];
   apply(request: z.infer<typeof TodoRequestSchema>): TodoChanges;
 }

@@ -119,6 +119,44 @@ test('repeats, with the first date found when none is typed', () => {
   assert.equal(parse('일 매주 월 수업').content, '일 수업');
 });
 
+test('a repeat may say when it starts and ends, both part of its word', () => {
+  const read = (text: string) => { const result = parse(text); return { content: result.content, dueDate: result.dueDate, recurrence: result.recurrence, repeat: result.tokens.find(token => token.kind === 'repeat')?.text }; };
+  // The first date is the first occurrence on or after the start (Tuesday the 20th: the Monday after).
+  assert.deepEqual(read('회의 매주 월 10월 20일부터'), { content: '회의', dueDate: '2026-10-26', recurrence: { freq: 'week', interval: 1, weekdays: [1] }, repeat: '매주 월 10월 20일부터' });
+  assert.deepEqual(read('standup every mon starting oct 20 until dec 31'),
+    { content: 'standup', dueDate: '2026-10-26', recurrence: { freq: 'week', interval: 1, weekdays: [1], until: '2026-12-31' }, repeat: 'every mon starting oct 20 until dec 31' });
+  assert.deepEqual(read('물 매일 12월 31일까지'), { content: '물', dueDate: today, recurrence: { freq: 'day', interval: 1, until: '2026-12-31' }, repeat: '매일 12월 31일까지' });
+  // Starting and ending on one day.
+  assert.deepEqual(read('행사 매일 10월 20일부터 10월 20일까지'), { content: '행사', dueDate: '2026-10-20', recurrence: { freq: 'day', interval: 1, until: '2026-10-20' }, repeat: '매일 10월 20일부터 10월 20일까지' });
+  // The first Monday after the start is after the end: the repeat keeps going and its end stays text.
+  assert.deepEqual(read('회의 매주 월 10월 20일부터 10월 25일까지'),
+    { content: '회의 10월 25일까지', dueDate: '2026-10-26', recurrence: { freq: 'week', interval: 1, weekdays: [1] }, repeat: '매주 월 10월 20일부터' });
+  // A month's last day, and every other week.
+  assert.deepEqual(read('정산 매월 말일 11월 1일부터').dueDate, '2026-11-30');
+  assert.deepEqual(read('정산 every 31st starting nov 1').dueDate, '2026-11-30');
+  assert.deepEqual(read('청소 격주 금 10월 20일부터 12월 1일까지'),
+    { content: '청소', dueDate: '2026-10-23', recurrence: { freq: 'week', interval: 2, weekdays: [5], until: '2026-12-01' }, repeat: '격주 금 10월 20일부터 12월 1일까지' });
+  assert.equal(read('운동 every 2 weeks starting oct 20').dueDate, '2026-10-20');
+  // An end before the start, or a start with a date of its own typed, stays text.
+  assert.equal(read('회의 매일 10월 20일부터 10월 18일까지').content, '회의 10월 18일까지');
+  assert.deepEqual(read('내일 회의 매주 월 10월 20일부터'), { content: '회의 10월 20일부터', dueDate: '2026-10-15', recurrence: { freq: 'week', interval: 1, weekdays: [1] }, repeat: '매주 월' });
+  // Turning the repeat back into text turns its start and end with it.
+  const first = parse('회의 매주 월 10월 20일부터 12월 31일까지');
+  const repeat = first.tokens.find(token => token.kind === 'repeat')!;
+  assert.equal(repeat.key, 'repeat:매주 월');
+  const kept = parse('회의 매주 월 10월 20일부터 12월 31일까지', { ignored: new Set([repeat.key]) });
+  assert.equal(kept.recurrence, undefined);
+  assert.equal(kept.content, '회의 매주 월 10월 20일부터 12월 31일까지');
+  // In English too: the start's date is not read again as the task's date.
+  const english = parse('standup every mon starting oct 20 until dec 31');
+  const keptEnglish = parse('standup every mon starting oct 20 until dec 31', { ignored: new Set([english.tokens.find(token => token.kind === 'repeat')!.key]) });
+  assert.deepEqual([keptEnglish.recurrence, keptEnglish.dueDate, keptEnglish.content], [undefined, undefined, 'standup every mon starting oct 20 until dec 31']);
+  // What follows it is still read.
+  const chores = parse('청소 3일마다 p1');
+  const keptChores = parse('청소 3일마다 p1', { ignored: new Set([chores.tokens.find(token => token.kind === 'repeat')!.key]) });
+  assert.deepEqual([keptChores.recurrence, keptChores.priority, keptChores.content], [undefined, 1, '청소 3일마다']);
+});
+
 test('only standalone words count, only the first of a kind counts, and the rest stays text', () => {
   assert.equal(parse('내일까지 보고서').dueDate, undefined);
   assert.equal(parse('p5 검토').priority, undefined);

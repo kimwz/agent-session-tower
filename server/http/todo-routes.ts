@@ -11,7 +11,7 @@ import { byteRange } from './sinks.js';
 export interface TodoBackend {
   overview(): TodoOverview;
   detail(id: string): TodoTaskDetail;
-  completed(input: { projectId?: string; before?: string; limit?: number }): TodoCompletedPage;
+  completed(input: { projectId?: string; labelId?: string; before?: string; limit?: number }): TodoCompletedPage;
   search(query: string, input: { completed?: boolean; limit?: number }): TodoTask[];
   apply(request: TodoRequest): TodoChanges;
   /** Attachments; absent where they cannot be kept. */
@@ -67,10 +67,11 @@ export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: 
   if (!todos) { json(res, 503, { error: '할 일을 사용할 수 없습니다.' }); return true; }
   if (req.method === 'GET' && path === '/api/todos') { json(res, 200, todos.overview()); return true; }
   if (req.method === 'GET' && path === '/api/todos/completed') {
-    const projectId = url.searchParams.get('projectId') ?? undefined, before = url.searchParams.get('before') ?? undefined;
+    const projectId = url.searchParams.get('projectId') ?? undefined, labelId = url.searchParams.get('labelId') ?? undefined, before = url.searchParams.get('before') ?? undefined;
     if (projectId !== undefined && !ID.test(projectId)) throw new TowerError('invalid', '프로젝트 id가 올바르지 않습니다.');
+    if (labelId !== undefined && !ID.test(labelId)) throw new TowerError('invalid', '라벨 id가 올바르지 않습니다.');
     if (before !== undefined && before.length > 60) throw new TowerError('invalid', '완료 목록 커서가 올바르지 않습니다.');
-    json(res, 200, todos.completed({ projectId, before, limit: number(url.searchParams.get('limit')) }));
+    json(res, 200, todos.completed({ projectId, labelId, before, limit: number(url.searchParams.get('limit')) }));
     return true;
   }
   if (req.method === 'GET' && path === '/api/todos/search') {

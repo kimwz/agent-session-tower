@@ -433,6 +433,12 @@ a.todo-file-name:hover { text-decoration:underline; }
 .todo-cal-block { position:absolute; z-index:1; display:flex; flex-direction:column; gap:1px; min-width:0; padding:3px 6px; overflow:hidden; border-radius:6px; border-left:3px solid var(--entry-color); background:color-mix(in srgb, var(--entry-color) 22%, #131c29); color:#e2e9f3; font-size:11.5px; line-height:1.3; cursor:pointer; touch-action:manipulation; user-select:none; -webkit-touch-callout:none; }
 .todo-cal-block:hover { background:color-mix(in srgb, var(--entry-color) 30%, #131c29); }
 .todo-cal-block.short { flex-direction:row; align-items:center; gap:6px; padding-block:1px; white-space:nowrap; }
+.todo-cal-block-open { display:flex; flex:1; flex-direction:column; gap:1px; min-width:0; min-height:0; outline:none; }
+.todo-cal-block-open:focus-visible { box-shadow:0 0 0 1px #6d97d4; border-radius:4px; }
+.todo-cal-block.short .todo-cal-block-open { flex-direction:row; align-items:center; gap:6px; }
+.todo-cal-block.with-check { padding-right:22px; }
+.todo-cal-block .todo-cal-check { position:absolute; top:3px; right:4px; }
+.todo-cal-block.short .todo-cal-check { top:50%; transform:translateY(-50%); }
 .todo-cal-block time { flex:none; color:#a8b6c8; font-size:10.5px; font-variant-numeric:tabular-nums; }
 .todo-cal-block span:not(.todo-cal-resize) { overflow:hidden; text-overflow:ellipsis; }
 .todo-cal-block.future { opacity:.45; background:transparent; border:1px dashed color-mix(in srgb, var(--entry-color) 50%, transparent); }
@@ -498,6 +504,7 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-modal-scrim { align-items:flex-start; padding:calc(8px + env(safe-area-inset-top)) 8px 8px; }
   .todo-quick-add { border-radius:12px; }
   .todo-quick-hint { display:none; }
+  .todo-quick-footer .todo-attach-icon { margin-right:auto; }
   .todo-toasts { bottom:calc(16px + env(safe-area-inset-bottom)); }
   .todo-toast > span { max-width:24ch; }
   .todo-calendar { padding:0 12px 12px; }
@@ -513,7 +520,7 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-cal-week-view { flex:none; height:calc(100dvh - 210px); }
   .todo-cal-unscheduled { flex:none; max-height:170px; }
   .todo-cal-unscheduled > div { flex-direction:row; flex-wrap:wrap; }
-  .todo-cal-unscheduled .todo-cal-entry { width:auto; max-width:100%; }
+  .todo-cal-unscheduled .todo-cal-entry, .todo-cal-unscheduled .todo-cal-item { width:auto; max-width:100%; }
   .todo-layout-switch span { display:none; }
   .todo-description-files { margin-left:0; }
   .todo-file-thumbs { grid-template-columns:repeat(3, minmax(0, 1fr)); }
@@ -525,3 +532,34 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-add-card { opacity:1; }
   .todo-unlink, .todo-comment-meta .icon-button { opacity:1; }
 }
+
+/* Files: a dialog, a detail or a card that a dragged file would go to. */
+.todo-quick-add.drop-target { border-color:#3e5f8a; box-shadow:0 24px 80px #000c, inset 0 0 0 1px #3e5f8a; }
+.todo-quick-add .todo-pending-files { margin-top:-2px; }
+.todo-detail.drop-target { box-shadow:-24px 0 60px #0007, inset 0 0 0 2px #3e5f8a80; }
+.todo-card.file-target { border-color:#5b86c0; background:#15253a; }
+
+/* A sub-task's grip in the detail, shown on hover or focus. */
+.todo-subtask-list li > button.todo-subtask-grip { display:inline-flex; flex:none; width:14px; margin-right:-5px; padding:0; color:#4f5d72; cursor:grab; touch-action:none; opacity:0; }
+.todo-subtask-list li:hover > button.todo-subtask-grip, .todo-subtask-list li > button.todo-subtask-grip:focus-visible { opacity:1; }
+.todo-completions li { align-items:center; }
+.todo-completions li span { flex:1; }
+.todo-completions .todo-link-button { font-size:11.5px; }
+
+/* The calendar's check circle, beside an entry. */
+.todo-cal-item { display:flex; align-items:center; gap:3px; width:100%; min-width:0; }
+.todo-cal-item > .todo-cal-entry { flex:1; }
+.todo-cal-check { display:inline-flex; align-items:center; justify-content:center; flex:none; width:13px; height:13px; padding:0; border:1.3px solid var(--p4); border-radius:50%; background:#121b28; color:transparent; touch-action:manipulation; }
+.todo-cal-check.p1 { border-color:var(--p1); } .todo-cal-check.p2 { border-color:var(--p2); } .todo-cal-check.p3 { border-color:var(--p3); }
+.todo-cal-check:hover, .todo-cal-check:focus-visible { color:#dbe4ef; background:#1d2a3c; }
+.todo-cal-agenda .todo-cal-check, .todo-cal-unscheduled .todo-cal-check { width:16px; height:16px; }
+
+/* An archived project, read only. */
+.todo-banner.archived { color:#a9b6c8; border-color:#33425a; }
+.todo-banner.archived span { flex:1; }
+.todo-banner.archived .todo-tool { height:26px; }
+.todo-column-empty { padding:6px 4px; font-size:12px; }
+@media (hover:none) { .todo-subtask-list li > button.todo-subtask-grip { opacity:.6; } }
+/* A collapsed section keeps a small drop area under its header; locked columns (archived) read a little quieter. */
+.todo-column.collapsed .todo-column-cards { min-height:44px; }
+.todo-column.locked .todo-column-head h3 { color:#8a98ac; }

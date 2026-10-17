@@ -1,8 +1,9 @@
 import type { Direction } from './todo-shortcuts';
 import { liveProjectIds } from '../../../shared/todo/compose';
 import { addDays } from '../../../shared/todo/dates';
+import { compareDay } from '../../../shared/todo/day-order';
 import type { TodoOp } from '../../../shared/todo/ops';
-import type { TodoPriority, TodoProject, TodoTask } from '../../../shared/todo/types';
+import type { TodoPriority, TodoProject, TodoSection, TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { byOrder, isOpen, type TodoWorld } from './todo-model';
 import { dateLabel, longDate, priorityName } from './todo-format';
@@ -34,6 +35,12 @@ export interface BoardColumn {
   drop: ColumnDrop | null;
   /** A section column, whose header can be dragged and renamed. */
   sectionId?: string;
+  /** Read only: an archived project's or section's tasks, shown but never moved, completed or changed here. */
+  locked?: boolean;
+  /** A collapsed section: its header and count only; a card still drops on it. */
+  collapsed?: boolean;
+  /** How many tasks it holds when they are not shown (collapsed). */
+  count?: number;
   /** What a task added in this column starts with. */
   preset: { projectId?: string; sectionId?: string | null; dueDate?: string; priority?: TodoPriority };
 }
@@ -78,7 +85,8 @@ export function groupingsFor(view: TodoView): GroupKey[] {
     case 'project': case 'inbox': return ['section', 'priority', 'date'];
     case 'today': return ['date', 'priority', 'project'];
     case 'upcoming': return ['date'];
-    case 'label': case 'search': return ['project', 'priority'];
+    case 'label': return ['project', 'priority', 'date'];
+    case 'search': return ['project', 'priority'];
   }
 }
 export const defaultDisplay = (view: TodoView): DisplaySettings => ({ group: groupingsFor(view)[0], sort: 'manual', completed: false, calendar: 'month', future: true, colorBy: 'priority' });
@@ -89,9 +97,12 @@ export const projectOf = (world: TodoWorld, view: TodoView): TodoProject | undef
 /** Projects shown: not archived, and not inside an archived one. */
 const liveProjects = (world: TodoWorld) => liveProjectIds(world.projects);
 
+/** Sections archived: their tasks leave every list, and show read-only only in their project's "archived sections". */
+export const archivedSectionIds = (world: Pick<TodoWorld, 'sections'>) => new Set(world.sections.filter(section => section.archivedAt).map(section => section.id));
+
 export function openTasks(world: TodoWorld): TodoTask[] {
-  const live = liveProjects(world);
-  return Object.values(world.tasks).filter(task => isOpen(task) && live.has(task.projectId));
+  const live = liveProjects(world), shelved = archivedSectionIds(world);
+  return Object.values(world.tasks).filter(task => isOpen(task) && live.has(task.projectId) && !(task.sectionId && shelved.has(task.sectionId)));
 }
 
 /** The tasks a list holds, before grouping: top-level ones in a project, every dated one in date lists. */
@@ -116,16 +127,20 @@ const SORTS: Record<SortKey, (a: TodoTask, b: TodoTask) => number> = {
   priority: (a, b) => a.priority - b.priority || byOrder(a, b),
   name: (a, b) => a.content.localeCompare(b.content) || byOrder(a, b),
 };
-/** Within a day, timed tasks come first by time, then by priority. */
-const DAY_ORDER = (a: TodoTask, b: TodoTask) => compare(a.dueTime ?? '99', b.dueTime ?? '99') || a.priority - b.priority || byOrder(a, b);
+/** Outside sections and dates, timed tasks come first by time, then by priority. */
+const BY_TIME = (a: TodoTask, b: TodoTask) => compare(a.dueTime ?? '99', b.dueTime ?? '99') || a.priority - b.priority || byOrder(a, b);
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 
+/** Date columns keep the order put by hand within each date (shared/todo/day-order.ts). */
 export function sortTasks(tasks: TodoTask[], sort: SortKey, group: GroupKey): TodoTask[] {
-  return [...tasks].sort(sort === 'manual' && group !== 'section' ? DAY_ORDER : SORTS[sort]);
+  return [...tasks].sort(sort !== 'manual' || group === 'section' ? SORTS[sort] : group === 'date' ? compareDay : BY_TIME);
 }
 
-/** Whether cards can be put in order by hand: only among siblings, in their own order. */
-export const manualOrder = (display: DisplaySettings) => display.group === 'section' && display.sort === 'manual';
+/**
+ * Whether cards can be put in order by hand: among siblings in section columns, and among the tasks of one date in
+ * date columns.
+ */
+export const manualOrder = (display: DisplaySettings) => (display.group === 'section' || display.group === 'date') && display.sort === 'manual';
 
 type Grouping = (view: TodoView, tasks: TodoTask[], context: ViewContext) => BoardColumn[];
 
@@ -137,7 +152,8 @@ export const GROUPINGS: Record<GroupKey, Grouping> = {
     if (!project) return [];
     const sections = world.sections.filter(section => section.projectId === project.id && !section.archivedAt);
     return [
-      { id: 'section:none', title: t('섹션 없음'), tasks: tasks.filter(task => !task.sectionId || !sections.some(section => section.id === task.sectionId)), drop: { kind: 'section', projectId: project.id, sectionId: null }, preset: { projectId: project.id, sectionId: null } },
+      // An archived section's tasks are not without one: they show with it, when archived sections are shown.
+      { id: 'section:none', title: t('섹션 없음'), tasks: tasks.filter(task => !task.sectionId || !world.sections.some(section => section.id === task.sectionId)), drop: { kind: 'section', projectId: project.id, sectionId: null }, preset: { projectId: project.id, sectionId: null } },
       ...sections.map((section): BoardColumn => ({ id: `section:${section.id}`, title: section.name, sectionId: section.id, tasks: tasks.filter(task => task.sectionId === section.id), drop: { kind: 'section', projectId: project.id, sectionId: section.id }, preset: { projectId: project.id, sectionId: section.id } })),
     ];
   },
@@ -200,7 +216,10 @@ export function dropOps(task: TodoTask, drop: ColumnDrop, afterId?: string | nul
     case 'section':
       if (task.projectId === drop.projectId && task.sectionId === drop.sectionId && afterId === undefined) return [];
       return [{ op: 'task.move', id: task.id, projectId: drop.projectId, sectionId: drop.sectionId, parentId: null, ...(afterId !== undefined ? { afterId } : {}) }];
-    case 'date': return task.dueDate === drop.date ? [] : [{ op: 'task.update', id: task.id, patch: { dueDate: drop.date } }];
+    // Within its own date, a placed card is put in order among that date's tasks; elsewhere it takes the column's date.
+    case 'date':
+      if (task.dueDate !== drop.date) return [{ op: 'task.update', id: task.id, patch: { dueDate: drop.date } }];
+      return drop.date && afterId !== undefined && afterId !== task.id ? [{ op: 'task.move', id: task.id, dayAfterId: afterId }] : [];
     case 'priority': return task.priority === drop.priority ? [] : [{ op: 'task.update', id: task.id, patch: { priority: drop.priority } }];
     case 'project': return task.projectId === drop.projectId ? [] : [{ op: 'task.move', id: task.id, projectId: drop.projectId, sectionId: null, parentId: null }];
   }
@@ -289,4 +308,51 @@ export function moveSelection(columns: readonly Pick<BoardColumn, 'tasks'>[], fr
   if (direction === 'down') return ids[Math.min(ids.length - 1, row + 1)];
   const next = filled[column + (direction === 'left' ? -1 : 1)];
   return next ? next[Math.min(row, next.length - 1)] : from;
+}
+
+export function archivedColumns(view: TodoView, display: DisplaySettings, context: ViewContext, projectId: string): BoardColumn[] {
+  const group = groupingsFor(view).includes(display.group) ? display.group : groupingsFor(view)[0];
+  const tasks = Object.values(context.world.tasks).filter(task => isOpen(task) && task.projectId === projectId && !task.parentId);
+  return GROUPINGS[group](view, tasks, context).map(column => ({ ...column, drop: null, sectionId: undefined, locked: true, tasks: sortTasks(column.tasks, display.sort, group) }));
+}
+
+/**
+ * A project's section columns as its sections say: a collapsed one shows its header and count only (a card still
+ * drops on it), and an archived one leaves the board with its tasks, to show read-only after the others when asked.
+ */
+export function shapeSections(columns: readonly BoardColumn[], sections: readonly TodoSection[], options: { collapse: boolean; showArchived: boolean; tasks?: readonly TodoTask[] }): { columns: BoardColumn[]; archived: number } {
+  const archived = sections.filter(section => section.archivedAt).sort((a, b) => a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0);
+  const archivedIds = new Set(archived.map(section => section.id));
+  const byId = new Map(sections.map(section => [section.id, section]));
+  // The archived sections' open top-level tasks (no list holds them, see openTasks).
+  const stored = (options.tasks ?? []).filter(task => isOpen(task) && !task.parentId && task.sectionId && archivedIds.has(task.sectionId)).sort(byOrder);
+  const shaped = columns.map(column => {
+    if (column.id === 'section:none' && archivedIds.size) return { ...column, tasks: column.tasks.filter(task => !task.sectionId || !archivedIds.has(task.sectionId)) };
+    const section = column.sectionId ? byId.get(column.sectionId) : undefined;
+    if (options.collapse && section?.collapsed) return { ...column, tasks: [], collapsed: true, count: column.tasks.length, note: t('접힘 · {0}', { 0: column.tasks.length }) };
+    return column;
+  });
+  if (options.showArchived) for (const section of archived) shaped.push({
+    id: `section:${section.id}`, title: section.name, note: t('보관됨'), sectionId: section.id, drop: null, locked: true, preset: {}, tasks: stored.filter(task => task.sectionId === section.id),
+  });
+  return { columns: shaped, archived: archived.length };
+}
+
+/**
+ * Where a card dropped on `overId` goes among its own date's tasks in a column of several dates: the task before it
+ * there (null: first), or undefined when it was not dropped among its own date (dropping never changes the date here).
+ */
+export function dayAfterOf(tasks: readonly TodoTask[], id: string, overId: string): string | null | undefined {
+  const from = tasks.findIndex(item => item.id === id), to = tasks.findIndex(item => item.id === overId);
+  if (from < 0 || to < 0 || from === to || !tasks[from].dueDate || tasks[to].dueDate !== tasks[from].dueDate) return undefined;
+  const order = [...tasks];
+  order.splice(to, 0, ...order.splice(from, 1));
+  const before = order.slice(0, to).filter(item => item.dueDate === tasks[from].dueDate);
+  return before.at(-1)?.id ?? null;
+}
+
+/** Read only: a task of an archived project (or one above it) or of an archived section, wherever it shows. */
+export function taskLocked(world: Pick<TodoWorld, 'projects' | 'sections'>, task: Pick<TodoTask, 'projectId' | 'sectionId'> | undefined): boolean {
+  if (!task) return false;
+  return !liveProjectIds(world.projects).has(task.projectId) || (!!task.sectionId && archivedSectionIds(world).has(task.sectionId));
 }

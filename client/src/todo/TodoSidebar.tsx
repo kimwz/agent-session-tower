@@ -1,18 +1,25 @@
 import { useRef, useState, type FormEvent, type ReactNode, type RefObject } from 'react';
-import { Archive, ArchiveRestore, CalendarDays, CalendarRange, ChevronDown, ChevronRight, Hash, Heart, Inbox, MoreHorizontal, Palette, Pencil, Plus, Search, Tag, Trash2 } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowDown, ArrowUp, CalendarDays, CalendarRange, ChevronDown, ChevronRight, FolderTree, Hash, Heart, Inbox, MoreHorizontal, Palette, Pencil, Plus, Search, Tag, Trash2 } from 'lucide-react';
 import type { TodoLabel, TodoProject } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { Menu, Popover, type MenuItem } from './Popover';
 import { colorOf, TODO_COLORS } from './todo-format';
 import type { TodoWorld } from './todo-model';
+import { labelStepOp, parentCandidates, projectStepOp, type Step } from './todo-moves';
 import { newId, type TodoClient } from './todo-store';
 import { projectTree, type ProjectNode, type SidebarCounts } from './todo-views';
 import { viewKey, type TodoView } from './todo-url';
 
 /**
  * The Todo page's navigation: add and search, the inbox and date lists with their counts, favorites, the project tree
- * and labels. Projects and labels are made, renamed, colored and removed from their rows.
+ * and labels. Projects and labels are made, renamed, colored, put in order and removed from their rows; a project is
+ * moved under another from its menu, and an archived one opens to be read.
  */
+
+const STEPS: { step: Step; label: string; icon: ReactNode }[] = [
+  { step: 'up', label: '위로 옮기기', icon: <ArrowUp size={13} /> },
+  { step: 'down', label: '아래로 옮기기', icon: <ArrowDown size={13} /> },
+];
 
 export interface SidebarProps {
   world: TodoWorld;
@@ -53,10 +60,15 @@ function Row({ active, icon, label, count, tone, onClick, menu, depth = 0, toggl
   </li>;
 }
 
+/** A project's level in the tree: 1 at the top. */
+const depthOf = (projects: readonly TodoProject[], project: TodoProject) => { let n = 1; for (let up = project.parentId; up && n < 5; up = projects.find(item => item.id === up)?.parentId ?? null) n++; return n; };
+
 export function TodoSidebar({ world, counts, view, query, client, readOnly, searchRef, onNavigate, onAdd }: SidebarProps) {
   const [editing, setEditing] = useState<Editing>(null);
   const [menu, setMenu] = useState<{ anchor: HTMLElement; items: (MenuItem | 'separator')[]; label: string } | null>(null);
   const [color, setColor] = useState<{ anchor: HTMLElement; value: string; pick: (color: string) => void } | null>(null);
+  // Choosing a new parent opens once the project's menu has closed, at the same place.
+  const [parentFor, setParentFor] = useState<TodoProject | null>(null);
   const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set(['archived']));
   const [search, setSearch] = useState(query);
   const menuAnchor = useRef<HTMLElement | null>(null);
@@ -75,15 +87,24 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
     ...(depth < 2 ? [{ key: 'child', label: t('하위 프로젝트 추가'), icon: <Plus size={13} />, run: () => setEditing({ kind: 'new-project', parentId: project.id }) }] : []),
     { key: 'favorite', label: project.favorite ? t('즐겨찾기에서 빼기') : t('즐겨찾기에 추가'), icon: <Heart size={13} />, run: () => client.apply([{ op: 'project.update', id: project.id, patch: { favorite: !project.favorite } }]) },
     { key: 'color', label: t('색 바꾸기'), icon: <Palette size={13} />, run: () => { colorAnchor.current = anchor; setColor({ anchor, value: project.color, pick: value => client.apply([{ op: 'project.update', id: project.id, patch: { color: value } }]) }); } },
+    ...placeItems(project, anchor),
     'separator',
     { key: 'archive', label: t('보관'), icon: <Archive size={13} />, run: () => { if (client.apply([{ op: 'project.update', id: project.id, patch: { archived: true } }])) client.toast(t('“{0}” 보관', { 0: project.name }), 'info', client.undoActions()); } },
     { key: 'delete', label: t('삭제'), danger: true, icon: <Trash2 size={13} />, run: () => { if (client.apply([{ op: 'project.delete', id: project.id }])) { removed(project.name); if (current === `p:${project.id}`) onNavigate({ kind: 'today' }); } } },
   ]);
+  // Up, down and under another project, after a line when there is any.
+  const placeItems = (project: TodoProject, anchor: HTMLElement): (MenuItem | 'separator')[] => {
+    const items: MenuItem[] = STEPS.flatMap(({ step, label, icon }) => { const op = projectStepOp(world.projects, project, step); return op ? [{ key: step, label: t(label), icon, run: () => client.apply([op]) }] : []; });
+    if (parentCandidates(world, project.id).length) items.push({ key: 'parent', label: t('상위 프로젝트 바꾸기'), icon: <FolderTree size={13} />, run: () => { menuAnchor.current = anchor; setParentFor(project); } });
+    return items.length ? ['separator', ...items] : [];
+  };
   const labelMenu = (label: TodoLabel, anchor: HTMLElement) => openMenu(anchor, label.name, [
     { key: 'rename', label: t('이름 바꾸기'), icon: <Pencil size={13} />, run: () => setEditing({ kind: 'label', id: label.id }) },
     { key: 'favorite', label: label.favorite ? t('즐겨찾기에서 빼기') : t('즐겨찾기에 추가'), icon: <Heart size={13} />, run: () => client.apply([{ op: 'label.update', id: label.id, patch: { favorite: !label.favorite } }]) },
     { key: 'color', label: t('색 바꾸기'), icon: <Palette size={13} />, run: () => { colorAnchor.current = anchor; setColor({ anchor, value: label.color, pick: value => client.apply([{ op: 'label.update', id: label.id, patch: { color: value } }]) }); } },
     'separator',
+    ...STEPS.flatMap(({ step, label: name, icon }) => { const op = labelStepOp(world.labels, label.id, step); return op ? [{ key: step, label: t(name), icon, run: () => client.apply([op]) }] : []; }),
+    ...(world.labels.length > 1 ? ['separator' as const] : []),
     { key: 'delete', label: t('삭제'), danger: true, icon: <Trash2 size={13} />, run: () => { if (client.apply([{ op: 'label.delete', id: label.id }])) { removed(label.name); if (current === `l:${label.id}`) onNavigate({ kind: 'today' }); } } },
   ]);
 
@@ -144,9 +165,13 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
         { key: 'unarchive', label: t('보관 해제'), icon: <ArchiveRestore size={13} />, disabled: readOnly, run: () => { if (client.apply([{ op: 'project.update', id: project.id, patch: { archived: false } }])) onNavigate({ kind: 'project', id: project.id }); } },
         { key: 'delete', label: t('삭제'), danger: true, icon: <Trash2 size={13} />, disabled: readOnly, run: () => { if (client.apply([{ op: 'project.delete', id: project.id }])) removed(project.name); } },
       ]);
-      return <Row key={project.id} active={false} icon={<Archive size={14} />} label={project.name} onClick={open} menu={open} />;
+      // Opening it shows its tasks to read; its menu brings it back or deletes it.
+      return <Row key={project.id} active={current === `p:${project.id}`} icon={<Archive size={14} />} label={project.name} onClick={() => onNavigate({ kind: 'project', id: project.id })} menu={open} />;
     })}</ul>)}
     {menu && <Menu anchor={menuAnchor} label={menu.label} items={menu.items} onClose={() => setMenu(null)} />}
+    {parentFor && !menu && <Menu anchor={menuAnchor} label={t('상위 프로젝트 바꾸기')} onClose={() => setParentFor(null)} items={parentCandidates(world, parentFor.id).map(parent => parent
+      ? { key: parent.id, label: <span style={{ paddingLeft: (depthOf(world.projects, parent) - 1) * 12 }}>{parent.name}</span>, icon: <i className="todo-dot" style={{ background: colorOf(parent.color) }} />, run: () => client.apply([{ op: 'project.move', id: parentFor.id, parentId: parent.id }]) }
+      : { key: 'top', label: t('없음 (최상위)'), icon: <Hash size={13} />, run: () => client.apply([{ op: 'project.move', id: parentFor.id, parentId: null }]) })} />}
     {color && <ColorGrid anchor={colorAnchor} value={color.value} onPick={color.pick} onClose={() => setColor(null)} />}
   </nav>;
 }
