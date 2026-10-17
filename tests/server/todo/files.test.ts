@@ -391,3 +391,12 @@ test('a restore whose projects or tasks do not form the trees the store keeps is
     assert.equal(store.revision(), before.revision, what);
   }
 });
+
+test('two restores in one millisecond each keep their own copy of the file before them', async t => {
+  const { dir, store } = await fixture(t);
+  const tables = store.backupData()!.tables;
+  const first = store.restoreData(TODO_SCHEMA_STEP, tables);
+  const second = store.restoreData(TODO_SCHEMA_STEP, tables);
+  assert.notEqual(first, second);
+  assert.equal((await readdir(dir)).filter(name => name.startsWith('todo-restore-before-')).length, 2);
+});

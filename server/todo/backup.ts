@@ -40,6 +40,8 @@ export interface TodoBackupPart { schema: number; tables: TodoTables; files?: To
 export interface TodoBackupSnapshot { part: TodoBackupPart; contents: Map<string, number>; newer: boolean }
 
 export const TODO_FILES_FOLDER = 'tower-todo-files/';
+/** Keys a backup may carry, far more than one computer ever holds (each restore of another key adds one). */
+export const MAX_CARRIED_KEYS = 10_000;
 const PIECE_BYTES = 8 * 1024 * 1024;
 /** Attachments the bucket refuses one after another before the rest of a round's are given up. */
 const REFUSALS_IN_A_ROW = 3;
@@ -98,7 +100,7 @@ export function parseTodoPart(value: unknown): TodoBackupPart {
     tables[name] = rows as Record<string, unknown>[];
   }
   const files = value.files, keys = record(files) ? files.keys : undefined;
-  if (files !== undefined && !(validKey(files) && (keys === undefined || (Array.isArray(keys) && keys.length <= 1000 && keys.every(validKey))))) throw wrong();
+  if (files !== undefined && !(validKey(files) && (keys === undefined || (Array.isArray(keys) && keys.length <= MAX_CARRIED_KEYS && keys.every(validKey))))) throw wrong();
   return { schema: value.schema as number, tables,
     ...(validKey(files) ? { files: { namespace: files.namespace, key: files.key, ...(Array.isArray(keys) ? { keys: mergeKeys([], keys as TodoFileKey[]) } : {}) } } : {}) };
 }
@@ -215,9 +217,9 @@ export class TodoBackup {
   /**
    * Replaces the todos with a backup's part, keeping the keys it carries, then brings back the attachments this
    * computer lacks from wherever the bucket holds them, in the background (see TodoOverview.restore). `computer` names
-   * this computer in namespaces. Answers where the file was copied first.
+   * this computer in namespaces. Answers where the file was copied first, and the keys the backup carried.
    */
-  async restore(value: unknown, objects: () => TodoObjectStore, prefix: string, computer: string): Promise<{ before: string }> {
+  async restore(value: unknown, objects: () => TodoObjectStore, prefix: string, computer: string): Promise<{ before: string; keys: TodoFileKey[] }> {
     const part = parseTodoPart(value);
     const before = await this.files.contentTurnOf(() => this.store.restoreData(part.schema, part.tables, keysOf(part)));
     this.restores++;
@@ -238,7 +240,7 @@ export class TodoBackup {
         this.store.setRestoreProgress(progress);
       });
     this.bringing = { stop, done };
-    return { before };
+    return { before, keys: keysOf(part) };
   }
 
   /** Settles when the attachments of the last restore are back, or given up on. */

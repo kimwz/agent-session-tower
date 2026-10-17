@@ -14,10 +14,15 @@ import { keepBefore, readReport, removePendingWorker, writePendingWorker, writeR
 import { S3Client, endpointUrl, unsafeKey } from './s3.js';
 import { newerVersion } from '../link/service.js';
 import type { TodoBackup, TodoBackupSnapshot, TodoObjectStore } from '../todo/backup.js';
+import { mergeKeys, type TodoFileKey } from '../todo/store.js';
 
 interface SavedSettings extends BackupSettingsInput { remote: BackupSettingsInput['remote'] & { secretAccessKey?: string } }
-/** `machine`: this computer's own mark in backup names, so two computers with one name never remove each other's; never restored. */
-interface SavedFile { version: 1; machine: string; settings: SavedSettings; status: Omit<BackupStatus, 'running'> }
+/**
+ * `machine`: this computer's own mark in backup names, so two computers with one name never remove each other's; never
+ * restored. `todoKeys`: every attachment key a backup from here has carried or a restore here brought, kept apart from
+ * the todo file so that losing that file never makes later backups drop a key older ones carried.
+ */
+interface SavedFile { version: 1; machine: string; settings: SavedSettings; status: Omit<BackupStatus, 'running'>; todoKeys?: TodoFileKey[] }
 
 /** What the backup needs from the rest of the web process. */
 export interface BackupServiceOptions {
@@ -117,6 +122,10 @@ export class BackupService {
         this.saved = { version: 1, machine: typeof value.machine === 'string' && /^[0-9a-f]{6}$/.test(value.machine) ? value.machine : this.saved.machine,
           settings: { ...settings, enabled: value.settings.enabled === true }, status: record(value.status) ? value.status as SavedFile['status'] : {} };
       }
+      if (record(value) && Array.isArray(value.todoKeys)) {
+        const todoKeys = (value.todoKeys as unknown[]).filter((item): item is TodoFileKey => record(item) && typeof item.namespace === 'string' && typeof item.key === 'string');
+        this.saved = { ...this.saved, todoKeys: mergeKeys([], todoKeys) };
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { console.error(`Backup settings could not be read: ${error instanceof Error ? error.message : String(error)}`); return; }
       // The first start keeps this computer's mark, so its own backups are recognized after a restart.
@@ -209,13 +218,28 @@ export class BackupService {
     return { name: this.fileName(at), text, ...(notice ? { notice } : {}) };
   }
 
-  /** The todos to back up; undefined (logged) when their file cannot be read, so the rest is still backed up. */
+  /**
+   * The todos to back up, carrying every attachment key this computer has known (see SavedFile.todoKeys); undefined
+   * (logged) when their file cannot be read, so the rest is still backed up.
+   */
   private todoSnapshot(): TodoBackupSnapshot | undefined {
     let snapshot: TodoBackupSnapshot | undefined;
     try { snapshot = this.options.todos?.snapshot(this.computer); }
     catch (error) { console.warn(`The todos could not be read: ${error instanceof Error ? error.message : String(error)}`); }
     if (this.options.todos && !snapshot) console.warn('The todos were left out of the backup.');
-    return snapshot;
+    const files = snapshot?.part.files;
+    if (!snapshot || !files) return snapshot;
+    const own = { namespace: files.namespace, key: files.key };
+    const keys = mergeKeys([own], mergeKeys(files.keys ?? [], this.saved.todoKeys ?? [])).slice(1);
+    return { ...snapshot, part: { ...snapshot.part, files: { ...own, ...(keys.length ? { keys } : {}) } } };
+  }
+
+  /** Adds keys to the ones this computer keeps (SavedFile.todoKeys), never dropping any. */
+  private rememberKeys(keys: TodoFileKey[]): Promise<void> {
+    const known = this.saved.todoKeys ?? [];
+    const merged = mergeKeys(known, keys);
+    if (merged.length === known.length) return Promise.resolve();
+    return this.change(() => { this.saved = { ...this.saved, todoKeys: mergeKeys(this.saved.todoKeys ?? [], keys) }; });
   }
 
   // ---- Automatic backups -------------------------------------------------------------------------
@@ -276,6 +300,8 @@ export class BackupService {
       try {
         const text = await encryptBackup(await this.payload(todos, settings), settings.passphrase, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
         key = `${settings.remote.prefix}${this.uploadName(at, partial.length > 0)}`;
+        // Kept before the backup goes up: a later backup carries these keys even if the todo file is lost meanwhile.
+        if (todos?.part.files) await this.rememberKeys([{ namespace: todos.part.files.namespace, key: todos.part.files.key }, ...todos.part.files.keys ?? []]);
         // The backup first, so a slow or stopped attachment upload never costs the settings. It carries every key the
         // todos know, so attachments that then do not go up stay openable wherever the bucket already holds them.
         await client.put(key, Buffer.from(text), 'application/octet-stream');
@@ -431,7 +457,9 @@ export class BackupService {
     let todoBefore: string | undefined;
     if (web.todos !== undefined) await step('todos', async () => {
       if (!this.options.todos) throw new BackupError('할 일을 사용할 수 없습니다.', 'unavailable');
-      todoBefore = (await this.options.todos.restore(web.todos, () => this.objects(this.client()), this.saved.settings.remote.prefix, this.computer)).before;
+      const restored = await this.options.todos.restore(web.todos, () => this.objects(this.client()), this.saved.settings.remote.prefix, this.computer);
+      todoBefore = restored.before;
+      await this.rememberKeys(restored.keys);
     });
     if (master && this.options.master) await step('master', () => this.options.master!({ ...(master.settings?.voice !== undefined ? { voice: master.settings.voice } : {}), voiceKey: master.voiceKey ?? null }));
     if (applied.length) this.options.onChange?.();

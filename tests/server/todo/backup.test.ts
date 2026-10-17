@@ -6,11 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { BackupService } from '../../../server/backup/service.js';
+import { S3Client } from '../../../server/backup/s3.js';
 import type { SkillBackup } from '../../../server/backup/payload.js';
 import { TODO_FILES_FOLDER, TodoBackup } from '../../../server/todo/backup.js';
 import { TodoFiles, todoFilePath } from '../../../server/todo/files.js';
 import { TODO_SCHEMA_STEP } from '../../../server/todo/schema.js';
-import { TODO_RETENTION_MS, TodoStore } from '../../../server/todo/store.js';
+import { TODO_RETENTION_MS, TodoStore, type TodoTables } from '../../../server/todo/store.js';
 import { TodoRequestSchema, type TodoOp } from '../../../shared/todo/ops.js';
 import { fakeBucket } from '../../helpers/s3.js';
 import { fastScrypt } from '../../helpers/fast-scrypt.js';
@@ -917,4 +918,82 @@ test('an attachment that cannot be looked at locally never stops the backup, and
   const newest = await a.upload();
   const c = await elsewhere(t, bucket, newest);
   assert.deepEqual(await content(c, file), file);
+});
+
+/** Restores rows that name attachments on `c`, without any key of their own: only keys `c` already knows open them. */
+async function rowsOnly(c: Computer, bucket: Bucket, tables: TodoTables) {
+  const client = new S3Client({ endpoint: bucket.endpoint, bucket: 'bucket', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' });
+  const objects = { put: (key: string, body: Buffer) => client.put(key, body), get: (key: string, max: number) => client.get(key, max),
+    scan: async (prefix: string) => { const listing = await client.scan(prefix, 100_000); return { keys: listing.items.map(item => item.key), complete: listing.complete }; } };
+  c.clock.now += 1000;
+  await c.backup.restore({ schema: TODO_SCHEMA_STEP, tables }, () => objects, 'tower/', `third-${c.machine}`);
+  await c.backup.downloads();
+}
+
+test('a todo file made anew never makes later backups drop the key the older ones carried', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const file = randomBytes(PIECE + 9);
+  await a.attach('t', file);
+  await a.upload();
+  const tables = a.todos.backupData()!.tables;
+  const again = await remade(t, bucket, a);
+  await keepOne(again, bucket);
+  let newest = '';
+  for (let round = 0; round < 3; round++) newest = await again.upload();
+  assert.equal(objectsOf(bucket, `tower/tower-backup-studio-${again.machine}-`).length, 1, 'the backups with the first key are gone');
+  const c = await elsewhere(t, bucket, newest);
+  await rowsOnly(c, bucket, tables);
+  assert.deepEqual(c.todos.overview().restore, { state: 'done', total: 1, missing: 0 });
+  assert.deepEqual(await content(c, file), file);
+});
+
+test('a removal racing a failed restore, then the todo file lost, still leaves the key in the newest backup', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const file = randomBytes(PIECE * 2);
+  await a.attach('t', file);
+  const first = await a.upload();
+  const tables = a.todos.backupData()!.tables;
+  let release!: () => void, entered!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  const faults: Faults = { failDelete: new Set(), failList: false, truncateList: false, failAttachmentGet: true };
+  const again = await remade(t, bucket, a, faults);
+  await keepOne(again, bucket);
+  faults.holdDelete = { entered: () => entered(), until: new Promise(resolve => { release = resolve; }) };
+  const making = again.upload();
+  await reached;
+  faults.holdDelete = undefined;
+  await again.restore(first);
+  release();
+  await making;
+  const third = await remade(t, bucket, again);
+  await keepOne(third, bucket);
+  let newest = '';
+  for (let round = 0; round < 2; round++) newest = await third.upload();
+  const c = await elsewhere(t, bucket, newest);
+  await rowsOnly(c, bucket, tables);
+  assert.deepEqual(await content(c, file), file);
+});
+
+test('a backup carrying more than a thousand keys restores, and keeps them all', async t => {
+  const bucket = await fakeBucket(t);
+  const a = await computer(t, bucket);
+  const keys = Array.from({ length: 1500 }, (_, index) => ({ namespace: `other-${index.toString(16).padStart(6, '0')}-${index.toString(16).padStart(16, '0')}`, key: randomBytes(32).toString('base64url') }));
+  a.todos.close();
+  const db = new DatabaseSync(join(a.stateDir, 'todos.sqlite'));
+  db.prepare("INSERT INTO todo_meta (key, value) VALUES ('files_keys', ?)").run(JSON.stringify(keys));
+  db.close();
+  a.todos.start();
+  const key = await a.upload();
+  const b = await computer(t, bucket);
+  const report = await b.restore(key);
+  assert.ok(report.applied.includes('todos'), report.errors.join(' '));
+  assert.ok(b.todos.fileKeys().length >= 1500);
+  assert.ok(a.todos.fileKeys().length === 1500);
+  // Its own backup restores on it too.
+  const own = await a.restore(key);
+  assert.ok(own.applied.includes('todos'), own.errors.join(' '));
 });

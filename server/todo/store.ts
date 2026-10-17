@@ -63,7 +63,7 @@ const OPERATIONS: { [N in TodoOpName]: Handler } = {
 
 /** The copies a restore makes of the file it replaces; only the newest few are kept. */
 const RESTORE_COPIES_KEPT = 3;
-const RESTORE_COPY = /^todo-restore-before-\d{8}T\d{6}\d{3}Z\.sqlite$/;
+const RESTORE_COPY = /^todo-restore-before-\d{8}T\d{6}\d{3}Z(?:-[0-9a-f]{6})?\.sqlite$/;
 
 /** A backup's rows, by table; see `TODO_DATA_TABLES`. */
 export type TodoTables = Record<string, Record<string, unknown>[]>;
@@ -476,7 +476,8 @@ export class TodoStore {
   /** A consistent copy of the file as it is now, kept beside it (the newest few). */
   private copyAside(): string {
     const stamp = new Date(this.now()).toISOString().replace(/[-:.]/g, '');
-    const path = join(this.stateDir, `todo-restore-before-${stamp}.sqlite`);
+    // A random part too, so two restores in one millisecond never meet.
+    const path = join(this.stateDir, `todo-restore-before-${stamp}-${randomBytes(3).toString('hex')}.sqlite`);
     // Made owner-only and empty first: VACUUM INTO writes into an empty file it finds.
     closeSync(openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600));
     try { this.db!.prepare('VACUUM INTO ?').run(path); }
