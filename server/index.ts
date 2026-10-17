@@ -727,7 +727,9 @@ async function main() {
   let webCredentials: WebCredentials | undefined;
   const localMcp = ownerMcpOverHttp(stateDir, () => webCredentials?.port);
   const masterCallerSecret = randomBytes(32).toString('hex');
-  const master = new MasterClient({ stateDir, credentials: () => webCredentials });
+  // A todo's issue master open (or still being handed to retention) brings the host back after a restart, as the main
+  // master's binding does.
+  const master = new MasterClient({ stateDir, credentials: () => webCredentials, issueMastersOpen: () => todos.hasOpenAgents() });
   // Full backups: the worker gives its skills; restores go through each process's own stores (see BackupService.apply).
   const backups = new BackupService({ stateDir, version: APP_VERSION, skills: () => runs.skillsBackup(), triggers: () => runs.triggersBackup(), settings: () => runs.settingsBackup(), restartWorker: () => runs.restartWorker(),
     unavailable: () => runs.supports('backup') ? undefined : '실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 쓸 수 있습니다.',
