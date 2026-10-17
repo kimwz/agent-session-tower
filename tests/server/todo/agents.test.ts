@@ -570,3 +570,46 @@ test('closed masters are found through indexes, never by reading every master', 
   assert.match(plan("SELECT a.* FROM todo_agents a LEFT JOIN todo_tasks t ON t.id = a.task_id WHERE a.state != 'closed' AND (a.state IN ('starting', 'active')) != (t.id IS NOT NULL AND t.completed_at IS NULL AND t.deleted_at IS NULL)"), /SCAN a USING INDEX todo_agents_open/);
   assert.match(plan('SELECT a.* FROM (SELECT DISTINCT task_id FROM todo_agent_sessions) s JOIN todo_agents a ON a.task_id = s.task_id'), /SEARCH a USING INDEX/);
 });
+
+test('a start that comes to nothing after its todo closed meanwhile still takes its row and guide away', async t => {
+  const { store, agents, calls, hooks, session, apply, tick, folder } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'A' }, { op: 'task.create', id: 'b', content: 'B' }, { op: 'task.create', id: 'c', content: 'C' });
+  /** Starts a todo's master and completes the todo while the session is being made, then fails as `outcome` says. */
+  const startClosing = async (id: string, outcome: 'refused' | 'lost', late = false) => {
+    let fail!: () => void;
+    const held = new Promise<void>(resolve => { fail = resolve; });
+    hooks.create = async input => {
+      await held;
+      if (late) session(`late-${id}`, input.cwd);
+      throw new TowerError('unavailable', outcome, { disposition: outcome === 'lost' ? 'uncertain' : 'not-admitted' });
+    };
+    const starting = agents.begin(id, 'go');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(apply(complete(id, `c${id}`)).agents[id]?.state, 'closing');
+    fail();
+    await assert.rejects(starting, new RegExp(outcome));
+  };
+
+  // Refused: the row and the guide go at once, though the row was `closing`.
+  await startClosing('a', 'refused');
+  assert.equal(store.agent('a'), undefined);
+  assert.ok(calls.includes('unguide a'));
+
+  // Lost with nothing in the folder: it waits two minutes for a late session, then goes the same way.
+  await startClosing('b', 'lost');
+  await agents.schedule();
+  assert.equal(store.agent('b')!.state, 'closing');
+  assert.ok(!calls.includes('unguide b'));
+  tick(TODO_AGENT_START_WAIT_MS + 1000);
+  await agents.schedule();
+  assert.equal(store.agent('b'), undefined);
+  assert.ok(calls.includes('unguide b'));
+
+  // Lost, but its session turns up: it is handed over with the issue, and its folder keeps its guide.
+  await startClosing('c', 'lost', true);
+  await agents.schedule();
+  assert.equal(store.agent('c')!.state, 'closed');
+  assert.ok(calls.includes('archive late-c'));
+  assert.ok(!calls.includes('unguide c'));
+  assert.equal(folder('c').endsWith('/c'), true);
+});

@@ -165,10 +165,7 @@ export class TodoAgents {
         created = await this.options.createSession({ provider: model.provider, ...(model.model ? { model: model.model } : {}), ...(model.effort ? { effort: model.effort } : {}),
           cwd: folder, prompt, title: `이슈: ${detail.task.content.slice(0, TITLE_CHARS)}` });
       } catch (error) {
-        if (!this.options.uncertain(error) && store.changeAgent(taskId, { state: 'starting', sessionId: undefined }, null)) {
-          this.options.onChange();
-          await this.forgetFolder(taskId);
-        }
+        if (!this.options.uncertain(error)) await this.giveUp(taskId);
         throw error;
       }
       const agent = this.bind(taskId, created.session);
@@ -318,6 +315,17 @@ export class TodoAgents {
     }
   }
 
+  /**
+   * A start that came to nothing: its row goes, whatever its todo did meanwhile (a todo closed while it started
+   * leaves it `closing`), as long as no session was ever bound to it; and its guide goes with it.
+   */
+  private async giveUp(taskId: string): Promise<void> {
+    const agent = this.options.store.agent(taskId);
+    if (!agent || agent.sessionId || !this.options.store.changeAgent(taskId, { state: agent.state, sessionId: undefined }, null)) return;
+    this.options.onChange();
+    await this.forgetFolder(taskId);
+  }
+
   /** A start that came to nothing leaves no guide behind: only Tower's own files go, and the folder if then empty. */
   private async forgetFolder(taskId: string): Promise<void> {
     try { await this.options.removeGuide(todoMasterFolder(this.options.stateDir, taskId)); }
@@ -363,6 +371,12 @@ export class TodoAgents {
   private async closeAgent(agent: TodoAgent, folder: AgentSession[], byId: Map<string, AgentSession>): Promise<void> {
     if (this.starting.has(agent.taskId) || this.waitingAfterFailure(agent.taskId)) return;
     const store = this.options.store;
+    // Closed while its start went unanswered: a session that turns up in the folder is closed with the rest; none for a
+    // while, and the start came to nothing.
+    if (!agent.sessionId && !folder.length) {
+      if (this.now() - Date.parse(agent.createdAt) > TODO_AGENT_START_WAIT_MS) await this.giveUp(agent.taskId);
+      return;
+    }
     await this.handOver(this.members(agent, folder), byId);
     // Only if nothing reopened the todo or rebound its master meanwhile.
     if (store.taskState(agent.taskId) !== 'open' && store.changeAgent(agent.taskId, agent, { state: 'closed', sessionId: agent.sessionId, provider: agent.provider })) this.options.onChange();
