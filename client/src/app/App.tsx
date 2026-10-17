@@ -165,7 +165,7 @@ function TowerApp() {
       const next = pageShortcut(event);
       if (!next) return;
       const off = (element: unknown) => element instanceof Element && !!element.closest(PAGE_KEYS_OFF);
-      if (off(event.target) || off(document.activeElement) || document.querySelector('dialog[open], [aria-modal="true"], .todo-popover')) return;
+      if (next === readPage() || off(event.target) || off(document.activeElement) || document.querySelector('dialog[open], [aria-modal="true"], .todo-popover')) return;
       event.preventDefault();
       switchPage(next);
     };

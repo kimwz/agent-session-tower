@@ -47,8 +47,10 @@ export function UploadRows({ jobs, onCancel, onRetry }: { jobs: readonly UploadJ
   })}</ul>;
 }
 
-/** A button opening the file picker (a phone offers its camera, photos and files). */
-/** Picks files to attach; `compact` is a paperclip alone (its name stays for screen readers and as a tooltip). */
+/**
+ * A button opening the file picker (a phone offers its camera, photos and files); `compact` is a paperclip alone, its
+ * name kept for screen readers and as a tooltip.
+ */
 export function AttachButton({ onFiles, disabled, children, compact }: { onFiles: (files: File[]) => void; disabled?: boolean; children?: ReactNode; compact?: boolean }) {
   const input = useRef<HTMLInputElement>(null);
   return <>

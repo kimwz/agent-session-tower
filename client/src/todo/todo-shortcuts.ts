@@ -47,5 +47,6 @@ export function readShortcut(event: ShortcutKey, pending: boolean): { shortcut?:
   }
 }
 
-/** Keys go to a field being typed in, not to the page. */
-export const typingIn = (element: Element | null) => !!element?.closest('input:not([type="checkbox"]):not([type="radio"]):not([type="button"]), textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]');
+/** Fields being typed in: keys go to them, not to the page. */
+export const TYPING_FIELDS = 'input:not([type="checkbox"]):not([type="radio"]):not([type="button"]), textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]';
+export const typingIn = (element: Element | null) => !!element?.closest(TYPING_FIELDS);

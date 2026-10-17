@@ -107,6 +107,8 @@ export function BoardView(board: BoardProps) {
   const { columns, context, manual, mobile } = board;
   const sensors = useTodoSensors();
   const [activeTask, setActiveTask] = useState<TodoTask | null>(null);
+  // Anything dragged, a card or a section: the arrow keys are the drag's meanwhile.
+  const [dragging, setDragging] = useState(false);
   const [overColumn, setOverColumn] = useState<string | null>(null);
   const [current, setCurrent] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
@@ -127,12 +129,13 @@ export function BoardView(board: BoardProps) {
 
   const columnOf = (data: Record<string, unknown> | undefined) => data?.column as BoardColumn | undefined;
   const onStart = (event: DragStartEvent) => {
+    setDragging(true);
     const data = event.active.data.current;
     if (data?.type === 'task') setActiveTask(data.task as TodoTask);
   };
   const onOver = (event: DragOverEvent) => setOverColumn(columnOf(event.over?.data.current)?.id ?? null);
   const onEnd = (event: DragEndEvent) => {
-    setActiveTask(null); setOverColumn(null);
+    setActiveTask(null); setOverColumn(null); setDragging(false);
     const { active, over } = event;
     if (!over) return;
     const data = active.data.current;
@@ -165,7 +168,7 @@ export function BoardView(board: BoardProps) {
     </SortableContext>
   </Column>;
 
-  return <DndContext sensors={sensors} collisionDetection={collisions} onDragStart={onStart} onDragOver={onOver} onDragEnd={onEnd} onDragCancel={() => { setActiveTask(null); setOverColumn(null); }}>
+  return <DndContext sensors={sensors} collisionDetection={collisions} onDragStart={onStart} onDragOver={onOver} onDragEnd={onEnd} onDragCancel={() => { setActiveTask(null); setOverColumn(null); setDragging(false); }}>
     {mobile && (columns.length > 1 || columns[current]?.sectionId) && <div className="todo-column-tabs-bar">
       <div className="todo-column-tabs" role="tablist" aria-label={t('열')}>
         {columns.map((column, index) => <ColumnTab key={column.id} column={column} index={index} current={index === current} onPick={pick} />)}
@@ -174,7 +177,7 @@ export function BoardView(board: BoardProps) {
       {columns[current]?.sectionId && <button ref={tabMenu} type="button" className="icon-button" aria-label={t('“{0}” 섹션 메뉴', { 0: columns[current].title })}
         onClick={() => tabMenu.current && board.onSectionMenu(columns[current].sectionId!, tabMenu.current)}><MoreHorizontal size={15} /></button>}
     </div>}
-    <div ref={scroller} className={`todo-board ${activeTask ? 'dragging' : ''}`}>
+    <div ref={scroller} className={`todo-board ${dragging ? 'dragging' : ''}`}>
       <SortableContext items={sectionIds} strategy={horizontalListSortingStrategy}>
         {columns.map(renderColumn)}
       </SortableContext>

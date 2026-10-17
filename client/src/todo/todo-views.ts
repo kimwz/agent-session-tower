@@ -1,3 +1,4 @@
+import type { Direction } from './todo-shortcuts';
 import { liveProjectIds } from '../../../shared/todo/compose';
 import { addDays } from '../../../shared/todo/dates';
 import type { TodoOp } from '../../../shared/todo/ops';
@@ -257,9 +258,11 @@ export interface CardContext {
   showProject: boolean;
   children: ReadonlyMap<string, TodoTask[]>;
   next: ReadonlyMap<string, number>;
+  /** Tasks that have a card of their own here: a sub-task among them is not listed again under its parent. */
+  shown?: ReadonlySet<string>;
 }
 
-export function cardContext(world: TodoWorld, today: string, showProject: boolean): CardContext {
+export function cardContext(world: TodoWorld, today: string, showProject: boolean, shown?: ReadonlySet<string>): CardContext {
   const children = new Map<string, TodoTask[]>();
   for (const task of Object.values(world.tasks)) {
     if (!task.parentId || task.deletedAt) continue;
@@ -269,14 +272,14 @@ export function cardContext(world: TodoWorld, today: string, showProject: boolea
   for (const list of children.values()) list.sort(byOrder);
   const next = new Map<string, number>();
   for (const link of Object.values(world.links)) if (isOpen(world.tasks[link.toTaskId]) && !world.tasks[link.fromTaskId]?.deletedAt) next.set(link.fromTaskId, (next.get(link.fromTaskId) ?? 0) + 1);
-  return { world, today, showProject, children, next };
+  return { world, today, showProject, children, next, ...(shown ? { shown } : {}) };
 }
 
 /**
  * The card an arrow key goes to on the board: up and down within a column, left and right to the next column that has
  * cards (the same place, or its last card). Without a chosen card (or one no longer shown), the first card there is.
  */
-export function moveSelection(columns: readonly Pick<BoardColumn, 'tasks'>[], from: string | null, direction: 'up' | 'down' | 'left' | 'right'): string | null {
+export function moveSelection(columns: readonly Pick<BoardColumn, 'tasks'>[], from: string | null, direction: Direction): string | null {
   const filled = columns.map(column => column.tasks.map(task => task.id)).filter(ids => ids.length);
   if (!filled.length) return null;
   const column = from ? filled.findIndex(ids => ids.includes(from)) : -1;

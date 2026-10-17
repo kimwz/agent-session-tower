@@ -21,6 +21,8 @@ function read(): string[] {
 export const subtasksFolded = (taskId: string): boolean => read().includes(taskId);
 
 export function setSubtasksFolded(taskId: string, folded: boolean): void {
+  // Read again first: another tab may have folded something since.
+  memory = null;
   memory = [...read().filter(id => id !== taskId), ...(folded ? [taskId] : [])].slice(-MAX_FOLDED);
   // best-effort: storage that refuses keeps the fold for this page only.
   try { window.localStorage.setItem(FOLDED_KEY, JSON.stringify(memory)); } catch { /* best-effort: see above */ }

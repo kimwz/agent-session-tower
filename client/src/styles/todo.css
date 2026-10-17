@@ -170,8 +170,14 @@
 .todo-markdown > :first-child { margin-top:0; }
 .todo-markdown > :last-child { margin-bottom:0; }
 /* Properties: a quiet card on the right, the most used first; rarely used ones without a value are one row of additions. */
-.todo-properties { margin:0; padding:6px; border:1px solid #1c2736; border-radius:10px; background:#111a26; }
-.todo-property { display:grid; grid-template-columns:62px minmax(0, 1fr); align-items:center; gap:4px; min-height:34px; padding:0 4px 0 8px; }
+.todo-properties { display:flex; flex-wrap:wrap; margin:0; padding:6px; border:1px solid #1c2736; border-radius:10px; background:#111a26; }
+.todo-property { display:grid; flex:1 0 100%; grid-template-columns:62px minmax(0, 1fr); align-items:center; gap:4px; min-height:34px; padding:0 4px 0 8px; }
+/* A rare property without a value: a small "add" after the others, under one line. */
+.todo-property.adding { display:block; flex:0 0 auto; min-height:0; margin-top:4px; padding:6px 4px 0 0; border-top:1px solid #1c2736; }
+.todo-property:not(.adding) + .todo-property.adding { padding-left:4px; }
+.todo-property.adding:last-child { flex-grow:1; }
+.todo-property.adding dt { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+.todo-property.adding .todo-property-value { min-height:26px; font-size:12px; }
 .todo-property dt { color:#6d7c92; font-size:11.5px; }
 .todo-property dd { display:flex; align-items:center; min-width:0; margin:0; }
 .todo-property-icon { display:none; }
@@ -179,8 +185,6 @@
 select.todo-property-value { border:0; background:none; }
 .todo-property-value:hover:not(:disabled) { background:#1a2533; }
 .todo-property-value.empty { color:#66758b; }
-.todo-property-adds { display:flex; flex-wrap:wrap; gap:2px 6px; margin-top:4px; padding:6px 4px 2px; border-top:1px solid #1c2736; }
-.todo-property-adds .todo-property-value { min-height:26px; font-size:12px; }
 .todo-property-value.overdue { color:var(--p1); }
 .todo-property-value.priority svg { color:var(--p4); }
 .todo-property-value.priority.p1 svg { color:var(--p1); }
@@ -201,7 +205,7 @@ select.todo-property-value { border:0; background:none; }
 .todo-link-button:hover { color:#e6a16f; background:#151f2c; }
 .todo-inline-add input, .todo-menu-search input { width:100%; height:32px; padding:0 10px; border:1px solid #3a5476; border-radius:7px; background:#0a111b; color:var(--text); font-size:12.5px; }
 .todo-inline-add { margin-top:6px; }
-.todo-flow > div { display:flex; flex-direction:column; gap:2px; margin-bottom:8px; }
+.todo-flow > div:not(.todo-flow-actions) { display:flex; flex-direction:column; gap:2px; margin-bottom:8px; }
 .todo-flow-label { color:#5f6d82; font-size:11px; }
 .todo-flow li { display:flex; align-items:center; gap:8px; min-height:30px; color:#7c8aa0; }
 .todo-flow li > button:not(.icon-button) { flex:1; min-width:0; text-align:left; color:#c3cfdd; font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -209,7 +213,7 @@ select.todo-property-value { border:0; background:none; }
 .todo-flow li > button:not(.icon-button):hover { color:var(--bright); text-decoration:underline; }
 .todo-unlink { width:22px; height:22px; opacity:0; }
 .todo-flow li:hover .todo-unlink, .todo-unlink:focus-visible { opacity:1; }
-.todo-flow-actions, .todo-flow > .todo-flow-actions { display:flex; flex-direction:row; flex-wrap:wrap; gap:4px 14px; }
+.todo-flow-actions { display:flex; flex-wrap:wrap; gap:4px 14px; }
 .todo-comments { display:flex; flex-direction:column; gap:12px; margin-bottom:10px; }
 .todo-comments > li { padding:10px 12px; border:1px solid #1e2937; border-radius:9px; background:#111a26; }
 .todo-comment-meta { display:flex; align-items:center; gap:2px; margin-bottom:4px; color:#6d7c92; font-size:11px; }
@@ -481,16 +485,13 @@ a.todo-file-name:hover { text-decoration:underline; }
   /* On a phone the properties are a line of chips under the title; rarely used ones without a value are dashed. */
   .todo-detail-body > .todo-properties { position:static; }
   .todo-properties { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 4px; padding:0; border:0; background:none; }
-  .todo-property { display:block; min-height:0; padding:0; }
+  .todo-property, .todo-property.adding { display:block; flex:0 0 auto; min-height:0; margin:0; padding:0; border:0; }
   .todo-property dt { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
   .todo-property dd { padding-left:9px; border:1px solid #243246; border-radius:999px; background:#121b28; }
   .todo-property-icon { display:inline-flex; color:#7c8aa0; }
-  /* The priority flag and the project's dot already say what the chip is. */
-  .todo-property.priority .todo-property-icon, .todo-property.project .todo-property-icon { display:none; }
   .todo-property-value { min-height:32px; padding:3px 11px 3px 6px; border-radius:999px; }
-  .todo-property-adds { display:contents; }
-  .todo-property-adds > span { display:inline-flex; border:1px dashed #2a3a50; border-radius:999px; }
-  .todo-property-adds .todo-property-value { min-height:32px; padding:3px 11px; }
+  .todo-property.adding dd { padding-left:0; border-style:dashed; background:none; }
+  .todo-property.adding .todo-property-value { min-height:32px; padding:3px 11px; font-size:12.5px; }
   .todo-detail-quiet { margin-left:0; }
   .todo-detail-section, .todo-description, .todo-description-editor { margin-left:0; }
   .todo-description-editor { width:100%; }

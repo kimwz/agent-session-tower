@@ -75,6 +75,13 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const readOnly = world.availability.state !== 'ready';
 
   useEffect(() => { client.start(); uploads.open(); return () => { uploads.dispose(); client.dispose(); }; }, [client, uploads]);
+  // What a press began on, read before the press closes any popover (see the main area's click).
+  const pressed = useRef<{ target: EventTarget | null; popover: boolean }>({ target: null, popover: false });
+  useEffect(() => {
+    const onPress = (event: PointerEvent) => { pressed.current = { target: event.target, popover: !!document.querySelector('.todo-popover') }; };
+    window.addEventListener('pointerdown', onPress, true);
+    return () => window.removeEventListener('pointerdown', onPress, true);
+  }, []);
   useEffect(() => { client.noticeRevision(revision); }, [client, revision]);
   // The local date moves at midnight while the page stays open.
   useEffect(() => { const timer = window.setInterval(() => setToday(localToday()), 60_000); return () => window.clearInterval(timer); }, []);
@@ -117,6 +124,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const completedAvailable = view.kind !== 'upcoming' && view.kind !== 'search';
   const layout = location.layout;
   const setLayout = useCallback((next: TodoLayout) => {
+    if (locationRef.current.layout === next) return;
     navigate({ layout: next });
     const shown = projectOf(client.getState().world, locationRef.current.view);
     // Remembered with the project, not as a change to undo.
@@ -129,7 +137,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const columns = useMemo(() => boardColumns(view, display, { world, today, start, query, searchResults }), [view, display, world, today, start, query, searchResults]);
   // A card names its project where the list is not one project and its column does not already.
   const showProject = !project && display.group !== 'project';
-  const context = useMemo(() => cardContext(world, today, showProject), [world, today, showProject]);
+  const shown = useMemo(() => new Set(columns.flatMap(column => column.tasks.map(item => item.id))), [columns]);
+  const context = useMemo(() => cardContext(world, today, showProject, shown), [world, today, showProject, shown]);
   const counts = useMemo(() => sidebarCounts(world, today), [world, today]);
 
   const openAdd = useCallback((preset?: QuickAddPreset) => {
@@ -144,18 +153,28 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
 
   const target = (): TodoTask | undefined => (openTaskId ? world.tasks[openTaskId] : undefined) ?? (selectedId ? world.tasks[selectedId] : undefined);
   /** Chooses a card and puts the keyboard on it, so Enter and Space act on the card that shows chosen. */
+  const focusFrame = useRef(0);
   const choose = (id: string) => {
     setSelectedId(id);
-    requestAnimationFrame(() => {
+    cancelAnimationFrame(focusFrame.current);
+    focusFrame.current = requestAnimationFrame(() => {
       const card = document.querySelector<HTMLElement>(`.todo-board .todo-card[data-task="${CSS.escape(id)}"]`);
       card?.focus({ preventScroll: true });
       card?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     });
   };
+  const letGo = () => {
+    cancelAnimationFrame(focusFrame.current);
+    setSelectedId(null);
+    if (document.activeElement instanceof HTMLElement && document.activeElement.closest('.todo-card')) document.activeElement.blur();
+  };
   const setCalendar = (mode: DisplaySettings['calendar']) => { setLayout('calendar'); if (display.calendar !== mode) setDisplay({ ...display, calendar: mode }); };
-  const state0 = { target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout, setCalendar, columns, selectedId, choose };
-  const shortcutState = useRef(state0);
-  shortcutState.current = state0;
+  // The columns the arrow keys go through: the board's, and the completed list when it shows.
+  const completedTasks = display.completed && state.completed ? [...new Map(state.completed.items.map(item => [item.task.id, item.task])).values()] : [];
+  const navColumns = completedTasks.length ? [...columns, { tasks: completedTasks }] : columns;
+  const shortcuts = { target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout, setCalendar, navColumns, selectedId, choose, letGo };
+  const shortcutState = useRef(shortcuts);
+  shortcutState.current = shortcuts;
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const current = shortcutState.current;
@@ -176,13 +195,23 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
           requestAnimationFrame(() => searchRef.current?.focus());
           break;
         case 'today': case 'upcoming': case 'inbox': current.goTo({ kind: shortcut.action }); break;
-        case 'complete': if (task && !task.completedAt) current.actions.complete(task); break;
+        case 'complete': {
+          if (!task || task.completedAt) break;
+          // The choice goes on to the card below (or above), not back to the first one.
+          const below = moveSelection(current.navColumns, task.id, 'down');
+          const neighbour = below !== task.id ? below : moveSelection(current.navColumns, task.id, 'up');
+          current.actions.complete(task);
+          if (!current.openTaskId && neighbour && neighbour !== task.id) current.choose(neighbour);
+          break;
+        }
         case 'complete-next': if (task) current.followUp(task, true); break;
         case 'add-next': if (task) current.followUp(task, false); break;
         case 'move': {
-          // The board's cards only, never while a card is being dragged with the keys or from inside the task's detail.
-          if (current.layout !== 'board' || document.querySelector('.todo-board.dragging') || (event.target instanceof Element && event.target.closest('.todo-detail'))) return;
-          const next = moveSelection(current.columns, current.openTaskId ?? current.selectedId, shortcut.direction);
+          // The board's cards only, never while something is dragged with the keys. With a task open, only from the board
+          // itself (its detail, or the page after a popover there closed, keeps the arrows).
+          if (current.layout !== 'board' || document.querySelector('.todo-board.dragging')) return;
+          if (current.openTaskId && !(event.target instanceof Element && event.target.closest('.todo-board'))) return;
+          const next = moveSelection(current.navColumns, current.openTaskId ?? current.selectedId, shortcut.direction);
           if (!next) return;
           if (current.openTaskId) current.closeTask();
           current.choose(next);
@@ -193,11 +222,9 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
         case 'close':
           if (current.openTaskId) current.closeTask();
           else if (current.drawer && current.sidebarOpen) current.onSidebarOpen(false);
-          else if (current.selectedId) {
-            // Lets go of the chosen card, and of the keyboard on it.
-            setSelectedId(null);
-            if (document.activeElement instanceof HTMLElement && document.activeElement.closest('.todo-card')) document.activeElement.blur();
-          } else return;
+          // Help that is open closes first (the page's own Esc).
+          else if (current.selectedId && !document.querySelector('.help-popover')) current.letGo();
+          else return;
           break;
         case 'undo': if (!current.client.undo()) return; break;
         case 'layout': current.setLayout(current.layout === 'board' ? 'calendar' : 'board'); break;
@@ -244,6 +271,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       <header className="todo-column-head"><h3>{t('완료됨')}</h3><span className="todo-column-count">{items.length || ''}</span></header>
       <div className="todo-column-cards">
         {items.map(({ completion, task }) => <TaskCard key={completion.id} task={{ ...task, completedAt: task.completedAt ?? completion.completedAt }} context={context} {...card} onMenu={undefined}
+          selected={(openTaskId ?? selectedId) === task.id}
           onReopen={() => void actions.reopen(task, completion.id)} />)}
         {state.completed.loading && <LoaderCircle className="spin todo-muted" size={16} />}
         {state.completed.error && <p className="todo-error" role="alert">{state.completed.error}</p>}
@@ -278,7 +306,10 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     {drawer && sidebarOpen && <button type="button" className="todo-scrim" aria-label={t('목록 닫기')} onClick={() => onSidebarOpen(false)} />}
     {sidebarOpen && state.phase === 'ready' && <TodoSidebar world={world} counts={counts} view={view} query={query} client={client} readOnly={readOnly} searchRef={searchRef} onNavigate={goTo} onAdd={() => { openAdd(); if (drawer) onSidebarOpen(false); }} />}
     <main className="todo-main" aria-label={title} onClickCapture={event => {
-      // With a task open, a click on the page's empty space closes it and does nothing else; a card opens that card.
+      // With a task open, a click on the page's empty space closes it and does nothing else; a card opens that card. A
+      // click that closed a popover, or that ends somewhere else than it began (a drop), is not one.
+      const press = pressed.current;
+      if (press.popover || press.target !== event.target) return;
       if (!openTaskId || !(event.target instanceof Element) || !event.currentTarget.contains(event.target)) return;
       if (event.target.closest('.todo-card, .todo-cal-entry, .todo-cal-block, button, a, input, textarea, select, label, summary, [role="button"], [role="tab"], [role="radio"], .todo-popover')) return;
       event.preventDefault(); event.stopPropagation();

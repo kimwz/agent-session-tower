@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ArrowLeft, ArrowRight, CalendarDays, Check, ChevronDown, Clock3, Flag, Hash, History, Link2, LoaderCircle, MessageSquare, MoreHorizontal, Paperclip, Pencil, Plus, Tag, Trash2, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, CalendarDays, Check, ChevronDown, Clock3, Flag, History, Link2, LoaderCircle, MoreHorizontal, Paperclip, Pencil, Plus, Tag, Trash2, X } from 'lucide-react';
 import type { TodoEvent, TodoFile, TodoPriority, TodoTask } from '../../../shared/todo/types';
 import { relativeTime } from '../common/lib';
 import { translate as t } from '../i18n/i18n';
@@ -27,32 +27,29 @@ import { projectTree } from './todo-views';
 export interface DetailContext { task: TodoTask; world: TodoWorld; today: string; client: TodoClient; actions: TodoActions; readOnly: boolean; uploads: TodoUploads }
 
 export interface PropertyRow {
-  key: string; label: string; icon: ReactNode; render: (context: DetailContext) => ReactNode;
+  /** `icon` marks the chip on a phone, for values that do not show what they are. */
+  key: string; label: string; icon?: ReactNode; render: (context: DetailContext) => ReactNode;
   /** Rarely used: shown only with a value; without one, its control sits in the row of additions. */
   rare?: { empty: (task: TodoTask) => boolean };
 }
 
 const PRIORITIES: TodoPriority[] = [1, 2, 3, 4];
 
-/**
- * A rarely used property moves between its row and the row of additions when it gets or loses a value, so its control
- * is made anew: the keyboard goes to the new one, never back to the page.
- */
-const keepFocus = (key: string) => requestAnimationFrame(() => document.querySelector<HTMLElement>(`.todo-detail [data-property="${key}"] .todo-property-value`)?.focus());
 
 function DateProperty({ task, today, actions, deadline, readOnly }: DetailContext & { deadline?: boolean }) {
   const popover = usePopover();
   const value: DateValue = deadline ? { dueDate: task.deadlineDate, dueTime: null, durationMin: null, recurrence: null } : { dueDate: task.dueDate, dueTime: task.dueTime, durationMin: task.durationMin, recurrence: task.recurrence };
   const label = deadline
-    ? task.deadlineDate ? monthDay(task.deadlineDate, today) : t('＋ 마감일')
-    : task.dueDate ? [dateLabel(task.dueDate, today), task.dueTime, task.recurrence && recurrenceLabel(task.recurrence)].filter(Boolean).join(' · ') : t('날짜 추가');
+    ? task.deadlineDate ? monthDay(task.deadlineDate, today) : readOnly ? t('없음') : t('＋ 마감일')
+    : task.dueDate ? [dateLabel(task.dueDate, today), task.dueTime, task.recurrence && recurrenceLabel(task.recurrence)].filter(Boolean).join(' · ') : readOnly ? t('날짜 없음') : t('날짜 추가');
+  const set = deadline ? task.deadlineDate : task.dueDate;
   const overdue = deadline ? !!task.deadlineDate && task.deadlineDate < today : !!task.dueDate && task.dueDate < today;
   return <>
     <button ref={popover.anchor} type="button" className={`todo-property-value ${overdue ? 'overdue' : ''} ${(deadline ? task.deadlineDate : task.dueDate) ? '' : 'empty'}`} disabled={readOnly} onClick={popover.toggle}
-      aria-label={`${deadline ? t('마감일') : t('날짜')}: ${label}`}>{label}</button>
+      aria-label={set ? `${deadline ? t('마감일') : t('날짜')}: ${label}` : undefined}>{label}</button>
     {popover.open && <Popover anchor={popover.anchor} onClose={popover.close} label={deadline ? t('마감일') : t('날짜')} className="todo-date-popover">
       <DatePicker value={value} today={today} deadline={deadline} onChange={patch => {
-        if (deadline) { actions.update(task, { deadlineDate: patch.dueDate ?? null }); popover.close(); keepFocus('deadline'); return; }
+        if (deadline) { actions.update(task, { deadlineDate: patch.dueDate ?? null }); popover.close(); return; }
         actions.update(task, patch);
         if (patch.dueDate !== undefined && Object.keys(patch).length <= 3 && patch.dueTime === undefined && patch.recurrence === undefined) popover.close();
       }} />
@@ -114,7 +111,7 @@ function LabelsProperty({ task, world, client, readOnly }: DetailContext) {
   const popover = usePopover();
   return <>
     <button ref={popover.anchor} type="button" className={`todo-property-value ${task.labelIds.length ? '' : 'empty'}`} disabled={readOnly} onClick={popover.toggle}>
-      {task.labelIds.length ? task.labelIds.map(id => world.labels.find(label => label.id === id)).filter(label => !!label).map(label => <span key={label!.id} className="todo-chip label" style={{ color: colorOf(label!.color) }}>@{label!.name}</span>) : t('라벨 추가')}
+      {task.labelIds.length ? task.labelIds.map(id => world.labels.find(label => label.id === id)).filter(label => !!label).map(label => <span key={label!.id} className="todo-chip label" style={{ color: colorOf(label!.color) }}>@{label!.name}</span>) : readOnly ? t('없음') : t('라벨 추가')}
     </button>
     {popover.open && <LabelPicker anchor={popover.anchor} onClose={popover.close} world={world} selected={task.labelIds}
       onChange={labelIds => client.apply([{ op: 'task.update', id: task.id, patch: { labelIds } }])}
@@ -123,7 +120,7 @@ function LabelsProperty({ task, world, client, readOnly }: DetailContext) {
 }
 
 function DurationProperty({ task, actions, readOnly }: DetailContext) {
-  return <select className={`todo-property-value ${task.durationMin ? '' : 'empty'}`} value={task.durationMin ?? ''} disabled={readOnly} aria-label={t('소요 시간')} onChange={event => { actions.update(task, { durationMin: event.target.value ? Number(event.target.value) : null }); keepFocus('duration'); }}>
+  return <select className={`todo-property-value ${task.durationMin ? '' : 'empty'}`} value={task.durationMin ?? ''} disabled={readOnly} aria-label={t('소요 시간')} onChange={event => actions.update(task, { durationMin: event.target.value ? Number(event.target.value) : null })}>
     <option value="">{task.durationMin ? t('없음') : t('＋ 소요 시간')}</option>
     {[...new Set([15, 30, 45, 60, 90, 120, 180, 240, 480, ...(task.durationMin ? [task.durationMin] : [])])].sort((a, b) => a - b).map(minutes => <option key={minutes} value={minutes}>{durationLabel(minutes)}</option>)}
   </select>;
@@ -132,21 +129,26 @@ function DurationProperty({ task, actions, readOnly }: DetailContext) {
 /** In the order they are used: the date and priority most, then labels and the project; deadline and duration rarely. */
 export const DETAIL_PROPERTIES: PropertyRow[] = [
   { key: 'date', label: '날짜', icon: <CalendarDays size={13} />, render: context => <DateProperty {...context} /> },
-  { key: 'priority', label: '우선순위', icon: <Flag size={13} />, render: context => <PriorityProperty {...context} /> },
+  { key: 'priority', label: '우선순위', render: context => <PriorityProperty {...context} /> },
   { key: 'labels', label: '라벨', icon: <Tag size={13} />, render: context => <LabelsProperty {...context} /> },
-  { key: 'project', label: '프로젝트', icon: <Hash size={13} />, render: context => <ProjectProperty {...context} /> },
+  { key: 'project', label: '프로젝트', render: context => <ProjectProperty {...context} /> },
   { key: 'deadline', label: '마감일', icon: <Flag size={13} />, render: context => <DateProperty {...context} deadline />, rare: { empty: task => !task.deadlineDate } },
   { key: 'duration', label: '소요 시간', icon: <Clock3 size={13} />, render: context => <DurationProperty {...context} />, rare: { empty: task => !task.durationMin } },
 ];
 
+/**
+ * Every row in the table's order, in one list: a rare property without a value only changes how its row looks (a small
+ * "add" after the others, todo.css), so its control stays the same element and keeps the keyboard when it gets a value.
+ */
 function Properties(context: DetailContext) {
-  const adding = (row: PropertyRow) => !!row.rare?.empty(context.task);
-  const additions = DETAIL_PROPERTIES.filter(adding);
   return <dl className="todo-properties">
-    {DETAIL_PROPERTIES.filter(row => !adding(row)).map(row => <div key={row.key} className={`todo-property ${row.key}`} data-property={row.key}>
-      <dt>{t(row.label)}</dt><dd><span className="todo-property-icon" aria-hidden="true">{row.icon}</span>{row.render(context)}</dd>
-    </div>)}
-    {additions.length > 0 && !context.readOnly && <div className="todo-property-adds">{additions.map(row => <span key={row.key} data-property={row.key}>{row.render(context)}</span>)}</div>}
+    {DETAIL_PROPERTIES.map(row => {
+      const adding = !!row.rare?.empty(context.task);
+      if (adding && context.readOnly) return null;
+      return <div key={row.key} className={`todo-property ${row.key} ${adding ? 'adding' : ''}`}>
+        <dt>{t(row.label)}</dt><dd>{row.icon && <span className="todo-property-icon" aria-hidden="true">{row.icon}</span>}{row.render(context)}</dd>
+      </div>;
+    })}
   </dl>;
 }
 

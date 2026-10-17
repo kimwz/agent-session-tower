@@ -65,16 +65,19 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
   // Sub-tasks show unless the owner folded them on this card; the fold is remembered (todo-prefs.ts). Completed ones
   // are in the task's detail.
   const [folded, setFolded] = useState(() => subtasksFolded(task.id));
-  const children = (context.children.get(task.id) ?? []).filter(isOpen);
+  // A completed card (the completed list) lists none: its sub-tasks are in its detail.
+  const children = task.completedAt ? [] : (context.children.get(task.id) ?? []).filter(child => isOpen(child) && !context.shown?.has(child.id));
   const chips = CARD_META.filter(chip => chip.visible(task, context));
   return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''}`} data-task={task.id} tabIndex={0} role="button" aria-label={task.content}
     onClick={() => onOpen(task.id)} onFocus={() => onSelect?.(task.id)}
-    onMouseEnter={event => {
+    onPointerMove={event => {
+      // Only a mouse that moves chooses: cards passing under a still mouse while the arrow keys scroll do not.
+      if (event.pointerType !== 'mouse' || selected) return;
       onSelect?.(task.id);
-      // With the keyboard on another card, it follows the mouse, so Enter opens the card that shows chosen. A field or the
-      // task's detail keeps the keyboard.
+      // With the keyboard on another card (or a button in one), it follows the mouse, so Enter opens the card that shows
+      // chosen. A field or the task's detail keeps the keyboard.
       const active = document.activeElement;
-      if (active instanceof HTMLElement && active !== event.currentTarget && active.classList.contains('todo-card')) event.currentTarget.focus({ preventScroll: true });
+      if (active instanceof HTMLElement && !event.currentTarget.contains(active) && active.closest('.todo-card')) event.currentTarget.focus({ preventScroll: true });
     }}
     onKeyDown={event => { if (event.key === 'Enter' && event.target === event.currentTarget) { event.preventDefault(); onOpen(task.id); } }}>
     <div className="todo-card-main">
