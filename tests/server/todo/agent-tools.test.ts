@@ -158,4 +158,6 @@ test('a sub-task goes where its parent is; a long discussion comes back as its l
   const detail = call('todos_get', { id: parent.id });
   assert.deepEqual([detail.comments.length, detail.olderComments, detail.comments[0].body, detail.comments.at(-1).truncated], [50, 5, 'note 5', true]);
   assert.equal(detail.subtasks.length, 1);
+  assert.equal(call('todos_get', { id: parent.id, comment: 'c54' }).comment.body.length, 3000, 'a cut comment can be read whole');
+  assert.throws(() => call('todos_get', { id: parent.id, comment: 'nope' }), /not on this task/);
 });

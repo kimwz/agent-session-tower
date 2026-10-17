@@ -39,7 +39,7 @@ export async function startTodosMcp(stateDir: string, input: Readable = process.
   const call = async (body: Record<string, unknown>) => {
     let key: unknown;
     try { key = ((await readPrivateJson(join(stateDir, KEY_FILE), 4096)) as { key?: unknown }).key; }
-    catch { throw new Error('Agent Session Tower has not started on this computer yet, so the todos cannot be reached.'); }
+    catch { throw new Error('Agent Session Tower has not started on this computer yet, or could not write its todo tools key, so the todos cannot be reached.'); }
     if (typeof key !== 'string' || !KEY.test(key)) throw new Error('The todo tools key is damaged; restarting Tower writes a new one.');
     return callWebTools(stateDir, TODO_TOOLS_PATH, key, body, ports);
   };

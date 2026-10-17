@@ -363,7 +363,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         else if (++rate.count > 240) return json(res, 429, { error: { message: 'Too many todo tool calls; try again in a minute.' } });
         let body: Record<string, unknown>;
         try { body = await readJson(req, 4 * 1024 * 1024); }
-        catch (error) { return json(res, statusOf(error) ?? 400, { error: { message: error instanceof Error ? error.message : "The request could not be read." } }); }
+        catch (error) { return json(res, statusOf(error) ?? 400, { error: { message: statusOf(error) === 413 ? 'The request is too large (at most 4 MiB); send fewer or shorter changes at a time.' : 'The request could not be read as JSON.' } }); }
         try { return json(res, 200, { result: await todoTools.answer(body) }); }
         catch (error) { return json(res, statusOf(error) === 500 ? 500 : 200, { error: { message: error instanceof Error ? error.message : 'The todo tool failed.' } }); }
       }

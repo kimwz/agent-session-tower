@@ -227,10 +227,15 @@ const TOOLS: Tool[] = [
     },
   }),
   tool({
-    name: 'todos_get', description: 'One task in full: its description, sub-tasks, comments, attachments (names and sizes), completions, and the tasks before and after it.',
-    input: z.object({ id }).strict(),
-    run: ({ id: taskId }, { store }) => {
+    name: 'todos_get', description: 'One task in full: its description, sub-tasks, comments (the latest 50, each cut at 2000 characters: pass comment to read one whole), attachments (names and sizes), completions, and the tasks before and after it.',
+    input: z.object({ id, comment: id.optional().describe('A comment of this task to read whole, by its id.') }).strict(),
+    run: ({ id: taskId, comment: commentId }, { store }) => {
       const detail = store.detail(taskId);
+      if (commentId) {
+        const found = detail.comments.find(item => item.id === commentId && !item.deletedAt);
+        if (!found) throw new TowerError('not-found', `Comment ${commentId} is not on this task.`);
+        return { comment: { id: found.id, body: found.body, createdAt: found.createdAt } };
+      }
       const overview = store.overview();
       const links = new Map([...overview.links, ...detail.next.map(item => item.link)].map(link => [link.id, link]));
       const name = namer({ ...overview, links: [...links.values()] });

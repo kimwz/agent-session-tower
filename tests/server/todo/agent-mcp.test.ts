@@ -95,7 +95,7 @@ test('the tool server a turn starts reaches the web, finds it again after a rest
   // A turn that starts while the web is down still gets the tools: the list is the server's own.
   assert.deepEqual((await ask('tools/list', {})).result.tools.map((tool: { name: string }) => tool.name), TODO_TOOL_NAMES);
   // A message too large is answered as such, and the server goes on.
-  const big = await ask('tools/call', { name: 'todos_apply', arguments: { ops: [{ op: 'task.create', id: 'x', content: 'x'.repeat(9 * 1024 * 1024) }] } });
+  const big = await ask('tools/call', { name: 'todos_apply', arguments: { ops: [{ op: 'task.create', id: 'x', content: 'x'.repeat(5 * 1024 * 1024) }] } });
   assert.match(big.error.message, /too large/);
   current = await web(t, dir, store, key);
   const back = await ask('tools/call', { name: 'todos_overview', arguments: {} });

@@ -41,8 +41,8 @@ export async function answerRpc(bridge: ToolBridge, frame: any): Promise<RpcRepl
   return { jsonrpc: '2.0', id: frame.id, error: { code: -32601, message: 'Method not found' } };
 }
 
-/** One message's size limit: above the largest request the todo tools take (4 MiB at the web). */
-const MAX_MCP_INPUT = 8 * 1024 * 1024;
+/** One message's size limit, the web's for a todo tools request: a message the bridge takes, the web takes too. */
+const MAX_MCP_INPUT = 4 * 1024 * 1024;
 
 /** Newline-delimited JSON-RPC over stdio, as Claude Code and Codex speak to local MCP servers. */
 export async function serveToolBridge(bridge: ToolBridge, input: Readable = process.stdin, output: Writable = process.stdout): Promise<void> {
@@ -103,7 +103,8 @@ export async function callWebTools(stateDir: string, path: string, key: string, 
   const payload = JSON.stringify(body);
   const uncertain = () => new Error('Tower did not finish answering. The change may or may not have been made; read the todos before trying again.');
   const send = (port: number) => new Promise<{ status: number; reply: { result?: unknown; error?: { message?: string } } }>((resolve, reject) => {
-    const req = request({ host: '127.0.0.1', port, method: 'POST', path, headers: { authorization: `TodoKey ${key}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, res => {
+    // A connection of its own each time: one the web stopped reading is never reused for the next call.
+    const req = request({ host: '127.0.0.1', port, method: 'POST', path, agent: false, headers: { authorization: `TodoKey ${key}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, res => {
       const chunks: Buffer[] = []; let size = 0;
       res.on('data', (chunk: Buffer) => { size += chunk.length; if (size > MAX_RPC_BYTES) res.destroy(new Error('Tool response too large.')); else chunks.push(chunk); });
       res.on('error', () => reject(uncertain()));
@@ -113,7 +114,8 @@ export async function callWebTools(stateDir: string, path: string, key: string, 
       });
     });
     // Shorter than the providers' own tool timeout (Codex: a minute), so the agent hears that the change is uncertain.
-    req.setTimeout(50_000, () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
+    const deadline = setTimeout(() => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })), 50_000);
+    req.on('close', () => clearTimeout(deadline));
     // Only a connection that was never made is safe to try elsewhere; anything after sending may have been applied.
     req.on('error', error => reject((error as NodeJS.ErrnoException).code === 'ECONNREFUSED' ? Object.assign(new Error('refused'), { unreached: true }) : uncertain()));
     req.end(payload);
