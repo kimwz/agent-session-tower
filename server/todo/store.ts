@@ -415,7 +415,7 @@ export class TodoStore {
           this.run(`DELETE FROM ${table} WHERE deleted_at IS NOT NULL AND deleted_at < ?`, cutoff);
         }
         this.run('DELETE FROM todo_requests WHERE at < ?', new Date(now.getTime() - REQUEST_RETENTION_MS).toISOString());
-        // An issue master goes with its task, once its sessions are hidden and handed over (closed); otherwise later.
+        // An issue master goes with its task, once its sessions are handed over (closed); otherwise later.
         this.run("DELETE FROM todo_agents WHERE state = 'closed' AND NOT EXISTS (SELECT 1 FROM todo_tasks t WHERE t.id = todo_agents.task_id)");
         this.run('DELETE FROM todo_agent_sessions WHERE NOT EXISTS (SELECT 1 FROM todo_agents a WHERE a.task_id = todo_agent_sessions.task_id)');
       });

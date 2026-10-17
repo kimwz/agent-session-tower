@@ -14,8 +14,8 @@ import { TODO_RETENTION_MS, TodoStore } from '../../../server/todo/store.js';
 import { TODO_DATA_TABLES } from '../../../server/todo/schema.js';
 
 /**
- * Issue masters against a real todo file and a fake computer: sessions as a list the test changes, and every hide,
- * show and hand-over recorded in order.
+ * Issue masters against a real todo file and a fake computer: sessions as a list the test changes, and every reopen
+ * and hand-over recorded in order.
  */
 async function fixture(t: TestContext) {
   const dir = await mkdtemp(join(tmpdir(), 'tower-todo-agents-'));
@@ -36,21 +36,20 @@ async function fixture(t: TestContext) {
   };
   const hooks = {
     create: async (input: CreateSessionRequest) => ({ session: session(`issue-${sequence}`, input.cwd) }),
-    setClosed: async (_id: string, _closed: boolean) => {},
+    requestArchive: async (_ids: string[]) => {},
   };
   const agents = new TodoAgents({
     stateDir: dir, store,
     sessions: () => sessions.map(item => ({ ...item })),
     run: id => runs.get(id),
-    setClosed: async (id, closed) => {
-      calls.push(`${closed ? 'hide' : 'show'} ${id}`);
-      await hooks.setClosed(id, closed);
-      if (!closed && cold.has(id)) { sessions.push(cold.get(id)!); cold.delete(id); }
+    reopen: async id => {
+      calls.push(`reopen ${id}`);
+      if (cold.has(id)) { sessions.push(cold.get(id)!); cold.delete(id); }
       const found = sessions.find(item => item.id === id);
-      if (found) found.closed = closed;
+      if (found) found.closed = false;
       return found && { ...found };
     },
-    requestArchive: async ids => { calls.push(`archive ${ids.join(',')}`); },
+    requestArchive: async ids => { calls.push(`archive ${ids.join(',')}`); await hooks.requestArchive(ids); },
     createSession: async input => { created.push(input); return hooks.create(input); },
     uncertain: error => (error as { disposition?: string }).disposition === 'uncertain',
     model: async () => ({ provider: 'claude', model: 'opus', effort: 'high' }),
@@ -123,7 +122,7 @@ test('a start is refused for a closed or gone todo and for one that has a master
   assert.equal(folder('c').endsWith('/todo-masters/c'), true);
 });
 
-test('completing a todo hides its master, its folder and its family and hands them over; reopening shows only the master, from compressed storage too', async t => {
+test('completing a todo hands its master, its folder and its family to retention without hiding or stopping them; reopening takes back only the master, from compressed storage too', async t => {
   const { store, agents, sessions, cold, calls, session, apply, folder } = await fixture(t);
   apply({ op: 'task.create', id: 'a', content: 'A' });
   const { sessionId } = await agents.begin('a', 'go');
@@ -137,12 +136,12 @@ test('completing a todo hides its master, its folder and its family and hands th
   assert.equal(answer.agents.a?.state, 'closing');
   assert.equal(answer.revision, store.revision());
   await agents.schedule();
-  assert.deepEqual(calls, [`hide ${sessionId}`, 'hide extra', 'hide child', `archive ${sessionId},extra,child`]);
+  assert.deepEqual(calls, [`archive ${sessionId},extra,child`], 'its own sub-agents go with it in retention, not one by one');
   assert.equal(store.agent('a')!.state, 'closed');
   assert.equal(store.overview().agents?.a, undefined);
-  assert.equal(sessions.find(item => item.id === sub.id)!.closed, undefined, 'its own sub-agents go with it in retention, not one by one');
-  assert.equal(extra.closed, true);
-  assert.equal(child.closed, true);
+  assert.equal(sub.closed, undefined);
+  assert.equal(extra.closed, undefined);
+  assert.equal(child.closed, undefined);
 
   // Moved to compressed storage meanwhile: reopening asks for it by id, which brings it back.
   const master = sessions.splice(sessions.findIndex(item => item.id === sessionId), 1)[0];
@@ -151,15 +150,16 @@ test('completing a todo hides its master, its folder and its family and hands th
   const reopened = apply({ op: 'task.uncomplete', id: 'a', completionId: 'ca' });
   assert.equal(reopened.agents.a?.state, 'active');
   await agents.schedule();
-  assert.deepEqual(calls, [`show ${sessionId}`]);
-  assert.equal(sessions.find(item => item.id === sessionId)!.closed, false);
-  assert.equal(extra.closed, true);
-  assert.equal(child.closed, true);
-  // Closing again hands the master over again.
+  assert.deepEqual(calls, [`reopen ${sessionId}`]);
+  assert.ok(sessions.some(item => item.id === sessionId));
+  // Reopened while it was still listed (its hand-over not yet carried out), it is taken back all the same.
   calls.length = 0;
   apply(complete('a', 'ca2'));
   await agents.schedule();
-  assert.deepEqual(calls, [`hide ${sessionId}`, `archive ${sessionId}`]);
+  assert.deepEqual(calls, [`archive ${sessionId}`]);
+  apply({ op: 'task.uncomplete', id: 'a', completionId: 'ca2' });
+  await agents.schedule();
+  assert.deepEqual(calls, [`archive ${sessionId}`, `reopen ${sessionId}`]);
 });
 
 test('a repeating todo closes its master only with its last occurrence; deleting closes it and restoring reopens it', async t => {
@@ -209,28 +209,28 @@ test('a restored backup keeps the masters (they are not in it) and moves them to
   assert.equal(store.agent('a')!.state, 'closed');
 });
 
-test('a todo reopened while its master is being closed ends open, with its master shown again', async t => {
+test('a todo reopened while its master is being closed ends open, with its master taken back', async t => {
   const { store, agents, hooks, calls, apply } = await fixture(t);
   apply({ op: 'task.create', id: 'a', content: 'A' });
   const { sessionId } = await agents.begin('a', 'go');
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
-  hooks.setClosed = async (_id, closed) => { if (closed) await held; };
+  hooks.requestArchive = async () => { await held; };
   calls.length = 0;
   apply(complete('a', 'ca'));
   const closing = agents.schedule();
   await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(calls, [`hide ${sessionId}`]);
-  // Reopened while the hide is under way; the pass asked for meanwhile runs after this one.
+  assert.deepEqual(calls, [`archive ${sessionId}`]);
+  // Reopened while the hand-over is under way; the pass asked for meanwhile runs after this one.
   assert.equal(apply({ op: 'task.uncomplete', id: 'a', completionId: 'ca' }).agents.a?.state, 'active');
   release();
   await closing;
   await agents.schedule();
   assert.equal(store.agent('a')!.state, 'active');
-  assert.equal(calls.at(-1), `show ${sessionId}`);
+  assert.equal(calls.at(-1), `reopen ${sessionId}`);
 });
 
-test('an issue master that compacts or starts twice keeps the newest session; the others are hidden and handed over', async t => {
+test('an issue master that compacts or starts twice keeps the newest session; the others are handed over', async t => {
   const { store, agents, calls, session, apply, tick, folder } = await fixture(t);
   apply({ op: 'task.create', id: 'a', content: 'A' });
   const { sessionId } = await agents.begin('a', 'go');
@@ -240,7 +240,7 @@ test('an issue master that compacts or starts twice keeps the newest session; th
   calls.length = 0;
   await agents.schedule();
   assert.equal(store.agent('a')!.sessionId, 'newer');
-  assert.deepEqual(calls, [`hide ${sessionId}`, `archive ${sessionId}`]);
+  assert.deepEqual(calls, [`archive ${sessionId}`]);
 });
 
 test('sessions an issue master starts, directly or through them, join its family; the main master\'s and others\' do not', async t => {
@@ -264,15 +264,15 @@ test('sessions an issue master starts, directly or through them, join its family
   agents.recordFamily({ sessionId: 'owner' });
   assert.deepEqual(store.familyOf('a').map(member => member.sessionId), ['child', 'grandchild']);
 
-  // Closed: a session one of them starts now is hidden and handed over by the next pass.
+  // Closed: a session one of them starts now is handed over by the next pass.
   apply(complete('a', 'ca'));
   await agents.schedule();
   calls.length = 0;
   session('late', '/work/five');
   agents.recordFamily({ sessionId: 'late', delegation: { parentRunId: 'run-child', rootRunId: 'run-master' } });
   await agents.schedule();
-  assert.deepEqual(calls, ['hide late', 'archive late']);
-  assert.equal(sessions.find(item => item.id === 'late')!.closed, true);
+  assert.deepEqual(calls, ['archive late']);
+  assert.equal(sessions.find(item => item.id === 'late')!.closed, undefined);
   assert.deepEqual(store.agentSessions(), {});
   assert.equal(store.hasOpenAgents(), false);
 });
@@ -309,7 +309,7 @@ test('nothing is decided while the sessions cannot be known', async t => {
   const { dir, store } = await fixture(t);
   let asked = 0;
   const agents = new TodoAgents({ stateDir: dir, store, sessions: () => undefined, run: () => undefined,
-    setClosed: async () => { asked++; }, requestArchive: async () => { asked++; }, createSession: async () => { throw new Error('unused'); }, uncertain: () => false,
+    reopen: async () => { asked++; }, requestArchive: async () => { asked++; }, createSession: async () => { throw new Error('unused'); }, uncertain: () => false,
     model: async () => ({ provider: 'codex' }), writeGuide: async () => {}, startHost: async () => {}, onChange: () => {} });
   store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'A' }] }));
   store.changeAgent('a', null, { state: 'active', sessionId: 's', provider: 'codex' });
@@ -370,20 +370,34 @@ test('a long first message never costs the attachments: their paths and the inst
   assert.throws(() => todoAgentPrompt('x'.repeat(31_850), withFile, names, sha256 => `/state/todo-files/${sha256}`), error => kind(error) === 'invalid' && /자 이하로 줄여/.test((error as Error).message));
 });
 
-test('a closed master keeps collecting: a late start in its folder and a family session shown again by hand are hidden and handed over again', async t => {
+test('a closed master keeps collecting: a late start in its folder is handed over too', async t => {
   const { store, agents, calls, session, apply, folder } = await fixture(t);
   apply({ op: 'task.create', id: 'a', content: 'A' });
   await agents.begin('a', 'go');
-  const child = session('child', '/work/one');
+  session('child', '/work/one');
   store.addFamily('child', 'a');
   apply(complete('a', 'ca'));
   await agents.schedule();
   assert.equal(store.agent('a')!.state, 'closed');
   calls.length = 0;
   session('late', folder('a'));
-  child.closed = false;
   await agents.schedule();
-  assert.deepEqual(calls, ['hide late', 'hide child', 'archive late,child']);
+  assert.deepEqual(calls, ['archive late']);
+});
+
+test('after a restart, an open todo\'s master is taken back from retention once, in case a hand-over was left', async t => {
+  const { dir, store, sessions } = await fixture(t);
+  const calls: string[] = [];
+  store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'A' }] }));
+  store.changeAgent('a', null, { state: 'active', sessionId: 'm', provider: 'claude' });
+  sessions.push({ id: 'm', cwd: todoMasterFolder(dir, 'a'), provider: 'claude', status: 'idle', createdAt: '2026-10-17T09:00:00.000Z', isSubagent: false });
+  const again = new TodoAgents({ stateDir: dir, store, sessions: () => sessions.map(item => ({ ...item })), run: () => undefined,
+    reopen: async id => { calls.push(`reopen ${id}`); return sessions.find(item => item.id === id); }, requestArchive: async ids => { calls.push(`archive ${ids.join(',')}`); },
+    createSession: async () => { throw new Error('unused'); }, uncertain: () => false, model: async () => ({ provider: 'claude' }), writeGuide: async () => {}, startHost: async () => {}, onChange: () => {} });
+  t.after(() => again.close());
+  await again.schedule();
+  await again.schedule();
+  assert.deepEqual(calls, ['reopen m']);
 });
 
 test('a closed master\'s family record waits for a session recorded but not listed yet, and for its master\'s own work', async t => {
