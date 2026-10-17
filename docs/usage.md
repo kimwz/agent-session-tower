@@ -73,10 +73,10 @@ Search and provider, time, and status filters narrow the graph. Blue **새 활�
 - The sidebar holds **관리함** (Inbox), **오늘** (Today: overdue and due today), **다가오는** (Upcoming), labels, projects (up to three levels, colors, favorites, archive) and search.
 - **보드** (Board) shows a project's sections as columns, Today as overdue/today, and Upcoming as days; drag cards between columns to change section, date or priority, and drag section headers to reorder. On a phone one column shows at a time; press and hold a card to drag it.
 - **캘린더** (Calendar) shows a month or a week (three days on a phone) with a time grid. Drag tasks to another day or time, drag a block's lower edge to change its duration, click an empty slot to add a task there, and drag undated tasks from **날짜 없음**. Later dates of repeating tasks show faded and read-only. **Shift V** switches board and calendar.
-- **Q** opens quick add. It reads `#project`, `/section`, `@label`, `p1`–`p4`, `{deadline}`, dates and times such as `내일 오후 3시`, `10월 20일`, `next fri 15:00`, durations such as `1시간`, and repeats such as `매일`, `평일`, `매주 월,수`, `매월 15일`, `3일마다` (counted from completion). Click a recognized word to keep it as plain text.
+- **Q** opens quick add. It reads `#project`, `/section`, `@label`, `p1`–`p4`, `{deadline}`, dates and times such as `내일 오후 3시`, `10월 20일`, `next fri 15:00`, durations such as `1시간`, and repeats such as `매일`, `평일`, `매주 월,수`, `매월 15일`, `3일마다`, and `완료 후 3일마다` (counted from completion). Click a recognized word to keep it as plain text.
 - A task has a description (Markdown), date and time, repeat, deadline, duration, priority, labels, sub-tasks (four levels), comments and attachments (up to 100 MB each; images show a preview).
 - **다음** (Next) links say which task comes after which. They only order work: either task can be done first. **완료 및 후속작업** (Complete and add next, **Shift E**, or press and hold the check circle on a phone) completes a task and adds the next one in one step.
-- **⌘Z** undoes the last change. Deleted tasks, sections, projects and attachments can be restored for 30 days.
+- **⌘Z** or a toast's **되돌리기** (Undo) takes back a change, a delete included. Deleted tasks, sections, projects and attachments are kept for 30 days before they are removed for good.
 - Automatic backups include todos and their attachments; an exported backup file includes the todos but not attachment contents.
 
 ## Existing sessions and new work

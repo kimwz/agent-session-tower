@@ -107,7 +107,7 @@ test('the uploads run two at a time, refuse too large files, hand finished ones 
     complete: async id => ({ file: file(id), changes: changes([file(id)]) }),
     cancel: async id => { toasts.push(`cancel:${id}`); },
   };
-  const uploads = new TodoUploads(io, { receive: value => { received.push(value); }, toast: text => { toasts.push(text); return 0; } });
+  const uploads = new TodoUploads(io, { receive: value => { received.push(value); }, toast: text => { toasts.push(text); return 0; }, apply: () => true });
   const big = Object.assign(new Blob([]), { name: 'huge.bin' });
   Object.defineProperty(big, 'size', { value: TODO_FILE_MAX_BYTES + 1 });
   uploads.add([Object.assign(blob(3), { name: 'a.txt' }), Object.assign(blob(3), { name: 'b.txt' }), Object.assign(blob(3), { name: 'c.txt' }), big], { taskId: 't' });
@@ -164,7 +164,7 @@ test('after the page goes, no queued file starts and no late answer is kept', as
     complete: async id => ({ file: file(id), changes: changes([file(id)]) }),
     cancel: async () => undefined,
   };
-  const uploads = new TodoUploads(io, { receive: value => { received.push(value); }, toast: () => 0 });
+  const uploads = new TodoUploads(io, { receive: value => { received.push(value); }, toast: () => 0, apply: () => true });
   uploads.add(['a', 'b', 'c'].map(name => Object.assign(blob(3), { name })), { taskId: 't' });
   await settle();
   assert.equal(started, 2);
@@ -189,7 +189,7 @@ test('while the server makes the attachment, the upload cannot be cancelled', as
     complete: async id => { await new Promise<void>(resolve => { finish = resolve; }); return { file: file(id), changes: changes([file(id)]) }; },
     cancel: async id => { cancels.push(id); },
   };
-  const uploads = new TodoUploads(io, { receive: value => { received.push(value); }, toast: () => 0 });
+  const uploads = new TodoUploads(io, { receive: value => { received.push(value); }, toast: () => 0, apply: () => true });
   uploads.add([Object.assign(blob(3), { name: 'a' })], { taskId: 't' });
   await settle();
   assert.equal(uploads.getJobs()[0].status, 'finishing');
@@ -200,4 +200,26 @@ test('while the server makes the attachment, the upload cannot be cancelled', as
   assert.deepEqual(cancels, []);
   assert.equal(received.length, 1, 'the attachment made is shown, not left unseen on the server');
   uploads.dispose();
+});
+
+test('a cancel after a completion whose answer was lost deletes the file the server may have made', async () => {
+  const calls: string[] = [];
+  const applied: unknown[] = [];
+  let lose = true;
+  const io: UploadIO = {
+    start: async () => ({ id: 'u1', offset: 0 }),
+    offset: async () => 3,
+    append: async (_id, offset, piece) => ({ offset: offset + piece.size }),
+    complete: async id => { calls.push('complete'); if (lose) { lose = false; throw new TypeError('answer lost'); } return { file: file('f1'), changes: changes([file('f1')]) }; },
+    cancel: async id => { calls.push(`cancel:${id}`); },
+  };
+  const uploads = new TodoUploads(io, { receive: () => undefined, toast: () => 0, apply: ops => { applied.push(...ops); return true; } });
+  uploads.add([Object.assign(blob(3), { name: 'a' })], { taskId: 't' });
+  await settle();
+  assert.equal(uploads.getJobs()[0].status, 'failed');
+  uploads.cancel(uploads.getJobs()[0].key);
+  await settle();
+  assert.deepEqual(calls, ['complete', 'complete']);
+  assert.deepEqual(applied, [{ op: 'file.delete', id: 'f1' }]);
+  assert.deepEqual(uploads.getJobs(), []);
 });

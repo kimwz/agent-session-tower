@@ -68,7 +68,7 @@ export function createActions(client: TodoClient, host: ActionHost) {
       if (!client.apply([completeOp(task, client.today())])) return;
       const repeat = task.recurrence ? world().tasks[task.id]?.dueDate : null;
       client.toast(repeat && !world().tasks[task.id]?.completedAt ? t('완료했습니다. 다음 반복: {0}', { 0: dateLabel(repeat, client.today()) }) : t('“{0}” 완료', { 0: task.content }), 'info', [
-        { label: t('되돌리기'), run: () => client.undo() },
+        ...client.undoActions(),
         ...(following[0] ? [{ label: t('다음: {0}', { 0: following[0].content }), run: () => host.openTask(following[0].id) }] : []),
       ]);
     },
@@ -85,7 +85,7 @@ export function createActions(client: TodoClient, host: ActionHost) {
       client.apply([{ op: 'task.uncomplete', id: task.id, completionId: id }]);
     },
     remove(task: TodoTask) {
-      if (client.apply([{ op: 'task.delete', id: task.id }])) client.toast(t('“{0}” 삭제', { 0: task.content }), 'info', [{ label: t('되돌리기'), run: () => client.undo() }]);
+      if (client.apply([{ op: 'task.delete', id: task.id }])) client.toast(t('“{0}” 삭제', { 0: task.content }), 'info', client.undoActions());
     },
     priority(task: TodoTask, priority: TodoPriority) { if (task.priority !== priority) client.apply([{ op: 'task.update', id: task.id, patch: { priority } }]); },
     date(task: TodoTask, dueDate: string | null) { if (task.dueDate !== dueDate) client.apply([{ op: 'task.update', id: task.id, patch: { dueDate } }]); },

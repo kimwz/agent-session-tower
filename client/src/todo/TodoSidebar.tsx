@@ -68,7 +68,7 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
   const inbox = world.projects.find(project => project.inbox);
   const fold = (key: string) => setFolded(previous => { const next = new Set(previous); if (next.has(key)) next.delete(key); else next.add(key); return next; });
   const openMenu = (anchor: HTMLElement, label: string, items: (MenuItem | 'separator')[]) => { menuAnchor.current = anchor; setMenu({ anchor, items, label }); };
-  const removed = (name: string) => client.toast(t('“{0}” 삭제', { 0: name }), 'info', [{ label: t('되돌리기'), run: () => client.undo() }]);
+  const removed = (name: string) => client.toast(t('“{0}” 삭제', { 0: name }), 'info', client.undoActions());
 
   const projectMenu = (project: TodoProject, anchor: HTMLElement, depth: number) => openMenu(anchor, project.name, [
     { key: 'rename', label: t('이름 바꾸기'), icon: <Pencil size={13} />, run: () => setEditing({ kind: 'project', id: project.id }) },
@@ -76,7 +76,7 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
     { key: 'favorite', label: project.favorite ? t('즐겨찾기에서 빼기') : t('즐겨찾기에 추가'), icon: <Heart size={13} />, run: () => client.apply([{ op: 'project.update', id: project.id, patch: { favorite: !project.favorite } }]) },
     { key: 'color', label: t('색 바꾸기'), icon: <Palette size={13} />, run: () => { colorAnchor.current = anchor; setColor({ anchor, value: project.color, pick: value => client.apply([{ op: 'project.update', id: project.id, patch: { color: value } }]) }); } },
     'separator',
-    { key: 'archive', label: t('보관'), icon: <Archive size={13} />, run: () => { if (client.apply([{ op: 'project.update', id: project.id, patch: { archived: true } }])) client.toast(t('“{0}” 보관', { 0: project.name }), 'info', [{ label: t('되돌리기'), run: () => client.undo() }]); } },
+    { key: 'archive', label: t('보관'), icon: <Archive size={13} />, run: () => { if (client.apply([{ op: 'project.update', id: project.id, patch: { archived: true } }])) client.toast(t('“{0}” 보관', { 0: project.name }), 'info', client.undoActions()); } },
     { key: 'delete', label: t('삭제'), danger: true, icon: <Trash2 size={13} />, run: () => { if (client.apply([{ op: 'project.delete', id: project.id }])) { removed(project.name); if (current === `p:${project.id}`) onNavigate({ kind: 'today' }); } } },
   ]);
   const labelMenu = (label: TodoLabel, anchor: HTMLElement) => openMenu(anchor, label.name, [

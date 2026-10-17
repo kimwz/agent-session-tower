@@ -59,6 +59,8 @@ export interface UploadJob {
   uploadId?: string;
   chunkBytes: number;
   error?: string;
+  /** Asked to complete once: the server may have made the file even when its answer was lost. */
+  completing?: boolean;
 }
 
 export function newJob(key: string, file: Blob & { name?: string }, target: { taskId: string; commentId?: string | null }): UploadJob {
@@ -102,7 +104,7 @@ export async function runUpload(job: UploadJob, io: UploadIO, signal: AbortSigna
       if (answer.offset <= piece.start) throw new Error('업로드 위치가 올바르지 않습니다.');
       update({ offset: checkedOffset(answer.offset, current.size), chunkBytes: nextChunkBytes(current.chunkBytes, now() - began) });
     }
-    update({ status: 'finishing' });
+    update({ status: 'finishing', completing: true });
     const done = await io.complete(id, signal);
     if ('conflict' in done) { update({ status: 'uploading', offset: checkedOffset(done.conflict, current.size) }); continue; }
     update({ status: 'done', offset: current.size });

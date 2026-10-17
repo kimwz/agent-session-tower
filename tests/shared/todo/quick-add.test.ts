@@ -154,3 +154,11 @@ test('the first date of a rule is on or after today', () => {
 function pick(result: ReturnType<typeof parse>) {
   return { content: result.content, dueDate: result.dueDate, dueTime: result.dueTime, durationMin: result.durationMin };
 }
+
+test('a date that does not exist stays text instead of becoming another day', () => {
+  for (const text of ['회의 13/1', '회의 10월 0일', '회의 0일', '회의 2/30']) {
+    const result = parse(text);
+    assert.equal(result.dueDate, undefined, text);
+    assert.equal(result.content, text, text);
+  }
+});

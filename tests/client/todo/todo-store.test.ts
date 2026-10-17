@@ -5,7 +5,7 @@ import type { TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoTask, 
 import { ApiError } from '../../../client/src/common/lib.js';
 import { TodoClient, type TodoTransport } from '../../../client/src/todo/todo-store.js';
 import { applyOps, inverseOps, mergeChanges, withDetail, worldFromOverview } from '../../../client/src/todo/todo-model.js';
-import { createActions } from '../../../client/src/todo/todo-actions.js';
+import { createActions, quickAddOps } from '../../../client/src/todo/todo-actions.js';
 import { overview, project, task } from './fixtures.js';
 
 const changes = (revision: number, patch: Partial<TodoChanges> = {}): TodoChanges => ({ revision, projects: [], sections: [], labels: [], tasks: [], links: [], removedLinks: [], comments: [], files: [], ...patch });
@@ -314,4 +314,60 @@ test('an upload answer older than the overview is not counted again, and the ove
   assert.equal(client.getState().world.fileCounts.a, 2);
   await settle();
   assert.equal(transport.reads.overview, reads + 1);
+});
+
+test('a toast’s undo takes back its own change, even after another was made', async () => {
+  const { client, transport } = await ready();
+  client.apply([{ op: 'task.complete', id: 'a', completionId: 'done-1', occurrence: null, today: '2026-10-14' }]);
+  const [undoA] = client.undoActions();
+  client.apply([{ op: 'task.update', id: 'b', patch: { priority: 1 } }]);
+  undoA.run();
+  assert.equal(client.getState().world.tasks.a.completedAt, null);
+  assert.equal(client.getState().world.tasks.b.priority, 1);
+  assert.equal(client.getState().canUndo, true, 'the later change can still be undone');
+  await settle();
+  assert.deepEqual(transport.requests.flatMap(request => request.ops).map(op => op.op), ['task.complete', 'task.update', 'task.uncomplete']);
+});
+
+test('a detail read while a change is saved is read again, so an older answer never shows', async () => {
+  const transport = new FakeTransport();
+  let release!: () => void;
+  const late = new Promise<void>(resolve => { release = resolve; });
+  const detail = transport.detail.bind(transport);
+  let first = true;
+  transport.detail = async id => { const answer = await detail(id); if (first) { first = false; await late; } return answer; };
+  transport.answer = async request => { transport.current.tasks = transport.current.tasks.map(item => item.id === 'a' ? { ...item, content: 'new' } : item); return changes(++transport.current.revision, { tasks: transport.current.tasks.filter(item => item.id === 'a') }); };
+  const { client } = await ready(transport);
+  client.openDetail('a');
+  client.apply([{ op: 'task.update', id: 'a', patch: { content: 'new' } }]);
+  await settle();
+  release();
+  await settle();
+  assert.equal(client.getState().world.detail?.task.content, 'new');
+  assert.equal(transport.reads.detail, 2);
+});
+
+test('the completed list is read again when a task in it changes', async () => {
+  const transport = new FakeTransport();
+  transport.completedPages.push(async () => ({ items: [{ completion: { id: 'c', taskId: 'b', occurrenceDate: null, completedAt: 'x' }, task: task('b', { content: 'B', completedAt: 'x' }) }] }));
+  const { client } = await ready(transport);
+  await client.readCompleted('');
+  const before = transport.reads.completed;
+  client.apply([{ op: 'task.update', id: 'b', patch: { content: 'renamed' } }]);
+  await settle();
+  assert.equal(transport.reads.completed, before + 1);
+});
+
+test('complete and add next is one call: complete, new labels, the task, then the link', () => {
+  const draft = { content: 'Next', description: '', result: { projectId: 'inbox', labelIds: [], newLabels: ['new'], priority: 4 as const } };
+  const before = task('a', { content: 'A' });
+  const kinds = (ops: { op: string }[]) => ops.map(op => op.op);
+  assert.deepEqual(kinds(quickAddOps(draft, { taskId: 'a', complete: true }, before, '2026-10-14').ops), ['task.complete', 'label.create', 'task.create', 'link.create']);
+  assert.deepEqual(kinds(quickAddOps(draft, { taskId: 'a', complete: false }, before, '2026-10-14').ops), ['label.create', 'task.create', 'link.create']);
+  assert.deepEqual(kinds(quickAddOps(draft, { taskId: 'a', complete: true }, { ...before, completedAt: 'x' }, '2026-10-14').ops), ['label.create', 'task.create', 'link.create']);
+  const { ops, id } = quickAddOps(draft, { taskId: 'a', complete: true }, before, '2026-10-14');
+  const created = ops.find(op => op.op === 'task.create') as { id: string; labelIds?: string[] };
+  assert.equal(created.id, id);
+  assert.deepEqual(created.labelIds, [(ops.find(op => op.op === 'label.create') as { id: string }).id]);
+  assert.deepEqual(ops.at(-1), { op: 'link.create', id: (ops.at(-1) as { id: string }).id, fromTaskId: 'a', toTaskId: id });
 });

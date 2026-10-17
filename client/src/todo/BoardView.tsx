@@ -48,10 +48,18 @@ const collisions: CollisionDetection = args => {
 
 const transformOf = (transform: { x: number; y: number } | null) => transform ? `translate3d(${Math.round(transform.x)}px, ${Math.round(transform.y)}px, 0)` : undefined;
 
-function SortableCard({ task, column, disabled, ...props }: { task: TodoTask; column: BoardColumn; disabled: boolean } & Omit<TaskCardProps, 'task'>) {
-  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: cardId(task.id), data: { type: 'task', task, column }, disabled });
+/**
+ * A card's drag starts on the card itself: Space lifts it (Enter opens it), a key on one of its buttons is that button's,
+ * and a touch held on the check circle completes and adds the next task instead.
+ */
+function SortableCard({ task, column, ...props }: { task: TodoTask; column: BoardColumn } & Omit<TaskCardProps, 'task'>) {
+  // A column that stands for no value (overdue, later) takes no drop, but its cards still move to the others.
+  const { setNodeRef, attributes, listeners, transform, transition, isDragging } = useSortable({ id: cardId(task.id), data: { type: 'task', task, column }, disabled: { draggable: false, droppable: !column.drop } });
   const style: CSSProperties = { transform: transformOf(transform), transition, opacity: isDragging ? 0.35 : undefined };
-  return <div ref={setNodeRef} style={style} className="todo-sortable" {...attributes} {...listeners} tabIndex={-1} role={undefined}>
+  const control = (target: EventTarget) => target instanceof Element && !!target.closest('button, a, input, textarea');
+  return <div ref={setNodeRef} style={style} className="todo-sortable" {...attributes} {...listeners} tabIndex={-1} role={undefined}
+    onKeyDown={event => { if (!control(event.target)) listeners?.onKeyDown?.(event); }}
+    onTouchStart={event => { if (!(event.target instanceof Element && event.target.closest('.todo-check'))) listeners?.onTouchStart?.(event); }}>
     <TaskCard task={task} {...props} />
   </div>;
 }
@@ -151,7 +159,7 @@ export function BoardView(board: BoardProps) {
 
   const renderColumn = (column: BoardColumn) => <Column key={column.id} column={column} board={board} active={!!activeTask} over={overColumn === column.id}>
     <SortableContext items={column.tasks.map(task => cardId(task.id))} strategy={verticalListSortingStrategy}>
-      {column.tasks.map(task => <SortableCard key={task.id} task={task} column={column} disabled={!column.drop && !manual} context={context} selected={board.selectedId === task.id} {...board.card} />)}
+      {column.tasks.map(task => <SortableCard key={task.id} task={task} column={column} context={context} selected={board.selectedId === task.id} {...board.card} />)}
     </SortableContext>
   </Column>;
 

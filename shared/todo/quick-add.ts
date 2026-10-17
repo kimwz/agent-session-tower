@@ -79,6 +79,7 @@ function weekdayOfWeek(today: string, day: number, weeks: number): string {
 }
 /** A month and day from now on: this year's, or next year's when it has passed. */
 function upcomingDate(today: string, month: number, day: number): string | undefined {
+  if (month < 1 || month > 12 || day < 1) return undefined;
   const { year } = dateParts(today);
   for (const candidate of [year, year + 1]) {
     if (day > daysInMonth(candidate, month)) continue;
@@ -88,6 +89,7 @@ function upcomingDate(today: string, month: number, day: number): string | undef
   return undefined;
 }
 function upcomingMonthDay(today: string, day: number): string | undefined {
+  if (day < 1) return undefined;
   const { year, month } = dateParts(today);
   for (let step = 0; step < 12; step++) {
     const first = formatDate(year, month + step, 1);

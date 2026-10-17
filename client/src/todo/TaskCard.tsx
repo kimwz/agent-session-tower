@@ -89,4 +89,4 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
 }
 
 /** The first line of a Markdown description, without its marks. */
-export const plain = (text: string) => (text.split('\n').find(line => line.trim()) ?? '').replace(/[#>*_`~[\]]/g, '').replace(/\(([^)]*)\)/g, '').trim().slice(0, 140);
+export const plain = (text: string) => (text.split('\n').find(line => line.trim()) ?? '').replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[#>*_`~[\]]/g, '').trim().slice(0, 140);

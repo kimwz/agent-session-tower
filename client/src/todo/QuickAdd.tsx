@@ -78,7 +78,7 @@ export function QuickAdd({ world, today, client, preset, follow, onClose, onAdde
     } };
     const { ops, id } = preset.parentId ? createTaskOps(draft, { parentId: preset.parentId }) : quickAddOps(draft, follow, before, today);
     if (!client.apply(ops)) return;
-    if (follow?.complete && before) client.toast(t('“{0}” 완료, 다음 작업 추가', { 0: before.content }), 'info', [{ label: t('되돌리기'), run: () => client.undo() }]);
+    if (follow?.complete && before) client.toast(t('“{0}” 완료, 다음 작업 추가', { 0: before.content }), 'info', client.undoActions());
     onAdded(id);
     onClose();
   };
@@ -111,7 +111,7 @@ export function QuickAdd({ world, today, client, preset, follow, onClose, onAdde
       <div className="todo-quick-chips">
         <DateChip value={date} today={today} onChange={patch => { dropTokens(DATE_KINDS); setManual(previous => ({ ...previous, date: { ...date, ...patch } })); }} />
         <PriorityChip value={priority} onChange={value => { dropTokens(['priority']); setManual(previous => ({ ...previous, priority: value })); }} />
-        <LabelChip world={world} selected={labelIds} client={client} onChange={ids => { setText(value => without(value, parsed.tokens.filter(token => token.kind === 'label' && !ids.some(id => token.text.slice(1).toLocaleLowerCase() === world.labels.find(label => label.id === id)?.name.toLocaleLowerCase())))); setManual(previous => ({ ...previous, labelIds: ids })); }} />
+        <LabelChip world={world} selected={labelIds} client={client} onChange={ids => { setText(value => without(value, parsed.tokens.filter(token => token.kind === 'label' && unpicked(world, token.text, ids)))); setManual(previous => ({ ...previous, labelIds: ids })); }} />
         <DeadlineChip value={deadline} today={today} onChange={value => { dropTokens(['deadline']); setManual(previous => ({ ...previous, deadline: value })); }} />
         {!preset.parentId && <ProjectChip world={world} projectId={projectId} sectionId={sectionId} onChange={place => { dropTokens(['project', 'section']); setManual(previous => ({ ...previous, place })); }} />}
       </div>
@@ -123,6 +123,12 @@ export function QuickAdd({ world, today, client, preset, follow, onClose, onAdde
     </div>
   </div>;
 }
+
+/** A typed `@label` of an existing label the chip has unticked; a new label's word stays to be created. */
+const unpicked = (world: TodoWorld, word: string, ids: string[]) => {
+  const label = world.labels.find(item => item.name.toLocaleLowerCase() === word.slice(1).toLocaleLowerCase());
+  return !!label && !ids.includes(label.id);
+};
 
 function DateChip({ value, today, onChange }: { value: DateValue; today: string; onChange: (patch: Partial<DateValue>) => void }) {
   const popover = usePopover();

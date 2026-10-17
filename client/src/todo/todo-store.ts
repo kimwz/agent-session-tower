@@ -61,7 +61,8 @@ export interface TodoState {
   canUndo: boolean;
 }
 
-interface Action { ops: TodoOp[]; undo: TodoOp[] | null; settled?: (ok: boolean) => void }
+interface Action { ops: TodoOp[]; undo: TodoOp[] | null; settled?: (ok: boolean) => void; refused?: boolean }
+type Undo = { ops: TodoOp[]; action: Action };
 
 export const BATCH_MS = 300;
 const MAX_BATCH_OPS = 90;
@@ -80,7 +81,7 @@ export class TodoClient {
   private detailRead = 0;
   /** Each completed-list load takes a number; an answer to an older one than the latest is dropped. */
   private completedRead = 0;
-  private lastUndo: { ops: TodoOp[]; action: Action } | null = null;
+  private lastUndo: Undo | null = null;
   private toastId = 0;
   private toastTimers = new Set<ReturnType<typeof setTimeout>>();
   private listeners = new Set<() => void>();
@@ -154,9 +155,12 @@ export class TodoClient {
 
   private async readDetail(id: string) {
     const ticket = ++this.detailRead;
+    const revision = this.base.revision;
     try {
       const detail = await this.transport.detail(id);
       if (ticket !== this.detailRead || this.state.detailId !== id) return;
+      // Something was saved while it was read: the answer may be older than that, so it is read again.
+      if (this.base.revision !== revision) { void this.readDetail(id); return; }
       this.base = withDetail(this.base, detail);
       this.publish({ detailError: '' });
     } catch (error) {
@@ -230,16 +234,25 @@ export class TodoClient {
     this.base = mergeChanges(this.base, changes);
     this.publish();
     if (this.state.detailId && touchesDetail(this.base.detail, changes)) void this.readDetail(this.state.detailId);
-    if (this.state.completed && ops.some(op => op.op === 'task.complete' || op.op === 'task.uncomplete' || op.op === 'task.delete' || op.op === 'task.restore')) void this.readCompleted(this.state.completed.projectId);
+    if (this.state.completed && touchesCompleted(this.state.completed, ops)) void this.readCompleted(this.state.completed.projectId);
     this.pump();
   }
 
   /** Takes back the last change. */
   undo(): boolean {
+    return this.lastUndo ? this.takeBack(this.lastUndo) : false;
+  }
+
+  /** A toast's undo: it takes back the change just made, even after others were made since. */
+  undoActions(): TodoToastAction[] {
     const last = this.lastUndo;
-    if (!last) return false;
-    this.lastUndo = null;
-    return this.apply(last.ops, { undoable: false });
+    return last ? [{ label: t('되돌리기'), run: () => { this.takeBack(last); } }] : [];
+  }
+
+  private takeBack(undo: Undo): boolean {
+    if (this.lastUndo === undo) this.lastUndo = null;
+    if (undo.action.refused) return false;
+    return this.apply(undo.ops, { undoable: false });
   }
 
   private flush() {
@@ -266,6 +279,7 @@ export class TodoClient {
         return this.send(batch, request, attempt + 1);
       }
       this.inflight = null;
+      for (const action of batch) action.refused = true;
       if (this.lastUndo && batch.includes(this.lastUndo.action)) this.lastUndo = null;
       this.publish();
       this.toast(t('변경을 저장하지 못했습니다: {0}', { 0: message(error) }), 'error');
@@ -296,6 +310,13 @@ export class TodoClient {
     this.toastTimers.clear();
     this.listeners.clear();
   }
+}
+
+const COMPLETED_OPS = new Set<TodoOp['op']>(['task.complete', 'task.uncomplete', 'task.delete', 'task.restore']);
+/** Whether a change may show in the completed list: it completes or reopens a task, or changes one listed. */
+function touchesCompleted(list: CompletedList, ops: readonly TodoOp[]): boolean {
+  const listed = new Set(list.items.map(item => item.task.id));
+  return ops.some(op => COMPLETED_OPS.has(op.op) || ('id' in op && typeof op.id === 'string' && listed.has(op.id)));
 }
 
 const message = (error: unknown) => error instanceof Error ? translateMessage(error.message) : t('요청을 처리하지 못했습니다.');

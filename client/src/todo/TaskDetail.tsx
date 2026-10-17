@@ -127,18 +127,30 @@ export const DETAIL_PROPERTIES: PropertyRow[] = [
 
 function EditableTitle({ task, actions, readOnly }: { task: TodoTask; actions: TodoActions; readOnly: boolean }) {
   const [value, setValue] = useState(task.content);
+  const cancelled = useRef(false);
   useEffect(() => setValue(task.content), [task.content]);
-  const save = () => { const next = value.replace(/\s+/g, ' ').trim(); if (next && next !== task.content) actions.update(task, { content: next.slice(0, 500) }); else setValue(task.content); };
+  const save = () => { if (cancelled.current) { cancelled.current = false; return; } const next = value.replace(/\s+/g, ' ').trim(); if (next && next !== task.content) actions.update(task, { content: next.slice(0, 500) }); else setValue(task.content); };
   return <textarea className="todo-detail-title" value={value} rows={1} maxLength={500} readOnly={readOnly} aria-label={t('작업 제목')}
     onChange={event => setValue(event.target.value)} onBlur={save}
-    onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.blur(); } if (event.key === 'Escape') { event.stopPropagation(); setValue(task.content); event.currentTarget.blur(); } }} />;
+    onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.blur(); } if (event.key === 'Escape') { event.stopPropagation(); cancelled.current = true; setValue(task.content); event.currentTarget.blur(); } }} />;
 }
 
-function Description({ task, actions, readOnly }: { task: TodoTask; actions: TodoActions; readOnly: boolean }) {
+function Description({ task, client, readOnly }: { task: TodoTask; client: TodoClient; readOnly: boolean }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(task.description);
-  useEffect(() => { if (!editing) setValue(task.description); }, [task.description, editing]);
-  const save = () => { setEditing(false); if (value !== task.description) actions.update(task, { description: value.slice(0, 16_383) }); };
+  // What is being saved: a refused save opens the editor again with it, instead of losing what was written.
+  const saving = useRef<string | null>(null);
+  useEffect(() => { if (!editing && saving.current === null) setValue(task.description); }, [task.description, editing]);
+  const save = () => {
+    setEditing(false);
+    if (value === task.description) return;
+    const text = value.slice(0, 16_383);
+    saving.current = text;
+    void client.applyAndWait([{ op: 'task.update', id: task.id, patch: { description: text } }]).then(saved => {
+      saving.current = null;
+      if (!saved) { setValue(text); setEditing(true); }
+    });
+  };
   if (editing) return <textarea className="todo-description-editor" autoFocus value={value} maxLength={16_383} aria-label={t('설명')} placeholder={t('설명 (Markdown)')}
     onChange={event => setValue(event.target.value)} onBlur={save}
     onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); save(); } if (event.key === 'Escape') { event.stopPropagation(); setValue(task.description); setEditing(false); } }} />;
@@ -249,7 +261,8 @@ function Comments({ task, world, client, readOnly, uploads }: DetailContext) {
     if (!text || sending) return;
     const id = newId(), attach = pending;
     setSending(true);
-    const saved = attach.length ? await client.applyAndWait([{ op: 'comment.create', id, taskId: task.id, body: text.slice(0, 15_000) }]) : client.apply([{ op: 'comment.create', id, taskId: task.id, body: text.slice(0, 15_000) }]);
+    // The draft stays until the server has the comment, so a refused one can be sent again.
+    const saved = await client.applyAndWait([{ op: 'comment.create', id, taskId: task.id, body: text.slice(0, 15_000) }]);
     setSending(false);
     if (!saved) return;
     setBody(''); setPending([]);
@@ -261,7 +274,7 @@ function Comments({ task, world, client, readOnly, uploads }: DetailContext) {
       <div className="todo-comment-meta"><time dateTime={comment.createdAt} title={new Date(comment.createdAt).toLocaleString()}>{relativeTime(comment.createdAt)}{comment.updatedAt !== comment.createdAt && ` · ${t('고침')}`}</time>
         <span className="todo-spacer" />
         {!readOnly && editing !== comment.id && <button type="button" className="icon-button" aria-label={t('댓글 편집')} onClick={() => setEditing(comment.id)}><Pencil size={12} /></button>}
-        {!readOnly && <button type="button" className="icon-button" aria-label={t('댓글 삭제')} onClick={() => { if (client.apply([{ op: 'comment.delete', id: comment.id }])) client.toast(t('댓글을 지웠습니다.'), 'info', [{ label: t('되돌리기'), run: () => client.undo() }]); }}><Trash2 size={12} /></button>}
+        {!readOnly && <button type="button" className="icon-button" aria-label={t('댓글 삭제')} onClick={() => { if (client.apply([{ op: 'comment.delete', id: comment.id }])) client.toast(t('댓글을 지웠습니다.'), 'info', client.undoActions()); }}><Trash2 size={12} /></button>}
       </div>
       {editing === comment.id
         ? <CommentEditor initial={comment.body} onCancel={() => setEditing(null)} onSave={text => { client.apply([{ op: 'comment.update', id: comment.id, body: text }]); setEditing(null); }} />
@@ -287,7 +300,7 @@ function Comments({ task, world, client, readOnly, uploads }: DetailContext) {
 
 /** Deleting a file can be undone from its toast (file.restore). */
 function removeFile(client: TodoClient, file: TodoFile) {
-  if (client.apply([{ op: 'file.delete', id: file.id }])) client.toast(t('“{0}” 삭제', { 0: file.name }), 'info', [{ label: t('되돌리기'), run: () => client.undo() }]);
+  if (client.apply([{ op: 'file.delete', id: file.id }])) client.toast(t('“{0}” 삭제', { 0: file.name }), 'info', client.undoActions());
 }
 
 /** The description's attachments: listed under it, added with the button, by dropping files on the description or pasting them. */
@@ -368,14 +381,14 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
         { key: 'delete', label: t('삭제'), danger: true, icon: <Trash2 size={13} />, run: () => { actions.remove(task); onClose(); } },
       ]} />}
     </header>
-    {!task || !context ? <div className="todo-detail-empty">{error ? <p className="todo-error" role="alert">{error}</p> : <LoaderCircle className="spin" size={18} />}</div> : <div className="todo-detail-body">
+    {!task || !context ? <div className="todo-detail-empty">{error ? <p className="todo-error" role="alert">{error}</p> : <LoaderCircle className="spin" size={18} />}</div> : <div key={task.id} className="todo-detail-body">
       {/* One column on a narrow panel; on a wide one the properties stand on the right (todo.css). */}
       <div className="todo-detail-heading">
         <CheckCircle task={task} onComplete={() => actions.complete(task)} onCompleteNext={() => onFollowUp(task, true)} onReopen={() => void actions.reopen(task)} />
         <EditableTitle key={task.id} task={task} actions={actions} readOnly={readOnly} />
       </div>
       <div className={`todo-description-area ${drop.over ? 'drop-target' : ''}`} {...drop.handlers}>
-        <Description key={`d-${task.id}`} task={task} actions={actions} readOnly={readOnly} />
+        <Description key={`d-${task.id}`} task={task} client={client} readOnly={readOnly} />
         <DescriptionFiles {...context} />
       </div>
       <dl className="todo-properties">

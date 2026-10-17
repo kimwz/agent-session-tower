@@ -11,6 +11,8 @@
 .canvas-only .page-switch span { display:none; }
 .canvas-only .page-switch button { padding:0 8px; }
 .canvas-only .canvas-new-session { left:136px; }
+/* Beside an open conversation on a narrow window the header has no room for the words either. */
+@media (max-width: 900px) { .has-chat .page-switch span { display:none; } .has-chat .page-switch button { padding:0 8px; } }
 
 .todo-workspace { overflow:hidden; }
 .workspace[hidden] { display:none; }

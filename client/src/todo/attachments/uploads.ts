@@ -18,7 +18,7 @@ export class TodoUploads {
   /** The page is gone: nothing starts, and nothing late is shown or kept. */
   private disposed = false;
 
-  constructor(private readonly io: UploadIO, private readonly client: Pick<TodoClient, 'receive' | 'toast'>) {}
+  constructor(private readonly io: UploadIO, private readonly client: Pick<TodoClient, 'receive' | 'toast' | 'apply'>) {}
 
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   getJobs = () => this.jobs;
@@ -53,9 +53,19 @@ export class TodoUploads {
     this.running.get(key)?.abort();
     this.running.delete(key);
     this.set(this.jobs.filter(item => item.key !== key));
+    // best-effort: a file left behind shows on its task, where it can be deleted.
+    if (job.uploadId && job.completing) this.drop(job.uploadId).catch(() => undefined);
     // best-effort: an upload left behind is removed by the server after a day.
-    if (job.uploadId) this.io.cancel(job.uploadId).catch(() => undefined);
+    else if (job.uploadId) this.io.cancel(job.uploadId).catch(() => undefined);
     this.pump();
+  }
+
+  /** A cancel after a completion whose answer was lost: the file may exist, so it is completed and deleted. */
+  private async drop(uploadId: string) {
+    const done = await this.io.complete(uploadId, new AbortController().signal);
+    if ('conflict' in done) { await this.io.cancel(uploadId); return; }
+    this.client.receive(done.changes);
+    this.client.apply([{ op: 'file.delete', id: done.file.id }], { undoable: false });
   }
 
   private pump() {
@@ -82,6 +92,9 @@ export class TodoUploads {
       this.pump();
     }
   }
+
+  /** The page shows: after a `dispose` too, as React's development mode mounts a page twice. */
+  open() { this.disposed = false; }
 
   /** Stops everything when the page goes; the server forgets unfinished uploads by itself. */
   dispose() {

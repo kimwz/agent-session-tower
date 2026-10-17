@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
-import { DndContext, DragOverlay, pointerWithin, useDraggable, useDroppable, type DragEndEvent, type DragStartEvent } from '@dnd-kit/core';
+import { DndContext, DragOverlay, useDraggable, useDroppable, type DragEndEvent, type DragStartEvent } from '@dnd-kit/core';
 import { CalendarX, ChevronLeft, ChevronRight, Flag, Repeat } from 'lucide-react';
 import { dateParts, weekday } from '../../../../shared/todo/dates';
 import type { TodoOp } from '../../../../shared/todo/ops';
@@ -8,7 +8,7 @@ import { getLanguage, translate as t } from '../../i18n/i18n';
 import { Popover } from '../Popover';
 import type { QuickAddPreset } from '../QuickAdd';
 import { colorOf, dateLabel, longDate, monthDay, weekdayName } from '../todo-format';
-import { useTodoSensors } from '../todo-dnd';
+import { pointerOrNearest, useTodoSensors } from '../todo-dnd';
 import type { TodoWorld } from '../todo-model';
 import { cellEntries, resizeCommit, DAY_MINUTES, DEFAULT_DURATION, dayEntries, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, timeOf, visibleRange, yToMinutes, type CalendarEntry, type CalendarMode, type DayEntries } from './calendar-layout';
 
@@ -173,7 +173,8 @@ function Block({ entry, placed, color, props, preview }: { entry: CalendarEntry;
     <time>{timeOf(start)}</time><span>{task.content}</span>
   </div>;
   return <div ref={drag.setNodeRef} className={`todo-cal-block ${entry.kind} ${drag.isDragging ? 'dragging' : ''} ${length < 45 ? 'short' : ''}`} style={style} title={task.content}
-    onClick={event => { event.stopPropagation(); props.onOpen(task.id); }} {...drag.attributes} {...drag.listeners} role="button">
+    onClick={event => { event.stopPropagation(); props.onOpen(task.id); }} {...drag.attributes} {...drag.listeners} role="button"
+    onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); props.onOpen(task.id); } else drag.listeners?.onKeyDown?.(event); }}>
     <time>{timeOf(start)}{length >= 45 && `–${timeOf(Math.min(DAY_MINUTES - 1, start + length))}`}</time>
     <span>{task.content}</span>
     {movable && <span className="todo-cal-resize" aria-hidden="true" onPointerDown={onResize} onMouseDown={event => event.stopPropagation()} onTouchStart={event => event.stopPropagation()} onClick={event => event.stopPropagation()} />}
@@ -243,7 +244,7 @@ export function CalendarView(props: CalendarProps) {
   const [panel, setPanel] = useState(false);
   const [active, setActive] = useState<{ task: TodoTask; block: boolean } | null>(null);
   const [dragging, setDragging] = useState<{ id: string; minutes: number } | null>(null);
-  const sensors = useTodoSensors();
+  const sensors = useTodoSensors('free');
   const color = useColor(props.colorBy, props.world);
   const range = visibleRange(anchor, mode, span);
   const days = useMemo(() => dayEntries(tasks, range.from, range.to, { future }), [tasks, range.from, range.to, future]);
@@ -294,7 +295,7 @@ export function CalendarView(props: CalendarProps) {
       </div>
       <button type="button" className={`todo-tool ${panel ? 'active' : ''}`} aria-pressed={panel} onClick={() => setPanel(value => !value)}><CalendarX size={14} /><span>{t('날짜 없음')}</span>{undated.length > 0 && <b className="todo-cal-count">{undated.length}</b>}</button>
     </div>
-    <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={onStart} onDragMove={onMove} onDragEnd={onEnd} onDragCancel={() => { setActive(null); setDragging(null); }}>
+    <DndContext sensors={sensors} collisionDetection={pointerOrNearest} onDragStart={onStart} onDragMove={onMove} onDragEnd={onEnd} onDragCancel={() => { setActive(null); setDragging(null); }}>
       <div className="todo-cal-body">
         {panel && mobile && <Unscheduled tasks={undated} color={color} props={props} />}
         <div className="todo-cal-main">

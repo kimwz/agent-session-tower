@@ -8,12 +8,14 @@ export type TodoShortcut =
   | { action: 'add' | 'search' | 'layout' | 'today' | 'upcoming' | 'inbox' | 'complete' | 'complete-next' | 'add-next' | 'open' | 'close' | 'undo' }
   | { action: 'priority'; priority: 1 | 2 | 3 | 4 };
 
-export interface ShortcutKey { key: string; shiftKey: boolean; metaKey: boolean; ctrlKey: boolean; altKey: boolean; isComposing?: boolean }
+export interface ShortcutKey { key: string; code?: string; shiftKey: boolean; metaKey: boolean; ctrlKey: boolean; altKey: boolean; isComposing?: boolean }
 
 /** Reads one key; `pending` is whether `G` was the key before. Answers what to do and whether `G` now waits. */
 export function readShortcut(event: ShortcutKey, pending: boolean): { shortcut?: TodoShortcut; pending: boolean } {
   if (event.isComposing) return { pending: false };
-  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  // Letters and digits by where they sit, as the canvas reads them, so a Korean input mode keeps the same keys.
+  const physical = event.code?.match(/^(?:Key|Digit)([A-Z0-9])$/)?.[1];
+  const key = physical ? physical.toLowerCase() : event.key.length === 1 ? event.key.toLowerCase() : event.key;
   if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && key === 'z') return { shortcut: { action: 'undo' }, pending: false };
   if (event.metaKey || event.ctrlKey || event.altKey) return { pending: false };
   if (pending) {

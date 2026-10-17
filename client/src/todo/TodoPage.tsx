@@ -71,10 +71,10 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const chord = useRef(false);
   const { view, task: openTaskId, query } = location;
   const key = viewKey(view);
-  const display = displays[key] ?? loadDisplay(key, defaultDisplay(view));
+  const display = useMemo(() => displays[key] ?? loadDisplay(key, defaultDisplay(view)), [displays, key, view]);
   const readOnly = world.availability.state !== 'ready';
 
-  useEffect(() => { client.start(); return () => { uploads.dispose(); client.dispose(); }; }, [client, uploads]);
+  useEffect(() => { client.start(); uploads.open(); return () => { uploads.dispose(); client.dispose(); }; }, [client, uploads]);
   useEffect(() => { client.noticeRevision(revision); }, [client, revision]);
   // The local date moves at midnight while the page stays open.
   useEffect(() => { const timer = window.setInterval(() => setToday(localToday()), 60_000); return () => window.clearInterval(timer); }, []);
@@ -169,7 +169,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
         case 'complete-next': if (task) current.followUp(task, true); break;
         case 'add-next': if (task) current.followUp(task, false); break;
         case 'priority': if (task) current.actions.priority(task, shortcut.priority); break;
-        case 'open': if (task && !current.openTaskId) current.openTask(task.id); else return; break;
+        // Enter on a focused button or link is that control's, not the task under the mouse.
+        case 'open': if (task && !current.openTaskId && !(event.target instanceof Element && event.target.closest('button, a, select, summary, [role="button"]'))) current.openTask(task.id); else return; break;
         case 'close':
           if (current.openTaskId) current.closeTask();
           else if (current.drawer && current.sidebarOpen) current.onSidebarOpen(false);
@@ -280,7 +281,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       ...(['left', 'right'] as const).flatMap(direction => { const afterId = sectionMoveTarget(siblings, section.id, direction); return afterId === undefined ? [] : [{
         key: direction, label: direction === 'left' ? t('왼쪽으로 옮기기') : t('오른쪽으로 옮기기'), icon: direction === 'left' ? <ChevronLeft size={13} /> : <ChevronRight size={13} />,
         run: () => client.apply([{ op: 'section.move', id: section.id, afterId }]) }]; }),
-      { key: 'delete', label: t('섹션과 작업 삭제'), danger: true, icon: <Trash2 size={13} />, run: () => { if (client.apply([{ op: 'section.delete', id: section.id }])) client.toast(t('“{0}” 삭제', { 0: section.name }), 'info', [{ label: t('되돌리기'), run: () => client.undo() }]); } },
+      { key: 'delete', label: t('섹션과 작업 삭제'), danger: true, icon: <Trash2 size={13} />, run: () => { if (client.apply([{ op: 'section.delete', id: section.id }])) client.toast(t('“{0}” 삭제', { 0: section.name }), 'info', client.undoActions()); } },
     ]} />}
     {sectionRename && !sectionMenu && section && <SectionRename anchor={menuAnchor} name={section.name} onClose={() => setSectionRename(null)} onSave={name => client.apply([{ op: 'section.update', id: section.id, patch: { name } }])} />}
     {state.toasts.length > 0 && <div className="todo-toasts" role="status" aria-live="polite">{state.toasts.map(toast => <div key={toast.id} className={`todo-toast ${toast.tone}`}>
