@@ -1123,3 +1123,32 @@ test('a key file larger than private files usually are is read whole', async t =
   assert.ok(report.applied.includes('todos'), report.errors.join(' '));
   assert.ok(b.todos.fileKeys().length >= 140_000);
 });
+
+test('a key file that reads again while a backup is made counts only from the next backup', async t => {
+  const bucket = await fakeBucket(t);
+  let fix: (() => Promise<void>) | undefined;
+  const a = await computer(t, bucket);
+  a.apply({ op: 'task.create', id: 't', content: 'Task' });
+  const file = randomBytes(PIECE);
+  await a.attach('t', file);
+  const complete = await a.upload();
+  const tables = a.todos.backupData()!.tables;
+  a.service.close(); await a.service.flush(); a.todos.close();
+  for (const name of await readdir(a.stateDir)) if (name.startsWith('todos.sqlite') || name === 'todo-files') await rm(join(a.stateDir, name), { recursive: true, force: true });
+  const again = await computer(t, bucket, { stateDir: a.stateDir, clock: a.clock, skillsGate: async () => { await fix?.(); fix = undefined; } });
+  await keepOne(again, bucket);
+  const keysFile = join(again.stateDir, 'todo-backup-keys.json');
+  await chmod(keysFile, 0o000);
+  t.after(() => chmod(keysFile, 0o600).catch(() => undefined));
+  // Unreadable when the backup starts; readable again while its contents are gathered.
+  fix = () => chmod(keysFile, 0o600);
+  const partial = await again.upload();
+  assert.ok(partial.endsWith('-partial.towerbackup'));
+  assert.ok(bucket.objects.has(complete), 'the backup with the first key stays');
+  const next = await again.upload();
+  assert.equal(next.endsWith('-partial.towerbackup'), false);
+  assert.equal(bucket.objects.has(complete), false);
+  const c = await elsewhere(t, bucket, next);
+  await rowsOnly(c, bucket, tables);
+  assert.deepEqual(await content(c, file), file);
+});

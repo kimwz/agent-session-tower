@@ -335,8 +335,9 @@ export class BackupService {
       // Why this backup cannot hold all the todos, known before it goes up; any of it makes it a partial backup.
       const partial: string[] = [];
       const warnings: string[] = [];
-      // The kept keys read again first, so the snapshot carries them (a fixed file is used again without a restart).
-      let keysReadable = await this.rememberKeys([]);
+      // The kept keys read once, first: the snapshot carries what this read found, and whether it could read decides
+      // the round. A file fixed after this counts from the next round, never for a payload made without its keys.
+      const keysReadable = await this.rememberKeys([]);
       const todos = this.todoSnapshot();
       if (this.options.todos && !todos) partial.push('할 일 저장소를 읽지 못해 할 일이 빠졌습니다');
       if (todos?.newer) partial.push('더 새로운 Tower가 바꾼 할 일 저장소라 이 Tower가 아는 내용만 담았습니다');
@@ -344,8 +345,8 @@ export class BackupService {
       try {
         const text = await encryptBackup(await this.payload(todos, settings), settings.passphrase, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
         // Kept before the backup goes up: a later backup carries these keys even if the todo file is lost meanwhile.
-        if (todos?.part.files) keysReadable = await this.rememberKeys([{ namespace: todos.part.files.namespace, key: todos.part.files.key }, ...todos.part.files.keys ?? []]);
-        if (!keysReadable) {
+        const kept = !todos?.part.files || await this.rememberKeys([{ namespace: todos.part.files.namespace, key: todos.part.files.key }, ...todos.part.files.keys ?? []]);
+        if (!keysReadable || !kept) {
           partial.push('첨부 키 파일을 읽을 수 없어 예전 백업의 첨부 키를 모두 싣지 못했습니다');
           warnings.push(KEYS_UNREADABLE);
         }
