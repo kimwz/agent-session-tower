@@ -9,7 +9,8 @@ import { getLanguage, setLanguage } from '../../../client/src/i18n/i18n.js';
 import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
 import { readShortcut } from '../../../client/src/todo/todo-shortcuts.js';
 import { isTodoPage, pageSearch, readTodoLocation, todoSearch } from '../../../client/src/todo/todo-url.js';
-import { boardColumns, cardContext, defaultDisplay, dropOps, manualOrder, projectOrder, sidebarCounts, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { boardColumns, cardContext, defaultDisplay, dropOps, manualOrder, projectOrder, sectionMoveTarget, sidebarCounts, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { nthOf } from '../../../client/src/todo/DatePicker.js';
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { PageSwitch } from '../../../client/src/todo/PageSwitch.js';
 import { recurrenceLabel } from '../../../client/src/todo/todo-format.js';
@@ -63,7 +64,7 @@ test('today shows overdue and today, every dated task included; archived project
   const columns = boardColumns({ kind: 'today' }, defaultDisplay({ kind: 'today' }), context());
   assert.deepEqual(ids(columns), [['date:overdue', ['b']], ['date:today', ['a', 'c1']]]);
   assert.equal(columns[0].drop, null);
-  const byPriority = boardColumns({ kind: 'today' }, { group: 'priority', sort: 'manual', completed: false }, context());
+  const byPriority = boardColumns({ kind: 'today' }, { ...defaultDisplay({ kind: 'today' }), group: 'priority' }, context());
   assert.deepEqual(ids(byPriority).filter(([, list]) => list.length), [['priority:1', ['b']], ['priority:4', ['a', 'c1']]]);
 });
 
@@ -142,7 +143,7 @@ test('keys: a G chord, task keys, and undo', () => {
 test('every message the Todo page shows has an English version', () => {
   const dir = join(import.meta.dirname, '../../../client/src/todo');
   const keys = new Set<string>();
-  for (const name of readdirSync(dir)) {
+  for (const name of readdirSync(dir, { recursive: true }).map(String).filter(file => /\.tsx?$/.test(file))) {
     const text = readFileSync(join(dir, name), 'utf8');
     for (const match of text.matchAll(/\bt\((['"])((?:(?!\1).)+)\1/g)) keys.add(match[2]);
     // Label tables translated where they are shown.
@@ -151,4 +152,18 @@ test('every message the Todo page shows has an English version', () => {
   }
   assert.ok(keys.size > 100);
   assert.deepEqual([...keys].filter(key => !(key in english)), []);
+});
+
+test('moving a section one place names the section it goes after, and nothing past either end', () => {
+  const sections = [section('a', 'p', { sortKey: 'a' }), section('b', 'p', { sortKey: 'b' }), section('c', 'p', { sortKey: 'c' })];
+  assert.equal(sectionMoveTarget(sections, 'a', 'left'), undefined);
+  assert.equal(sectionMoveTarget(sections, 'b', 'left'), null);
+  assert.equal(sectionMoveTarget(sections, 'c', 'left'), 'a');
+  assert.equal(sectionMoveTarget(sections, 'a', 'right'), 'b');
+  assert.equal(sectionMoveTarget(sections, 'c', 'right'), undefined);
+});
+
+test('a custom monthly repeat starts from the weekday its date is', () => {
+  assert.deepEqual(nthOf('2026-10-12'), { n: 2, weekday: 1 });
+  assert.deepEqual(nthOf('2026-10-30'), { n: -1, weekday: 5 });
 });

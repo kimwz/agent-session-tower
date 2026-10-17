@@ -36,7 +36,15 @@ export interface BoardColumn {
   preset: { projectId?: string; sectionId?: string | null; dueDate?: string; priority?: TodoPriority };
 }
 
-export interface DisplaySettings { group: GroupKey; sort: SortKey; completed: boolean }
+export interface DisplaySettings {
+  group: GroupKey;
+  sort: SortKey;
+  completed: boolean;
+  /** Calendar: month or week, later occurrences of repeating tasks, and coloring by priority or project. */
+  calendar: 'month' | 'week';
+  future: boolean;
+  colorBy: 'priority' | 'project';
+}
 
 export interface ViewContext {
   world: TodoWorld;
@@ -49,6 +57,19 @@ export interface ViewContext {
 
 export const UPCOMING_DAYS = 14;
 
+/**
+ * What a list shows on the calendar: every open task of it, sub-tasks included, since the calendar places tasks by
+ * date rather than by where they sit; the date lists show every task.
+ */
+export function calendarTasks(view: TodoView, context: ViewContext): TodoTask[] {
+  const tasks = openTasks(context.world);
+  switch (view.kind) {
+    case 'inbox': case 'project': { const project = projectOf(context.world, view); return project ? tasks.filter(task => task.projectId === project.id) : []; }
+    case 'today': case 'upcoming': return tasks;
+    case 'label': case 'search': return viewTasks(view, context);
+  }
+}
+
 /** The groupings a kind of list offers, its default first. */
 export function groupingsFor(view: TodoView): GroupKey[] {
   switch (view.kind) {
@@ -58,7 +79,7 @@ export function groupingsFor(view: TodoView): GroupKey[] {
     case 'label': case 'search': return ['project', 'priority'];
   }
 }
-export const defaultDisplay = (view: TodoView): DisplaySettings => ({ group: groupingsFor(view)[0], sort: 'manual', completed: false });
+export const defaultDisplay = (view: TodoView): DisplaySettings => ({ group: groupingsFor(view)[0], sort: 'manual', completed: false, calendar: 'month', future: true, colorBy: 'priority' });
 
 export const projectOf = (world: TodoWorld, view: TodoView): TodoProject | undefined =>
   view.kind === 'inbox' ? world.projects.find(project => project.inbox) : view.kind === 'project' ? world.projects.find(project => project.id === view.id) : undefined;
@@ -169,6 +190,15 @@ const relativeNote = (date: string, today: string) => { const label = dateLabel(
 export function boardColumns(view: TodoView, display: DisplaySettings, context: ViewContext): BoardColumn[] {
   const group = groupingsFor(view).includes(display.group) ? display.group : groupingsFor(view)[0];
   return GROUPINGS[group](view, viewTasks(view, context), context).map(column => ({ ...column, tasks: sortTasks(column.tasks, display.sort, group) }));
+}
+
+/** Where moving a section one place left or right puts it (`afterId`), or undefined at either end. */
+export function sectionMoveTarget(sections: readonly { id: string; sortKey: string }[], id: string, direction: 'left' | 'right'): string | null | undefined {
+  const list = [...sections].sort(byOrder);
+  const index = list.findIndex(item => item.id === id);
+  if (index < 0) return undefined;
+  if (direction === 'left') return index === 0 ? undefined : index === 1 ? null : list[index - 2].id;
+  return index === list.length - 1 ? undefined : list[index + 1].id;
 }
 
 /** What `drop` changes for `task`, as operations; empty when nothing changes. */

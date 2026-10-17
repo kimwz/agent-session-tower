@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { closestCorners, DndContext, DragOverlay, KeyboardSensor, MouseSensor, pointerWithin, TouchSensor, useDroppable, useSensor, useSensors, type CollisionDetection, type DragEndEvent, type DragOverEvent, type DragStartEvent } from '@dnd-kit/core';
-import { horizontalListSortingStrategy, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { closestCorners, DndContext, DragOverlay, pointerWithin, useDroppable, type CollisionDetection, type DragEndEvent, type DragOverEvent, type DragStartEvent } from '@dnd-kit/core';
+import { horizontalListSortingStrategy, SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { useTodoSensors } from './todo-dnd';
 import { GripVertical, MoreHorizontal, Plus } from 'lucide-react';
 import type { TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
@@ -95,16 +96,12 @@ function AddSection({ onAdd }: { onAdd: (name: string) => void }) {
 
 export function BoardView(board: BoardProps) {
   const { columns, context, manual, mobile } = board;
-  const sensors = useSensors(
-    useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
-    // A held touch drags; a moving one scrolls the page.
-    useSensor(TouchSensor, { activationConstraint: { delay: 220, tolerance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
-  );
+  const sensors = useTodoSensors();
   const [activeTask, setActiveTask] = useState<TodoTask | null>(null);
   const [overColumn, setOverColumn] = useState<string | null>(null);
   const [current, setCurrent] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
+  const tabMenu = useRef<HTMLButtonElement>(null);
   const sectionIds = useMemo(() => columns.filter(column => column.sectionId).map(column => sectionDrag(column.sectionId!)), [columns]);
 
   // A phone shows one column at a time; the tabs follow the swipes.
@@ -159,8 +156,13 @@ export function BoardView(board: BoardProps) {
   </Column>;
 
   return <DndContext sensors={sensors} collisionDetection={collisions} onDragStart={onStart} onDragOver={onOver} onDragEnd={onEnd} onDragCancel={() => { setActiveTask(null); setOverColumn(null); }}>
-    {mobile && columns.length > 1 && <div className="todo-column-tabs" role="tablist" aria-label={t('열')}>
-      {columns.map((column, index) => <ColumnTab key={column.id} column={column} index={index} current={index === current} onPick={pick} />)}
+    {mobile && (columns.length > 1 || columns[current]?.sectionId) && <div className="todo-column-tabs-bar">
+      <div className="todo-column-tabs" role="tablist" aria-label={t('열')}>
+        {columns.map((column, index) => <ColumnTab key={column.id} column={column} index={index} current={index === current} onPick={pick} />)}
+      </div>
+      {/* A phone has no column headers: the shown section's menu (rename, move, delete) sits beside the tabs. */}
+      {columns[current]?.sectionId && <button ref={tabMenu} type="button" className="icon-button" aria-label={t('“{0}” 섹션 메뉴', { 0: columns[current].title })}
+        onClick={() => tabMenu.current && board.onSectionMenu(columns[current].sectionId!, tabMenu.current)}><MoreHorizontal size={15} /></button>}
     </div>}
     <div ref={scroller} className={`todo-board ${activeTask ? 'dragging' : ''}`}>
       <SortableContext items={sectionIds} strategy={horizontalListSortingStrategy}>

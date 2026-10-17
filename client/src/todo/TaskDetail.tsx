@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ArrowLeft, ArrowRight, CalendarDays, Check, ChevronDown, Clock3, Flag, Hash, History, Link2, LoaderCircle, MessageSquare, MoreHorizontal, Plus, Tag, Trash2, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, CalendarDays, Check, ChevronDown, Clock3, Flag, Hash, History, Link2, LoaderCircle, MessageSquare, MoreHorizontal, Pencil, Plus, Tag, Trash2, X } from 'lucide-react';
 import type { TodoEvent, TodoPriority, TodoTask } from '../../../shared/todo/types';
 import { relativeTime } from '../common/lib';
 import { translate as t } from '../i18n/i18n';
@@ -220,17 +220,32 @@ function Flow({ task, world, client, onOpen, onFollowUp, readOnly }: DetailConte
   </section>;
 }
 
+function CommentEditor({ initial, onSave, onCancel }: { initial: string; onSave: (body: string) => void; onCancel: () => void }) {
+  const [value, setValue] = useState(initial);
+  const save = () => { const text = value.trim(); if (text && text !== initial) onSave(text.slice(0, 15_000)); else onCancel(); };
+  return <form className="todo-comment-form" onSubmit={event => { event.preventDefault(); save(); }}>
+    <textarea autoFocus value={value} rows={4} maxLength={15_000} aria-label={t('댓글 편집')} onChange={event => setValue(event.target.value)}
+      onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); save(); } if (event.key === 'Escape') { event.stopPropagation(); onCancel(); } }} />
+    <div className="todo-comment-actions"><button type="button" className="todo-secondary" onClick={onCancel}>{t('취소')}</button><button type="submit" className="todo-primary">{t('저장')}</button></div>
+  </form>;
+}
+
 function Comments({ task, world, client, readOnly }: DetailContext) {
   const [body, setBody] = useState('');
+  const [editing, setEditing] = useState<string | null>(null);
   const comments = world.detail?.task.id === task.id ? world.detail.comments : [];
   const send = () => { const text = body.trim(); if (!text) return; if (client.apply([{ op: 'comment.create', id: newId(), taskId: task.id, body: text.slice(0, 15_000) }])) setBody(''); };
   return <section className="todo-detail-section">
     <h4><MessageSquare size={13} />{t('댓글')}{comments.length > 0 && <span>{comments.length}</span>}</h4>
     {comments.length > 0 && <ul className="todo-comments">{comments.map(comment => <li key={comment.id}>
-      <div className="todo-comment-meta"><time dateTime={comment.createdAt} title={new Date(comment.createdAt).toLocaleString()}>{relativeTime(comment.createdAt)}</time>
+      <div className="todo-comment-meta"><time dateTime={comment.createdAt} title={new Date(comment.createdAt).toLocaleString()}>{relativeTime(comment.createdAt)}{comment.updatedAt !== comment.createdAt && ` · ${t('고침')}`}</time>
+        <span className="todo-spacer" />
+        {!readOnly && editing !== comment.id && <button type="button" className="icon-button" aria-label={t('댓글 편집')} onClick={() => setEditing(comment.id)}><Pencil size={12} /></button>}
         {!readOnly && <button type="button" className="icon-button" aria-label={t('댓글 삭제')} onClick={() => { if (client.apply([{ op: 'comment.delete', id: comment.id }])) client.toast(t('댓글을 지웠습니다.'), 'info', [{ label: t('되돌리기'), run: () => client.undo() }]); }}><Trash2 size={12} /></button>}
       </div>
-      <TodoMarkdown>{comment.body}</TodoMarkdown>
+      {editing === comment.id
+        ? <CommentEditor initial={comment.body} onCancel={() => setEditing(null)} onSave={text => { client.apply([{ op: 'comment.update', id: comment.id, body: text }]); setEditing(null); }} />
+        : <TodoMarkdown>{comment.body}</TodoMarkdown>}
     </li>)}</ul>}
     {!readOnly && <form className="todo-comment-form" onSubmit={event => { event.preventDefault(); send(); }}>
       <textarea value={body} rows={body.includes('\n') ? 4 : 2} maxLength={15_000} placeholder={t('댓글 (Markdown)')} aria-label={t('댓글')} onChange={event => setBody(event.target.value)}

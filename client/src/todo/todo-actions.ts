@@ -72,14 +72,17 @@ export function createActions(client: TodoClient, host: ActionHost) {
         ...(following[0] ? [{ label: t('다음: {0}', { 0: following[0].content }), run: () => host.openTask(following[0].id) }] : []),
       ]);
     },
-    async reopen(task: TodoTask) {
-      let completionId = client.completions.get(task.id);
-      if (!completionId) {
-        // The completion that closed it, which only its detail names.
-        try { completionId = (await client.detailOf(task.id)).completions[0]?.id; } catch (error) { client.toast(error instanceof Error ? error.message : String(error), 'error'); return; }
+    /**
+     * Reopens a completion: the one given (a row of the completed list), else the task's latest, read fresh so another
+     * page's later completion is the one undone. The server refuses one that is no longer the latest, and says so.
+     */
+    async reopen(task: TodoTask, completionId?: string) {
+      let id = completionId;
+      if (!id) {
+        try { id = (await client.detailOf(task.id)).completions[0]?.id; } catch (error) { client.toast(error instanceof Error ? error.message : String(error), 'error'); return; }
       }
-      if (!completionId) { client.toast(t('완료 기록을 찾지 못했습니다.'), 'error'); return; }
-      client.apply([{ op: 'task.uncomplete', id: task.id, completionId }]);
+      if (!id) { client.toast(t('완료 기록을 찾지 못했습니다.'), 'error'); return; }
+      client.apply([{ op: 'task.uncomplete', id: task.id, completionId: id }]);
     },
     remove(task: TodoTask) {
       if (client.apply([{ op: 'task.delete', id: task.id }])) client.toast(t('“{0}” 삭제', { 0: task.content }), 'info', [{ label: t('되돌리기'), run: () => client.undo() }]);

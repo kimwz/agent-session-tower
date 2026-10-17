@@ -82,8 +82,6 @@ export class TodoClient {
   private toastId = 0;
   private toastTimers = new Set<ReturnType<typeof setTimeout>>();
   private listeners = new Set<() => void>();
-  /** Completion ids of tasks this page saw completed, so it can reopen them. */
-  readonly completions = new Map<string, string>();
   private state: TodoState = { phase: 'loading', error: '', world: emptyWorld(), detailId: null, detailError: '', completed: null, toasts: [], canUndo: false };
 
   constructor(private readonly transport: TodoTransport, private readonly options: { now?: () => Date; batchMs?: number; toastMs?: number } = {}) {}
@@ -105,19 +103,26 @@ export class TodoClient {
     this.set({ ...patch, world, canUndo: !!this.lastUndo });
   }
 
-  start() { this.wantRead = true; void this.read(); }
+  start() { this.wantRead = true; this.pump(); }
 
   /** The snapshot's todo revision: a newer one means another page changed something. */
   noticeRevision(revision: number | undefined) {
     if (revision === undefined || revision <= this.base.revision) return;
     this.wantRead = true;
-    void this.read();
+    this.pump();
   }
 
-  private busy() { return !!this.inflight || this.queue.length > 0 || this.reading; }
+  /**
+   * What runs next, one thing at a time: changes waiting to be sent go first (once their batch window has closed), then
+   * a read that was asked for meanwhile. Called whenever a read or a request ends.
+   */
+  private pump() {
+    if (this.reading || this.inflight) return;
+    if (this.queue.length) { if (!this.timer) this.flush(); return; }
+    if (this.wantRead) void this.read();
+  }
 
   private async read(): Promise<void> {
-    if (!this.wantRead || this.busy()) return;
     this.wantRead = false;
     this.reading = true;
     try {
@@ -135,8 +140,7 @@ export class TodoClient {
     }
     if (this.state.detailId) void this.readDetail(this.state.detailId);
     if (this.state.completed) void this.readCompleted(this.state.completed.projectId);
-    if (this.wantRead) void this.read();
-    else this.flush();
+    this.pump();
   }
 
   openDetail(id: string | null) {
@@ -151,7 +155,6 @@ export class TodoClient {
     try {
       const detail = await this.transport.detail(id);
       if (ticket !== this.detailRead || this.state.detailId !== id) return;
-      if (detail.completions[0]) this.completions.set(id, detail.completions[0].id);
       this.base = withDetail(this.base, detail);
       this.publish({ detailError: '' });
     } catch (error) {
@@ -169,7 +172,6 @@ export class TodoClient {
     try {
       const page = await this.transport.completed({ projectId: projectId || undefined, before });
       if (this.state.completed?.projectId !== projectId) return;
-      for (const item of page.items) if (!this.completions.has(item.task.id)) this.completions.set(item.task.id, item.completion.id);
       const items = more ? [...this.state.completed.items, ...page.items] : page.items;
       this.set({ completed: { projectId, items, before: page.before, loading: false, error: '' } });
     } catch (error) {
@@ -180,12 +182,8 @@ export class TodoClient {
   hideCompleted() { if (this.state.completed) this.set({ completed: null }); }
 
   search(query: string, completed = false) { return this.transport.search(query, completed); }
-  /** A task's detail without opening it: its completions, to reopen it. */
-  async detailOf(id: string) {
-    const detail = await this.transport.detail(id);
-    if (detail.completions[0]) this.completions.set(id, detail.completions[0].id);
-    return detail;
-  }
+  /** A task's detail without opening it: its latest completion, to reopen it. */
+  detailOf(id: string) { return this.transport.detail(id); }
 
   /**
    * Makes a change. It shows at once and is sent with the others of the next moment as one request; the operations of
@@ -195,7 +193,6 @@ export class TodoClient {
     const availability = this.state.world.availability;
     if (availability.state !== 'ready') { this.toast(availability.state === 'read-only' ? t('할 일이 읽기 전용입니다.') : t('할 일을 사용할 수 없습니다.'), 'error'); return false; }
     if (!ops.length) return false;
-    for (const op of ops) if (op.op === 'task.complete') this.completions.set(op.id, op.completionId);
     const undo = options.undoable === false ? null : inverseOps(this.state.world, ops, newId);
     const action: Action = { ops, undo };
     this.queue.push(action);
@@ -227,10 +224,13 @@ export class TodoClient {
   private async send(batch: Action[], request: TodoRequest, attempt = 0): Promise<void> {
     try {
       const changes = await this.transport.apply(request);
+      // One request moves the revision by one: more means another page changed something in between.
+      if (changes.revision > this.base.revision + 1) this.wantRead = true;
       this.base = mergeChanges(this.base, changes);
       this.inflight = null;
       this.publish();
       if (this.state.detailId && touchesDetail(this.base.detail, changes)) void this.readDetail(this.state.detailId);
+      if (this.state.completed && request.ops.some(op => op.op === 'task.complete' || op.op === 'task.uncomplete' || op.op === 'task.delete' || op.op === 'task.restore')) void this.readCompleted(this.state.completed.projectId);
     } catch (error) {
       // A lost answer is asked again with the same request id, which the server answers without applying it twice.
       if (!(error instanceof ApiError) && attempt < 2) {
@@ -244,8 +244,7 @@ export class TodoClient {
       // Another page changed it first, or it is gone: show what is there now.
       if (error instanceof ApiError && (error.status === 409 || error.status === 404)) this.wantRead = true;
     }
-    if (this.wantRead) void this.read();
-    if (!this.inflight) this.flush();
+    this.pump();
   }
 
   toast(text: string, tone: TodoToast['tone'] = 'info', actions: TodoToastAction[] = []): number {

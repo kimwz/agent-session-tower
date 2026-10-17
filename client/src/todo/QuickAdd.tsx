@@ -19,7 +19,7 @@ import { projectTree } from './todo-views';
  * one request, and nothing at all when cancelled.
  */
 
-export interface QuickAddPreset { projectId?: string; sectionId?: string | null; dueDate?: string; priority?: TodoPriority; labelIds?: string[]; parentId?: string }
+export interface QuickAddPreset { projectId?: string; sectionId?: string | null; dueDate?: string; dueTime?: string; durationMin?: number; priority?: TodoPriority; labelIds?: string[]; parentId?: string }
 
 interface Manual { date?: DateValue; priority?: TodoPriority; labelIds?: string[]; deadline?: string | null; place?: { projectId: string; sectionId: string | null } }
 
@@ -55,7 +55,15 @@ export function QuickAdd({ world, today, client, preset, follow, onClose, onAdde
   const projectId = manual.place?.projectId ?? parsed.projectId ?? baseProject;
   const sectionId = manual.place ? manual.place.sectionId : parsed.sectionId ?? (projectId === baseProject ? preset.sectionId ?? (before && !preset.projectId ? before.sectionId : null) ?? null : null);
   const parsedDate: DateValue = { dueDate: parsed.dueDate ?? null, dueTime: parsed.dueTime ?? null, durationMin: parsed.durationMin ?? null, recurrence: parsed.recurrence ?? null };
-  const date: DateValue = manual.date ?? (parsed.dueDate || parsed.durationMin ? { ...parsedDate, dueDate: parsedDate.dueDate ?? preset.dueDate ?? null } : { dueDate: preset.dueDate ?? null, dueTime: null, durationMin: null, recurrence: null });
+  // A calendar slot starts it at that day and time; typed words replace what they name.
+  const presetDate: DateValue = { dueDate: preset.dueDate ?? null, dueTime: preset.dueDate ? preset.dueTime ?? null : null, durationMin: preset.durationMin ?? null, recurrence: null };
+  const typedDate = parsed.tokens.some(token => token.kind === 'date' || token.kind === 'repeat');
+  const date: DateValue = manual.date ?? {
+    dueDate: typedDate ? parsedDate.dueDate : presetDate.dueDate ?? parsedDate.dueDate,
+    dueTime: parsedDate.dueTime ?? (typedDate ? null : presetDate.dueTime),
+    durationMin: parsedDate.durationMin ?? presetDate.durationMin,
+    recurrence: parsedDate.recurrence,
+  };
   const priority = manual.priority ?? parsed.priority ?? preset.priority ?? 4;
   const labelIds = [...new Set([...parsed.labelIds, ...(manual.labelIds ?? preset.labelIds ?? [])])];
   const deadline = manual.deadline !== undefined ? manual.deadline : parsed.deadlineDate ?? null;

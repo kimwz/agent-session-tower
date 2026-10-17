@@ -93,6 +93,14 @@ export function DatePicker({ value, today, onChange, deadline = false }: { value
   </div>;
 }
 
+type NthWeek = NonNullable<TodoRecurrence['nth']>['n'];
+const ordinals = (): [NthWeek, string][] => [[1, t('첫째')], [2, t('둘째')], [3, t('셋째')], [4, t('넷째')], [5, t('다섯째')], [-1, t('마지막')]];
+/** The nth weekday a date is: its weekday, and which one of the month (the last after the 28th). */
+export function nthOf(date: string): { n: NthWeek; weekday: number } {
+  const { day } = dateParts(date);
+  return { n: day > 28 ? -1 : (Math.ceil(day / 7) as NthWeek), weekday: weekday(date) };
+}
+
 /** Which preset a value's rule is, '' for none and 'custom' for another rule. */
 function presetKey(value: DateValue): string {
   if (!value.recurrence) return '';
@@ -111,6 +119,7 @@ function CustomRepeat({ rule, date, onChange }: { rule: TodoRecurrence; date: st
     if (next.freq !== 'day') delete next.workdays;
     if (!next.until) delete next.until;
     if (!next.fromCompletion) delete next.fromCompletion;
+    for (const key of Object.keys(next) as (keyof TodoRecurrence)[]) if (next[key] === undefined) delete next[key];
     onChange(next);
   };
   const days = rule.weekdays ?? [weekday(date)];
@@ -127,6 +136,22 @@ function CustomRepeat({ rule, date, onChange }: { rule: TodoRecurrence; date: st
         const next = days.includes(day) ? days.filter(item => item !== day) : [...days, day];
         if (next.length) set({ weekdays: next.sort((a, b) => a - b) });
       }}>{weekdayName(day)}</button>)}
+    </div>}
+    {rule.freq === 'month' && !rule.fromCompletion && <div className="todo-custom-row">
+      <select aria-label={t('반복 기준')} value={rule.nth ? 'nth' : 'day'} onChange={event => set(event.target.value === 'nth' ? { nth: nthOf(date), monthDays: undefined } : { monthDays: [dateParts(date).day], nth: undefined })}>
+        <option value="day">{t('날짜 기준')}</option><option value="nth">{t('요일 기준')}</option>
+      </select>
+      {rule.nth ? <>
+        <select aria-label={t('몇째 주')} value={rule.nth.n} onChange={event => set({ nth: { ...rule.nth!, n: Number(event.target.value) as NthWeek } })}>
+          {ordinals().map(([n, label]) => <option key={n} value={n}>{label}</option>)}
+        </select>
+        <select aria-label={t('요일')} value={rule.nth.weekday} onChange={event => set({ nth: { ...rule.nth!, weekday: Number(event.target.value) } })}>
+          {[1, 2, 3, 4, 5, 6, 0].map(day => <option key={day} value={day}>{weekdayName(day)}</option>)}
+        </select>
+      </> : <select aria-label={t('날짜')} value={rule.monthDays?.[0] ?? dateParts(date).day} onChange={event => set({ monthDays: [Number(event.target.value)] })}>
+        {Array.from({ length: 31 }, (_, index) => index + 1).map(day => <option key={day} value={day}>{t('매월 {0}일', { 0: day })}</option>)}
+        <option value={-1}>{t('말일')}</option>
+      </select>}
     </div>}
     <label className="todo-check-row"><input type="checkbox" checked={!!rule.fromCompletion} onChange={event => set({ fromCompletion: event.target.checked })} /><span>{t('완료한 날부터 계산')}</span></label>
     <label className="todo-custom-row"><span>{t('종료일')}</span><input type="date" value={rule.until ?? ''} min={date} onChange={event => set({ until: event.target.value || undefined })} /></label>

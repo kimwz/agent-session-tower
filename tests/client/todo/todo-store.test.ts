@@ -5,6 +5,7 @@ import type { TodoChanges, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDe
 import { ApiError } from '../../../client/src/common/lib.js';
 import { TodoClient, type TodoTransport } from '../../../client/src/todo/todo-store.js';
 import { applyOps, inverseOps, mergeChanges, worldFromOverview } from '../../../client/src/todo/todo-model.js';
+import { createActions } from '../../../client/src/todo/todo-actions.js';
 import { overview, project, task } from './fixtures.js';
 
 const changes = (revision: number, patch: Partial<TodoChanges> = {}): TodoChanges => ({ revision, projects: [], sections: [], labels: [], tasks: [], links: [], removedLinks: [], comments: [], ...patch });
@@ -16,10 +17,13 @@ class FakeTransport implements TodoTransport {
   current: TodoOverview = overview([task('a', { content: 'A' }), task('b', { content: 'B' })]);
   answer: (request: TodoRequest) => Promise<TodoChanges> = async request => changes(++this.current.revision, { tasks: request.ops.flatMap(op => 'id' in op && this.current.tasks.find(item => item.id === op.id) ? [{ ...this.current.tasks.find(item => item.id === op.id)!, content: 'server' }] : []) });
   hold?: Promise<void>;
-  async overview() { this.reads.overview++; return structuredClone(this.current); }
+  overviewHold?: Promise<void>;
+  completions: Record<string, string[]> = {};
+  async overview() { this.reads.overview++; const answer = structuredClone(this.current); if (this.overviewHold) await this.overviewHold; return answer; }
   async detail(id: string): Promise<TodoTaskDetail> {
     this.reads.detail++;
-    return { task: this.current.tasks.find(item => item.id === id)!, subtasks: [], comments: [], completions: [], events: [], previous: [], next: [] };
+    const completions = (this.completions[id] ?? []).map(completion => ({ id: completion, taskId: id, occurrenceDate: null, completedAt: 'x' }));
+    return { task: this.current.tasks.find(item => item.id === id)!, subtasks: [], comments: [], completions, events: [], previous: [], next: [] };
   }
   async completed(): Promise<TodoCompletedPage> { this.reads.completed++; return { items: [] }; }
   async search(): Promise<TodoTask[]> { return []; }
@@ -175,4 +179,60 @@ test('an answer replaces what it changed: deleted things leave the overview, lin
   assert.deepEqual(next.projects.map(item => item.id), ['inbox']);
   assert.ok(next.links.l);
   assert.equal(mergeChanges(next, changes(5, { removedLinks: ['l'] })).links.l, undefined);
+});
+
+test('a change made while the overview is read, with a newer revision announced meanwhile, is still sent, and the read follows', async () => {
+  const transport = new FakeTransport();
+  const { client } = await ready(transport);
+  let release!: () => void;
+  transport.overviewHold = new Promise(resolve => { release = resolve; });
+  client.noticeRevision(2);
+  await settle();
+  client.apply([{ op: 'task.update', id: 'a', patch: { priority: 1 } }]);
+  await settle();
+  client.noticeRevision(3);
+  assert.equal(transport.requests.length, 0, 'nothing is sent during a read');
+  transport.overviewHold = undefined;
+  release();
+  await settle(40);
+  assert.equal(transport.requests.length, 1);
+  assert.equal(client.pending(), 0);
+  assert.equal(transport.reads.overview, 3, 'the read asked for meanwhile runs after the request');
+});
+
+test('an answer more than one revision ahead reads the overview again, so another page’s change is not lost', async () => {
+  const transport = new FakeTransport();
+  const { client } = await ready(transport);
+  // Another page changes b in between.
+  transport.current.revision = 2;
+  transport.current.tasks = transport.current.tasks.map(item => item.id === 'b' ? { ...item, content: 'other page' } : item);
+  client.apply([{ op: 'task.update', id: 'a', patch: { priority: 1 } }]);
+  await settle(40);
+  assert.equal(client.getState().world.revision, 3);
+  assert.equal(transport.reads.overview, 2);
+  assert.equal(client.getState().world.tasks.b.content, 'other page');
+});
+
+test('an open completed list is read again after this page completes or reopens a task', async () => {
+  const transport = new FakeTransport();
+  const { client } = await ready(transport);
+  await client.readCompleted('');
+  const before = transport.reads.completed;
+  client.apply([{ op: 'task.complete', id: 'a', completionId: 'c1', occurrence: null, today: '2026-10-14' }]);
+  await settle();
+  assert.equal(transport.reads.completed, before + 1);
+  client.apply([{ op: 'task.update', id: 'b', patch: { priority: 2 } }]);
+  await settle();
+  assert.equal(transport.reads.completed, before + 1);
+});
+
+test('reopening sends the completion of the row chosen, or the task’s latest read fresh', async () => {
+  const { client, transport } = await ready();
+  const actions = createActions(client, { openTask() {} });
+  const task = client.getState().world.tasks.a;
+  await actions.reopen(task, 'c-old');
+  transport.completions.a = ['c-new', 'c-old'];
+  await actions.reopen(task);
+  await settle();
+  assert.deepEqual(transport.requests.flatMap(request => request.ops).map(op => 'completionId' in op ? op.completionId : ''), ['c-old', 'c-new']);
 });

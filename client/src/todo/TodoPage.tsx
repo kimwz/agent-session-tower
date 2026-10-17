@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from 'react';
-import { ArrowRight, CalendarDays, Check, ChevronLeft, ChevronRight, Flag, LoaderCircle, Pencil, Plus, RefreshCw, Trash2, TriangleAlert, X } from 'lucide-react';
+import { ArrowRight, CalendarDays, Check, Columns3, ChevronLeft, ChevronRight, Flag, LoaderCircle, Pencil, Plus, RefreshCw, Trash2, TriangleAlert, X } from 'lucide-react';
 import { addDays } from '../../../shared/todo/dates';
 import type { TodoTask } from '../../../shared/todo/types';
 import { useMediaQuery } from '../common/use-media-query';
@@ -16,7 +16,9 @@ import { longDate, priorityName } from './todo-format';
 import { readShortcut, typingIn } from './todo-shortcuts';
 import { httpTransport, localToday, newId, TodoClient, useTodoState } from './todo-store';
 import { isTodoPage, readTodoLocation, todoSearch, viewKey, type TodoLocation, type TodoView } from './todo-url';
-import { boardColumns, cardContext, defaultDisplay, dropOps, manualOrder, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
+import { boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
+import { CalendarView } from './calendar/CalendarView';
+import type { TodoLayout } from '../../../shared/todo/types';
 
 /**
  * The Todo page, shown in place of the canvas (`?view=todo`). It owns its store for as long as it is shown, reads the
@@ -58,7 +60,9 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [quick, setQuick] = useState<{ preset: QuickAddPreset; follow: FollowUp | null } | null>(null);
   const [cardMenu, setCardMenu] = useState<{ task: TodoTask; anchor: HTMLElement } | null>(null);
-  const [sectionMenu, setSectionMenu] = useState<{ id: string; anchor: HTMLElement; rename: boolean } | null>(null);
+  const [sectionMenu, setSectionMenu] = useState<string | null>(null);
+  // Renaming opens after the menu closes, so the menu's closing never undoes it.
+  const [sectionRename, setSectionRename] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const menuAnchor = useRef<HTMLElement | null>(null);
   const chord = useRef(false);
@@ -91,7 +95,12 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
 
   const openTask = useCallback((id: string) => navigate({ task: id }), [navigate]);
   const closeTask = useCallback(() => navigate({ task: null }), [navigate]);
-  const goTo = useCallback((next: TodoView, text?: string) => { navigate({ view: next, task: null, query: text ?? '' }); if (drawer) onSidebarOpen(false); }, [navigate, drawer, onSidebarOpen]);
+  const goTo = useCallback((next: TodoView, text?: string) => {
+    // A project opens in the layout it was last shown in.
+    const shown = next.kind === 'project' || next.kind === 'inbox' ? projectOf(client.getState().world, next)?.layout : undefined;
+    navigate({ view: next, task: null, query: text ?? '', ...(shown ? { layout: shown } : {}) });
+    if (drawer) onSidebarOpen(false);
+  }, [navigate, drawer, onSidebarOpen, client]);
   const actions = useMemo(() => createActions(client, { openTask }), [client, openTask]);
 
   useEffect(() => {
@@ -103,7 +112,14 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
 
   const project = projectOf(world, view);
   const completedAvailable = view.kind !== 'upcoming' && view.kind !== 'search';
-  const completedScope = display.completed && completedAvailable ? project?.id ?? '' : null;
+  const layout = location.layout;
+  const setLayout = useCallback((next: TodoLayout) => {
+    navigate({ layout: next });
+    const shown = projectOf(client.getState().world, locationRef.current.view);
+    // Remembered with the project, not as a change to undo.
+    if (shown && shown.layout !== next && client.getState().world.availability.state === 'ready') client.apply([{ op: 'project.update', id: shown.id, patch: { layout: next } }], { undoable: false });
+  }, [navigate, client]);
+  const completedScope = display.completed && completedAvailable && layout === 'board' ? project?.id ?? '' : null;
   useEffect(() => { if (completedScope === null) client.hideCompleted(); else void client.readCompleted(completedScope); }, [client, completedScope]);
 
   const setDisplay = (value: DisplaySettings) => { setDisplays(previous => ({ ...previous, [key]: value })); saveDisplay(key, value); };
@@ -124,8 +140,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   }, [readOnly]);
 
   const target = (): TodoTask | undefined => (openTaskId ? world.tasks[openTaskId] : undefined) ?? (selectedId ? world.tasks[selectedId] : undefined);
-  const shortcutState = useRef({ target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask });
-  shortcutState.current = { target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask };
+  const shortcutState = useRef({ target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout });
+  shortcutState.current = { target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout };
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const current = shortcutState.current;
@@ -157,7 +173,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
           else return;
           break;
         case 'undo': if (!current.client.undo()) return; break;
-        case 'layout': return;
+        case 'layout': current.setLayout(current.layout === 'board' ? 'calendar' : 'board'); break;
       }
       event.preventDefault();
     };
@@ -196,7 +212,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     return <section className="todo-column todo-completed-column" aria-label={t('완료됨')}>
       <header className="todo-column-head"><h3>{t('완료됨')}</h3><span className="todo-column-count">{items.length || ''}</span></header>
       <div className="todo-column-cards">
-        {items.map(({ completion, task }) => <TaskCard key={completion.id} task={{ ...task, completedAt: task.completedAt ?? completion.completedAt }} context={context} {...card} onMenu={undefined} />)}
+        {items.map(({ completion, task }) => <TaskCard key={completion.id} task={{ ...task, completedAt: task.completedAt ?? completion.completedAt }} context={context} {...card} onMenu={undefined}
+          onReopen={() => void actions.reopen(task, completion.id)} />)}
         {state.completed.loading && <LoaderCircle className="spin todo-muted" size={16} />}
         {state.completed.error && <p className="todo-error" role="alert">{state.completed.error}</p>}
         {state.completed.before && !state.completed.loading && <button type="button" className="todo-add-card" onClick={() => void client.readCompleted(state.completed!.projectId, true)}>{t('더 보기')}</button>}
@@ -207,20 +224,24 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const total = columns.reduce((sum, column) => sum + column.tasks.length, 0);
   const emptyBoard = total === 0 && !project && !completedColumn;
   const title = viewTitle(view, world, query);
-  const section = sectionMenu && world.sections.find(item => item.id === sectionMenu.id);
+  const section = world.sections.find(item => item.id === (sectionMenu ?? sectionRename));
+  const siblings = section ? world.sections.filter(item => item.projectId === section.projectId && !item.archivedAt) : [];
 
   let body;
   if (state.phase === 'loading') body = <div className="todo-state"><LoaderCircle className="spin" size={20} /></div>;
   else if (state.phase === 'error') body = <div className="todo-state"><TriangleAlert size={20} /><p role="alert">{state.error}</p><button type="button" className="secondary-button" onClick={() => client.start()}><RefreshCw size={13} />{t('다시 시도')}</button></div>;
   else if (world.availability.state === 'unavailable') body = <div className="todo-state"><TriangleAlert size={20} /><h3>{t('할 일을 사용할 수 없습니다')}</h3><p>{world.availability.reason}</p></div>;
   else if ((view.kind === 'project' && !project) || (view.kind === 'label' && !world.labels.some(label => label.id === view.id))) body = <div className="todo-state"><p>{t('찾을 수 없는 목록입니다.')}</p><button type="button" className="secondary-button" onClick={() => goTo({ kind: 'today' })}>{t('오늘 보기')}</button></div>;
+  else if (layout === 'calendar') body = <CalendarView tasks={calendarTasks(view, { world, today, start, query, searchResults })} world={world} today={today} mode={display.calendar} future={display.future} colorBy={display.colorBy}
+    mobile={mobile} readOnly={readOnly} onMode={mode => setDisplay({ ...display, calendar: mode })} onOpen={openTask} onAdd={preset => openAdd({ ...(project ? { projectId: project.id } : {}), ...(view.kind === 'label' ? { labelIds: [view.id] } : {}), ...preset })}
+    onChange={ops => client.apply(ops)} />;
   else if (emptyBoard) body = <div className="todo-state todo-empty"><p>{view.kind === 'today' ? t('오늘 할 일을 모두 끝냈습니다.') : view.kind === 'search' ? (searchResults === null ? t('검색어를 입력하세요.') : t('찾은 작업이 없습니다.')) : t('작업이 없습니다.')}</p>
     {view.kind !== 'search' && !readOnly && <button type="button" className="secondary-button" onClick={() => openAdd()}><Plus size={13} />{t('작업 추가')}</button>}</div>;
   else body = <BoardView columns={columns} context={context} manual={manualOrder(display) && !readOnly} sections={!!project && display.group === 'section' && !readOnly} mobile={mobile} selectedId={openTaskId ?? selectedId}
     card={card} onAdd={column => openAdd({ ...column.preset })} onDrop={onDrop}
     onSectionMove={(id, afterId) => client.apply([{ op: 'section.move', id, afterId }])}
     onAddSection={name => project && client.apply([{ op: 'section.create', id: newId(), projectId: project.id, name }])}
-    onSectionMenu={(id, anchor) => { menuAnchor.current = anchor; setSectionMenu({ id, anchor, rename: false }); }} completed={completedColumn} />;
+    onSectionMenu={(id, anchor) => { menuAnchor.current = anchor; setSectionRename(null); setSectionMenu(id); }} completed={completedColumn} />;
 
   return <div className={`todo-page ${sidebarOpen ? 'with-sidebar' : ''} ${drawer ? 'drawer' : ''} ${openTaskId ? 'with-detail' : ''}`}>
     {drawer && sidebarOpen && <button type="button" className="todo-scrim" aria-label={t('목록 닫기')} onClick={() => onSidebarOpen(false)} />}
@@ -229,12 +250,16 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       <header className="todo-main-head">
         <div className="todo-title"><h2>{title}</h2>{view.kind === 'today' && <span>{longDate(today)}</span>}</div>
         <div className="todo-tools">
-          {view.kind === 'upcoming' && <div className="todo-week-nav">
+          {state.phase === 'ready' && <div className="todo-segmented todo-layout-switch" role="radiogroup" aria-label={t('레이아웃')}>
+            <button type="button" role="radio" aria-checked={layout === 'board'} title={`${t('보드')} (Shift+V)`} onClick={() => setLayout('board')}><Columns3 size={13} /><span>{t('보드')}</span></button>
+            <button type="button" role="radio" aria-checked={layout === 'calendar'} title={`${t('캘린더')} (Shift+V)`} onClick={() => setLayout('calendar')}><CalendarDays size={13} /><span>{t('캘린더')}</span></button>
+          </div>}
+          {view.kind === 'upcoming' && layout === 'board' && <div className="todo-week-nav">
             <button type="button" className="icon-button" aria-label={t('이전 주')} disabled={start <= today} onClick={() => setStart(value => addDays(value, -7) < today ? today : addDays(value, -7))}><ChevronLeft size={15} /></button>
             <button type="button" className="todo-tool" disabled={start === today} onClick={() => setStart(today)}>{t('오늘')}</button>
             <button type="button" className="icon-button" aria-label={t('다음 주')} onClick={() => setStart(value => addDays(value, 7))}><ChevronRight size={15} /></button>
           </div>}
-          {state.phase === 'ready' && <DisplayMenu view={view} value={display} onChange={setDisplay} completedAvailable={completedAvailable} />}
+          {state.phase === 'ready' && <DisplayMenu view={view} layout={layout} value={display} onChange={setDisplay} completedAvailable={completedAvailable} />}
           {mobile && !readOnly && state.phase === 'ready' && <button type="button" className="todo-tool todo-add-mobile" aria-label={t('작업 추가')} onClick={() => openAdd()}><Plus size={16} /></button>}
         </div>
       </header>
@@ -245,11 +270,14 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       onClose={closeTask} onOpen={openTask} onProject={id => goTo(world.projects.find(item => item.id === id)?.inbox ? { kind: 'inbox' } : { kind: 'project', id })} onFollowUp={followUp} />}
     {quick && <QuickAdd world={world} today={today} client={client} preset={quick.preset} follow={quick.follow} onClose={() => setQuick(null)} onAdded={id => setSelectedId(id)} />}
     {cardMenu && <Menu anchor={menuAnchor} label={t('작업 메뉴')} items={cardMenuItems(cardMenu.task)} onClose={() => setCardMenu(null)} align="end" />}
-    {sectionMenu && section && !sectionMenu.rename && <Menu anchor={menuAnchor} label={t('섹션 메뉴')} onClose={() => setSectionMenu(null)} items={[
-      { key: 'rename', label: t('이름 바꾸기'), icon: <Pencil size={13} />, run: () => setSectionMenu({ ...sectionMenu, rename: true }) },
+    {sectionMenu && section && <Menu anchor={menuAnchor} label={t('섹션 메뉴')} onClose={() => setSectionMenu(null)} items={[
+      { key: 'rename', label: t('이름 바꾸기'), icon: <Pencil size={13} />, run: () => setSectionRename(section.id) },
+      ...(['left', 'right'] as const).flatMap(direction => { const afterId = sectionMoveTarget(siblings, section.id, direction); return afterId === undefined ? [] : [{
+        key: direction, label: direction === 'left' ? t('왼쪽으로 옮기기') : t('오른쪽으로 옮기기'), icon: direction === 'left' ? <ChevronLeft size={13} /> : <ChevronRight size={13} />,
+        run: () => client.apply([{ op: 'section.move', id: section.id, afterId }]) }]; }),
       { key: 'delete', label: t('섹션과 작업 삭제'), danger: true, icon: <Trash2 size={13} />, run: () => { if (client.apply([{ op: 'section.delete', id: section.id }])) client.toast(t('“{0}” 삭제', { 0: section.name }), 'info', [{ label: t('되돌리기'), run: () => client.undo() }]); } },
     ]} />}
-    {sectionMenu?.rename && section && <SectionRename anchor={menuAnchor} name={section.name} onClose={() => setSectionMenu(null)} onSave={name => client.apply([{ op: 'section.update', id: section.id, patch: { name } }])} />}
+    {sectionRename && !sectionMenu && section && <SectionRename anchor={menuAnchor} name={section.name} onClose={() => setSectionRename(null)} onSave={name => client.apply([{ op: 'section.update', id: section.id, patch: { name } }])} />}
     {state.toasts.length > 0 && <div className="todo-toasts" role="status" aria-live="polite">{state.toasts.map(toast => <div key={toast.id} className={`todo-toast ${toast.tone}`}>
       <span>{toast.message}</span>
       {toast.actions.map(action => <button key={action.label} type="button" onClick={() => { action.run(); client.dismiss(toast.id); }}>{action.label}</button>)}

@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent, type ReactNode, type RefObject } from 'react';
-import { Archive, CalendarDays, CalendarRange, ChevronDown, ChevronRight, Hash, Heart, Inbox, MoreHorizontal, Palette, Pencil, Plus, Search, Tag, Trash2 } from 'lucide-react';
+import { Archive, ArchiveRestore, CalendarDays, CalendarRange, ChevronDown, ChevronRight, Hash, Heart, Inbox, MoreHorizontal, Palette, Pencil, Plus, Search, Tag, Trash2 } from 'lucide-react';
 import type { TodoLabel, TodoProject } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { Menu, Popover, type MenuItem } from './Popover';
@@ -43,11 +43,11 @@ function ColorGrid({ anchor, value, onPick, onClose }: { anchor: RefObject<HTMLE
   </Popover>;
 }
 
-function Row({ active, icon, label, count, tone, onClick, menu, depth = 0, toggle }: { active: boolean; icon: ReactNode; label: string; count?: number; tone?: string; onClick: () => void; menu?: (anchor: HTMLButtonElement) => void; depth?: number; toggle?: ReactNode }) {
+function Row({ active, icon, label, count, tone, onClick, menu, depth = 0, toggle }: { active: boolean; icon: ReactNode; label: string; count?: number; tone?: string; onClick: (anchor: HTMLElement) => void; menu?: (anchor: HTMLButtonElement) => void; depth?: number; toggle?: ReactNode }) {
   const more = useRef<HTMLButtonElement>(null);
   return <li className={`todo-side-row ${active ? 'active' : ''}`} style={{ paddingLeft: 8 + depth * 14 }}>
     {toggle}
-    <button type="button" className="todo-side-link" aria-current={active ? 'page' : undefined} onClick={onClick}>{icon}<span>{label}</span></button>
+    <button type="button" className="todo-side-link" aria-current={active ? 'page' : undefined} onClick={event => onClick(event.currentTarget)}>{icon}<span>{label}</span></button>
     {count ? <span className={`todo-side-count ${tone ?? ''}`}>{count}</span> : null}
     {menu && <button ref={more} type="button" className="icon-button todo-side-more" aria-label={t('“{0}” 메뉴', { 0: label })} onClick={() => more.current && menu(more.current)}><MoreHorizontal size={14} /></button>}
   </li>;
@@ -57,12 +57,13 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
   const [editing, setEditing] = useState<Editing>(null);
   const [menu, setMenu] = useState<{ anchor: HTMLElement; items: (MenuItem | 'separator')[]; label: string } | null>(null);
   const [color, setColor] = useState<{ anchor: HTMLElement; value: string; pick: (color: string) => void } | null>(null);
-  const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set());
+  const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set(['archived']));
   const [search, setSearch] = useState(query);
   const menuAnchor = useRef<HTMLElement | null>(null);
   const colorAnchor = useRef<HTMLElement | null>(null);
   const current = viewKey(view);
   const tree = projectTree(world);
+  const archived = world.projects.filter(project => project.archivedAt);
   const favorites = [...world.projects.filter(project => project.favorite && !project.archivedAt), ...world.labels.filter(label => label.favorite)];
   const inbox = world.projects.find(project => project.inbox);
   const fold = (key: string) => setFolded(previous => { const next = new Set(previous); if (next.has(key)) next.delete(key); else next.add(key); return next; });
@@ -138,6 +139,13 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
         onSave={name => { client.apply([{ op: 'label.create', id: newId(), name }]); setEditing(null); }} />}
       {!world.labels.length && editing?.kind !== 'new-label' && <p className="todo-side-empty"><Tag size={12} />{t('라벨이 없습니다')}</p>}
     </>)}
+    {archived.length > 0 && section('archived', t('보관된 프로젝트'), undefined, <ul>{archived.map(project => {
+      const open = (anchor: HTMLElement) => openMenu(anchor, project.name, [
+        { key: 'unarchive', label: t('보관 해제'), icon: <ArchiveRestore size={13} />, disabled: readOnly, run: () => { if (client.apply([{ op: 'project.update', id: project.id, patch: { archived: false } }])) onNavigate({ kind: 'project', id: project.id }); } },
+        { key: 'delete', label: t('삭제'), danger: true, icon: <Trash2 size={13} />, disabled: readOnly, run: () => { if (client.apply([{ op: 'project.delete', id: project.id }])) removed(project.name); } },
+      ]);
+      return <Row key={project.id} active={false} icon={<Archive size={14} />} label={project.name} onClick={open} menu={open} />;
+    })}</ul>)}
     {menu && <Menu anchor={menuAnchor} label={menu.label} items={menu.items} onClose={() => setMenu(null)} />}
     {color && <ColorGrid anchor={colorAnchor} value={color.value} onPick={color.pick} onClose={() => setColor(null)} />}
   </nav>;
