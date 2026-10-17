@@ -129,7 +129,9 @@ test('a collapsed section keeps its header and count, an archived one leaves the
   assert.equal(shown.columns.at(-1)?.drop, null, 'read only');
   const archived = world(tasks, { projects: [project('inbox', { inbox: true }), project('p', { archivedAt: '2026-10-14T00:00:00.000Z' })], sections });
   const locked = archivedColumns(view, defaultDisplay(view), { ...context, world: archived }, 'p');
-  assert.deepEqual(locked.flatMap(column => column.tasks.map(item => item.id)).sort(), ['a', 'b', 'c'], 'its tasks show though the lists leave archived projects out');
+  assert.deepEqual(locked.flatMap(column => column.tasks.map(item => item.id)).sort(), ['a', 'c'], 'its tasks show though the lists leave archived projects out');
+  const lockedShown = shapeSections(locked, sections, { collapse: true, showArchived: true, tasks });
+  assert.deepEqual(lockedShown.columns.flatMap(column => column.tasks.map(item => item.id)).sort(), ['a', 'b', 'c'], 'an archived section’s task with its section, not without one');
   assert.ok(locked.every(column => column.drop === null && !column.sectionId), 'nothing drops, no section menu');
 });
 

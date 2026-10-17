@@ -220,7 +220,9 @@ function Subtasks({ task, world, actions, client, onOpen, readOnly }: DetailCont
     walk(task.id, 0);
     return result;
   }, [world.tasks, task.id]);
-  const open = rows.filter(row => isOpen(row.task)).length;
+  // Its own sub-tasks are counted, as on the card.
+  const own = rows.filter(row => row.depth === 0);
+  const open = own.filter(row => isOpen(row.task)).length;
   const add = () => { const content = name.trim(); if (!content) return; client.apply([{ op: 'task.create', id: newId(), parentId: task.id, content: content.slice(0, 500) }]); setName(''); };
   // Dragged among its siblings only: a row let go over another parent's sub-task stays where it was.
   const onEnd = ({ active, over }: DragEndEvent) => {
@@ -231,8 +233,7 @@ function Subtasks({ task, world, actions, client, onOpen, readOnly }: DetailCont
     if (op) client.apply([op]);
   };
   return <section className="todo-detail-section">
-    {/* Done of all, as on the card. */}
-    <h4>{t('하위 작업')}{rows.length > 0 && <span>{rows.length - open}/{rows.length}</span>}</h4>
+    <h4>{t('하위 작업')}{own.length > 0 && <span>{own.length - open}/{own.length}</span>}</h4>
     {rows.length > 0 && <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onEnd}>
       <SortableContext items={rows.map(row => row.task.id)} strategy={verticalListSortingStrategy}>
         <ul className="todo-subtask-list">{rows.map(({ task: child, depth }) => <SubtaskRow key={child.id} task={child} depth={depth} readOnly={readOnly} actions={actions} client={client} onOpen={onOpen} />)}</ul>

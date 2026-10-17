@@ -152,7 +152,8 @@ export const GROUPINGS: Record<GroupKey, Grouping> = {
     if (!project) return [];
     const sections = world.sections.filter(section => section.projectId === project.id && !section.archivedAt);
     return [
-      { id: 'section:none', title: t('섹션 없음'), tasks: tasks.filter(task => !task.sectionId || !sections.some(section => section.id === task.sectionId)), drop: { kind: 'section', projectId: project.id, sectionId: null }, preset: { projectId: project.id, sectionId: null } },
+      // An archived section's tasks are not without one: they show with it, when archived sections are shown.
+      { id: 'section:none', title: t('섹션 없음'), tasks: tasks.filter(task => !task.sectionId || !world.sections.some(section => section.id === task.sectionId)), drop: { kind: 'section', projectId: project.id, sectionId: null }, preset: { projectId: project.id, sectionId: null } },
       ...sections.map((section): BoardColumn => ({ id: `section:${section.id}`, title: section.name, sectionId: section.id, tasks: tasks.filter(task => task.sectionId === section.id), drop: { kind: 'section', projectId: project.id, sectionId: section.id }, preset: { projectId: project.id, sectionId: section.id } })),
     ];
   },

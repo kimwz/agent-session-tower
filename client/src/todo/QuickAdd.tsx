@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowRight, CalendarDays, Flag, Hash, Paperclip, Tag, X } from 'lucide-react';
+import { liveProjectIds } from '../../../shared/todo/compose';
 import type { TodoOp } from '../../../shared/todo/ops';
 import { parseQuickAdd, type QuickAddKind, type QuickAddToken } from '../../../shared/todo/quick-add';
 import type { TodoPriority, TodoRecurrence } from '../../../shared/todo/types';
@@ -72,7 +73,8 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
 
   const inbox = world.projects.find(project => project.inbox);
   const baseProject = preset.projectId ?? before?.projectId ?? inbox?.id ?? '';
-  const projects = useMemo(() => world.projects.filter(project => !project.archivedAt).flatMap(project => project.inbox ? [{ id: project.id, name: t('관리함') }, { id: project.id, name: 'Inbox' }] : [{ id: project.id, name: project.name }]), [world.projects]);
+  // Not one archived, nor one under an archived project: nothing is put there.
+  const projects = useMemo(() => { const live = liveProjectIds(world.projects); return world.projects.filter(project => live.has(project.id)).flatMap(project => project.inbox ? [{ id: project.id, name: t('관리함') }, { id: project.id, name: 'Inbox' }] : [{ id: project.id, name: project.name }]); }, [world.projects]);
   const parsed = useMemo(() => parseQuickAdd(text, { today, projects, sections: world.sections.filter(section => !section.archivedAt), labels: world.labels, defaultProjectId: manual.place?.projectId ?? baseProject, ignored }),
     [text, today, projects, world.sections, world.labels, manual.place, baseProject, ignored]);
 
