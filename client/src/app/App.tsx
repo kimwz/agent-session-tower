@@ -46,6 +46,8 @@ import { archivedPending, pageScope } from './page-scope';
 import { combinedView, hostOf, hostProblem, workspaceNote } from '../remote/hosts';
 import { localPart, nodeOf, nodePath, pathFor, scopedId, splitScopedId } from '../remote/scope';
 import type { MasterFilter } from '../../../shared/master';
+import { PageSwitch, type TowerPage } from '../todo/PageSwitch';
+import { isTodoPage, pageSearch } from '../todo/todo-url';
 
 type StatusFilter = 'all' | SessionStatus;
 const readSelection = () => new URLSearchParams(window.location.search).get('session');
@@ -58,6 +60,9 @@ const shortcutEditingControls = 'input:not([type="checkbox"]):not([type="radio"]
 
 const WorkspacePage = lazy(() => import('../workspace/WorkspacePage').then(module => ({ default: module.WorkspacePage })));
 const MasterDock = lazy(() => import('../master/MasterDock').then(module => ({ default: module.MasterDock })));
+const TodoPage = lazy(() => import('../todo/TodoPage').then(module => ({ default: module.TodoPage })));
+const todoSidebarPreferenceKey = 'agent-session-tower.todo-sidebar-collapsed';
+const readPage = (): TowerPage => isTodoPage(window.location.search) ? 'todo' : 'canvas';
 export function App() {
   const params = new URLSearchParams(window.location.search);
   const cwd = params.get('workspace');
@@ -81,6 +86,14 @@ function TowerApp() {
   // Forms start from Settings › Models; read once so they open with it.
   useEffect(() => { if (token && connection === 'connected') loadModelSettings(token).catch(() => {}); }, [token, connection]);
   const [selectedId, setSelectedId] = useState<string | null>(readSelection);
+  // The Todo page replaces the canvas, its sidebar and the conversation; their state stays for coming back.
+  const [page, setPage] = useState<TowerPage>(readPage);
+  const todoAddress = useRef('');
+  const [todoSidebarCollapsed, setTodoSidebarCollapsed] = useState(() => {
+    // best-effort: without storage the sidebar starts open.
+    try { return window.localStorage.getItem(todoSidebarPreferenceKey) === 'true'; } catch { return false; }
+  });
+  const [showTodoSidebar, setShowTodoSidebar] = useState(false);
   const { mentionId: selectedSlackId, chatId: activeChatId } = slackChatSelection(slack?.events || [], requestedSlackId, selectedId);
   const [triggerEventId, setTriggerEventId] = useState<string | null>(null);
   /** The trigger monitor panel is open: its overview, a Slack mention, or a trigger run. */
@@ -132,6 +145,18 @@ function TowerApp() {
   const narrowViewport = useMediaQuery('(max-width: 900px)');
   const sidebarIsDrawer = mobileViewport || (narrowViewport && (!!selectedId || monitorOpen));
   const sidebarOpen = sidebarIsDrawer ? showSidebar : !sidebarCollapsed;
+  const todoDrawer = mobileViewport;
+  const todoSidebarOpen = todoDrawer ? showTodoSidebar : !todoSidebarCollapsed;
+  const onTodoSidebarOpen = useCallback((open: boolean) => { if (todoDrawer) setShowTodoSidebar(open); else setTodoSidebarCollapsed(!open); }, [todoDrawer]);
+  useEffect(() => {
+    try { window.localStorage.setItem(todoSidebarPreferenceKey, String(todoSidebarCollapsed)); } catch { /* best-effort: the choice lasts until the page reloads. */ }
+  }, [todoSidebarCollapsed]);
+  const switchPage = useCallback((next: TowerPage) => {
+    if (next === readPage()) return;
+    if (next === 'canvas') todoAddress.current = window.location.search;
+    window.history.pushState({}, '', `${window.location.pathname}${pageSearch(window.location.search, next, todoAddress.current)}${window.location.hash}`);
+    setPage(next); setShowTodoSidebar(false); setShowHelp(false);
+  }, []);
 
   useEffect(() => { document.documentElement.lang = language; }, [language]);
   useEffect(() => { if (view) reconcileApprovalDecisions(view.runs); }, [view?.runs]);
@@ -177,7 +202,7 @@ function TowerApp() {
     // A tab left in the background lets its stream go, so the Tower page in use keeps connections to work with.
     const release = releaseWhileHidden(() => disconnect.sleep(), () => disconnect.wake());
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
-    const onPop = () => { setSelectedId(readSelection()); setSelectedSlackId(undefined); setTriggerEventId(null); };
+    const onPop = () => { setSelectedId(readSelection()); setSelectedSlackId(undefined); setTriggerEventId(null); setPage(readPage()); };
     window.addEventListener('popstate', onPop);
     return () => {
       connectionRef.current = undefined;
@@ -188,7 +213,9 @@ function TowerApp() {
   }, [refresh, snapshots, nodeStore]);
 
   const selectSession = useCallback((id: string | null) => {
-    const url = new URL(window.location.href);
+    let url = new URL(window.location.href);
+    // A conversation opened from elsewhere (a notification, the master agent) shows on the canvas.
+    if (id && isTodoPage(url.search)) { todoAddress.current = url.search; url = new URL(`${url.pathname}${pageSearch(url.search, 'canvas')}`, url.origin); setPage('canvas'); }
     if (id) url.searchParams.set('session', id); else url.searchParams.delete('session');
     window.history.pushState({}, '', `${url.pathname}${url.search}`);
     setSelectedId(id); setSelectedSlackId(undefined); setTriggerEventId(null); setShowSidebar(false);
@@ -214,6 +241,8 @@ function TowerApp() {
     const handler = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
       if (target.closest('.workspace-overlay')) return;
+      // The Todo page has keys of its own; only the help closes here.
+      if (page === 'todo') { if (event.key === 'Escape' && showHelp && !event.defaultPrevented) { event.preventDefault(); setShowHelp(false); } return; }
       if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) && !target.isContentEditable) { event.preventDefault(); if (sidebarIsDrawer) setShowSidebar(true); else setSidebarCollapsed(false); requestAnimationFrame(() => searchRef.current?.focus()); }
       if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       if (showNewSession || showAutoPrompt || document.querySelector('dialog[open], [aria-modal="true"]')) return;
@@ -227,7 +256,7 @@ function TowerApp() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [closeChat, selectedId, monitorOpen, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar]);
+  }, [closeChat, selectedId, monitorOpen, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar, page]);
   const onSessionUpdate = useCallback((updated: Session) => {
     if (updated.node) return;
     snapshots.provisional(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === updated.id ? { ...session, customTitle: updated.customTitle } : session) } : previous);
@@ -432,17 +461,17 @@ function TowerApp() {
     {hasHiddenMatches ? <button className="secondary-button" onClick={() => setShowHidden(true)}>{t("전체보기 켜기")}</button> : hasCanvasHistory ? <button className="secondary-button" onClick={clearFilters}><RefreshCw size={13} />{t("전체 기록 보기")}</button> : <button className="secondary-button" onClick={() => openNewSession()} disabled={!token || connection !== 'connected'}><Plus size={13} />{t("새 세션")}</button>}
   </div>;
 
-  return <div className={`app ${selectedId || monitorOpen ? 'has-chat' : ''} ${sidebarOpen ? '' : 'canvas-only'}`} onPointerDownCapture={event => {
+  return <div className={page === 'todo' ? 'app todo-mode' : `app ${selectedId || monitorOpen ? 'has-chat' : ''} ${sidebarOpen ? '' : 'canvas-only'}`} onPointerDownCapture={event => {
     // Clicking ordinary sidebar/chat text can leave body focused. Preserve the
     // interaction scope so that fallback does not turn a canvas key into a global one.
     // Portalled dialogs bubble through React; keep their opener's scope intact.
     if (!(event.target instanceof Element) || event.target.closest('dialog, [role="dialog"], [aria-modal="true"]')) return;
     canvasPointerScope.current = !!canvasRef.current?.contains(event.target) || event.target === event.currentTarget || event.target.matches('.workspace');
   }}>
-    <header className="app-header"><div className="brand"><button ref={sidebarToggleRef} className="icon-button sidebar-toggle" onClick={() => sidebarIsDrawer ? setShowSidebar(value => !value) : setSidebarCollapsed(value => !value)} aria-label={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} title={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} aria-controls="session-sidebar" aria-expanded={sidebarOpen}>{sidebarOpen ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}</button><span className="brand-mark"><BrandMark /></span><h1>Agent Session Tower</h1><span className="brand-local">local</span></div><div className="header-center"><Monitor size={13} /><span>{snapshot?.hostname || t("이 Mac")}</span><span className="header-divider" /><span className="localhost">{window.location.host}</span></div><div className="header-actions"><span className={`connection-state ${connection}`} role="status">{connection === 'offline' ? <WifiOff size={12} /> : <i />}{connection === 'connected' ? t("실시간 연결") : connection === 'offline' ? t("재연결 중") : t("연결 중")}</span><TowerUpdateBadge snapshot={snapshot} /><RunnerUpdateBadge snapshot={snapshot} token={token} /><button className={`icon-button ${showHelp ? 'active' : ''}`} title={t("사용 안내")} aria-label={t("사용 안내")} aria-expanded={showHelp} onClick={() => setShowHelp(!showHelp)}><CircleHelp size={18} /></button><SettingsButton context={settingsContext} joined={snapshot?.controllerJoined} /></div></header>
+    <header className="app-header"><div className="brand">{page === 'todo' ? <button className="icon-button sidebar-toggle" onClick={() => onTodoSidebarOpen(!todoSidebarOpen)} aria-label={todoSidebarOpen ? t("할 일 목록 접기") : t("할 일 목록 열기")} title={todoSidebarOpen ? t("할 일 목록 접기") : t("할 일 목록 열기")} aria-expanded={todoSidebarOpen}>{todoSidebarOpen ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}</button> : <button ref={sidebarToggleRef} className="icon-button sidebar-toggle" onClick={() => sidebarIsDrawer ? setShowSidebar(value => !value) : setSidebarCollapsed(value => !value)} aria-label={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} title={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} aria-controls="session-sidebar" aria-expanded={sidebarOpen}>{sidebarOpen ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}</button>}<span className="brand-mark"><BrandMark /></span><h1>Agent Session Tower</h1><span className="brand-local">local</span><PageSwitch page={page} onChange={switchPage} /></div><div className="header-center"><Monitor size={13} /><span>{snapshot?.hostname || t("이 Mac")}</span><span className="header-divider" /><span className="localhost">{window.location.host}</span></div><div className="header-actions"><span className={`connection-state ${connection}`} role="status">{connection === 'offline' ? <WifiOff size={12} /> : <i />}{connection === 'connected' ? t("실시간 연결") : connection === 'offline' ? t("재연결 중") : t("연결 중")}</span><TowerUpdateBadge snapshot={snapshot} /><RunnerUpdateBadge snapshot={snapshot} token={token} /><button className={`icon-button ${showHelp ? 'active' : ''}`} title={t("사용 안내")} aria-label={t("사용 안내")} aria-expanded={showHelp} onClick={() => setShowHelp(!showHelp)}><CircleHelp size={18} /></button><SettingsButton context={settingsContext} joined={snapshot?.controllerJoined} /></div></header>
     {connection === 'offline' && <div className="connection-banner" role="alert"><WifiOff size={14} /><span>{t("Monitor와의 연결이 끊겼습니다. 저장된 화면을 표시하며 자동으로 다시 연결합니다.")}</span><button onClick={refresh}>{t("다시 확인")}</button></div>}
     {showHelp && <div className="help-popover"><div className="help-heading"><h2>{t("내 컴퓨터의 에이전트를 한눈에")}</h2><button className="icon-button" onClick={() => setShowHelp(false)} aria-label={t("안내 닫기")}><X size={15} /></button></div><p>{t("Claude Code와 Codex의 로컬 세션 기록을 자동으로 읽습니다. 그래프의 에이전트를 선택하면 실제 대화를 보고 작업을 이어갈 수 있습니다.")}</p><div className="help-statuses"><span><i className="legend-dot working" /><b>{t("작업 중")}</b>{t("현재 실행 중인 작업")}</span><span><i className="legend-dot idle" /><b>{t("대기 중")}</b>{t("입력이나 다음 작업 대기")}</span><span><i className="legend-dot completed" /><b>{t("완료")}</b>{t("작업 종료가 기록된 세션")}</span></div><p>{t("상태는 프로세스와 세션 기록을 함께 확인합니다. 대화 상단의 프로젝트 이름을 누르면 상태 판단 근거를 볼 수 있습니다.")}</p><div className="help-privacy"><ShieldCheck size={16} /><span>{t("로컬에서 실행됩니다. 새 요청은 해당 CLI와 기존 로그인 계정을 사용합니다.")}</span></div><div className="help-shortcuts"><span><kbd>/</kbd> {' '}{t("세션 검색")}</span><span><kbd>Shift N</kbd> {t("새 세션")}</span><span><kbd>Shift P</kbd> Auto Prompt</span><span><kbd>Shift A</kbd> {t("숨긴 폴더 표시 전환")}</span><span><kbd>Esc</kbd> {' '}{t("대화 닫기")}</span><span><kbd>⌘ Enter</kbd> {' '}{t("요청 보내기")}</span></div></div>}
-    <div className="workspace">
+    {page === 'todo' ? <div className="workspace todo-workspace"><Suspense fallback={<div className="chat-loading"><LoaderCircle className="spin" size={20} /></div>}><TodoPage token={token} revision={snapshot?.todoRevision} sidebarOpen={todoSidebarOpen} drawer={todoDrawer} onSidebarOpen={onTodoSidebarOpen} /></Suspense></div> : <div className="workspace">
       {sidebarIsDrawer && sidebarOpen && <button className="sidebar-scrim" aria-label={t("세션 목록 닫기")} onClick={() => setShowSidebar(false)} />}
       <aside id="session-sidebar" className={`sidebar ${sidebarOpen ? 'open' : ''}`} hidden={!sidebarOpen} aria-label={t("세션 탐색")}><div className="sidebar-heading"><h2>{t("세션")}</h2><span>{sessionListReady ? summary.counts.open.toLocaleString() : '—'}</span><button className="icon-button refresh-button" onClick={refresh} title={t("세션 새로고침")} aria-label={t("세션 새로고침")} disabled={refreshing}><RefreshCw size={14} className={refreshing ? 'spin' : ''} /></button></div><div className="search-wrap"><Search size={15} /><input ref={searchRef} type="search" placeholder={t("세션, 프로젝트 검색")} aria-label={t("세션 검색")} value={query} onChange={event => setQuery(event.target.value)} /><kbd>/</kbd></div><div className="provider-filters" aria-label={t("에이전트 종류")}><button className={provider === 'all' ? 'selected' : ''} onClick={() => setProvider('all')} aria-pressed={provider === 'all'}>{t("전체")}</button><button className={provider === 'claude' ? 'selected claude' : ''} onClick={() => setProvider('claude')} aria-pressed={provider === 'claude'}><ProviderIcon provider="claude" size={13} />Claude</button><button className={provider === 'codex' ? 'selected codex' : ''} onClick={() => setProvider('codex')} aria-pressed={provider === 'codex'}><ProviderIcon provider="codex" size={13} />Codex</button></div><div className="sidebar-selects">{multipleMachines && <label><Monitor size={13} /><select aria-label={t("컴퓨터 필터")} value={machineFilter} onChange={event => { setMachine(event.target.value); setProject('all'); }}><option value="all">{t("모든 컴퓨터")}</option>{hosts.map(host => <option key={host.node ?? 'local'} value={host.node ?? 'local'}>{host.node ? host.name : t("{0} (이 컴퓨터)", { 0: host.name })}</option>)}</select><ChevronDown size={11} /></label>}<label><Folder size={13} /><select aria-label={t("프로젝트 필터")} value={project} onChange={event => setProject(event.target.value)}><option value="all">{t("모든 프로젝트")}</option>{projectOptions.map(([path, name]) => <option key={path} value={path}>{name}</option>)}</select><ChevronDown size={11} /></label></div><SidebarFilters status={status} onStatusChange={setStatus} period={period} onPeriodChange={setPeriod} total={sessionListReady ? summary.counts.open : undefined} working={sessionListReady ? working : undefined} completed={sessionListReady ? completed : undefined} /><button className={`closed-sessions-toggle ${showClosed ? 'selected' : ''}`} onClick={() => { setShowClosed(value => !value); setListLimit(80); }} aria-pressed={showClosed}><Archive size={12} /><span>{showClosed ? t("열린 세션 보기") : t("종료한 세션")}</span><b>{sessionListReady ? summary.counts.closed : '—'}</b></button><div className="session-list-label"><span>{showClosed ? t("종료한 세션") : hasFilters ? t("검색 결과") : t("최근 활동")}</span><span>{sessionListReady ? <>{listedSessions.length.toLocaleString()}{t("개")}</> : '—'}{hasFilters && <button onClick={() => { setQuery(''); setMachine('all'); setProvider('all'); setProject('all'); setStatus('all'); }} aria-label={t("검색 및 필터 초기화")}><X size={12} /></button>}</span></div><div className="session-list">
         {!sessionListReady || archivedPending(showClosed, snapshot?.sessionScope) ? <div className="sidebar-loading">{slackLoadError && !slack ? <><span role="alert">{translateMessage(slackLoadError)}</span><button onClick={() => void refreshSlack()}>{t("다시 시도")}</button></> : <><LoaderCircle className="spin" size={17} /><span>{t("세션을 찾고 있습니다")}</span></>}</div> : listedSessions.length ? <>{listedSessions.slice(0, listLimit).map(session => <SessionRow key={session.id} session={session} selected={selectedMainId === session.id} unread={unreadIds.has(session.id)} onSelect={onSelect} machine={multipleMachines ? hostOf(hosts, session.node)?.name : undefined} stale={!!session.node && !hostOf(hosts, session.node)?.live} />)}{listedSessions.length > listLimit && <button className="load-more-sessions" onClick={() => setListLimit(value => value + 80)}>{t("세션 더 보기")}{' '}<ChevronDown size={13} /><span>{Math.min(listLimit, listedSessions.length)} / {listedSessions.length.toLocaleString()}</span></button>}</> : <div className="sidebar-empty"><Search size={22} /><span>{showClosed ? t("종료한 세션이 없습니다") : anySessions ? t("조건에 맞는 세션이 없습니다") : t("아직 발견된 세션이 없습니다")}</span>{anySessions && <button onClick={clearFilters}>{t("전체 기록 보기")}</button>}</div>}
@@ -465,7 +494,7 @@ function TowerApp() {
         events={triggerEvents} eventId={triggerEventId} triggerUnreadIds={triggerUnreadIds} onTriggerRead={acknowledgeTrigger} hasMore={triggerHasMore} onMore={() => void loadMoreTriggers()} onEventUpdate={updateTriggerEvent} onClose={closeChat} onSelectMention={selectSlack} onSelectEvent={selectTriggerEvent} onNavigate={onSelect} />}
       {activeChatId && <Suspense fallback={<aside className="chat-panel"><div className="chat-loading"><LoaderCircle className="spin" size={20} /><span>{t("대화를 여는 중")}</span></div></aside>}><ChatPanel contextBanner={<><SlackConversationAlert workflow={slack?.events.find(event => event.id === selectedSlackId)} /><SlackReplyProposals token={token} key={selectedSlackId} workflow={slack?.events.find(event => event.id === selectedSlackId)} />
         <GitHubReplyProposals token={token} sessionId={activeChatId} enabled={!selectedSession?.node && selectedSession?.launchedBy?.kind === 'trigger'} /></>} key={activeChatId} sessionId={activeChatId} session={selectedSession} allSessions={sessions} workspaceFolders={workspaceFolders} provider={(hostOf(hosts, nodeOf(activeChatId))?.providers ?? []).find(item => item.provider === (selectedSession?.provider || (localPart(activeChatId).startsWith('claude') ? 'claude' : 'codex')))} host={chatHost} compactionReady={!!snapshot?.compaction} runs={currentRuns} token={token} connected={connection === 'connected'} onClose={closeChat} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate} onSessionClose={changeSessionClosed} onAcknowledgeOutcome={acknowledgeOutcome} sessionClosed={!!selectedMainSession?.closed} changingClosed={changingClosed} readRevision={showNewSession || showAutoPrompt || issueCwd || (sidebarIsDrawer && sidebarOpen) ? '' : revisions.get(activeChatId)} onRead={onConversationRead} /></Suspense>}
-    </div>
+    </div>}
     <AutoPromptDialog visible={showAutoPrompt} initialCwd={autoPromptCwd} initialNode={autoPromptNode === '' ? undefined : autoPromptNode ?? (autoPromptCwd ? undefined : selectedSession?.node)} providers={snapshot?.providers || []} hosts={hosts} projects={projects} sessions={sessions} jobs={view?.autoPrompts || []} token={token} connected={connection === 'connected'} onClose={closeAutoPrompt} onNavigate={openAutoPromptSession} onRefresh={refresh} />
     {issueCwd && <IssueDialog key={issueCwd} cwd={issueCwd} providers={snapshot?.providers || []} hosts={hosts} token={token} connected={connection === 'connected'} onClose={closeIssue} onCreated={sessionCreated} />}
     {showNewSession && <NewSessionDialog providers={snapshot?.providers || []} hosts={hosts} projects={projects} initialCwd={newSessionCwd || (selectedSession?.master ? undefined : selectedSession?.cwd) || (project !== 'all' ? project : undefined)} draft={newSessionDraft} token={token} connected={connection === 'connected'} onClose={closeNewSession} onCreated={sessionCreated} />}

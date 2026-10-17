@@ -39,3 +39,4 @@ import './permissions.css';
 import './settings.css';
 
 import './secrets.css';
+import './todo.css';
