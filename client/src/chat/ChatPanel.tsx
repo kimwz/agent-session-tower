@@ -111,6 +111,20 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
     if (followRef.current && scroller.current && !loadingOlder) scroller.current.scrollTop = scroller.current.scrollHeight;
   }, [detail?.messages, runs, loadingOlder, appearance.fontSize, appearance.width]);
 
+  // A panel kept hidden behind another page (Todo) has no height, so it could not follow; shown again, it catches up.
+  useEffect(() => {
+    const element = scroller.current;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    let height = element.clientHeight;
+    const observer = new ResizeObserver(() => {
+      const hidden = !height;
+      height = element.clientHeight;
+      if (hidden && height && followRef.current) element.scrollTop = element.scrollHeight;
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => {
     const updateVisibility = () => setPageVisible(document.visibilityState === 'visible');
     document.addEventListener('visibilitychange', updateVisibility);

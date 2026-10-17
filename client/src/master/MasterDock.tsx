@@ -197,7 +197,7 @@ function barStyle({ panelTop: _, left, ...style }: React.CSSProperties & { panel
 }
 
 /**
- * Keeps the button clear of what already sits at the bottom left: the expanded sidebar on wide screens and a
+ * Keeps the button clear of what already sits at the bottom left: the expanded sidebar (sessions or todos) on wide screens and a
  * conversation's composer on phones. It measures them instead of changing their styles.
  */
 function useDockPosition(): React.CSSProperties & { panelTop?: number } {
@@ -207,7 +207,9 @@ function useDockPosition(): React.CSSProperties & { panelTop?: number } {
     const measure = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
-        const sidebar = document.getElementById('session-sidebar');
+        // The canvas's session list, or the Todo page's list while that page is shown (the canvas then measures nothing).
+        const sessions = document.getElementById('session-sidebar');
+        const sidebar = sessions && !sessions.hidden && sessions.getBoundingClientRect().width > 0 ? sessions : document.querySelector<HTMLElement>('.todo-sidebar');
         const sidebarBox = sidebar && !sidebar.hidden ? sidebar.getBoundingClientRect() : undefined;
         const docked = sidebarBox && sidebarBox.width > 0 && getComputedStyle(sidebar!).position !== 'absolute';
         const composer = window.innerWidth <= 680 ? document.querySelector('.composer-section') : null;
