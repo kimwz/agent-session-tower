@@ -17,6 +17,17 @@ export interface TodoAgentView {
 
 export const TodoAgentContext = createContext<TodoAgentView>({ session: () => undefined, chat: () => null });
 
+/**
+ * The page's session choice as the master's screen commands use it. Closing (`null`) while the Todo page shows an
+ * issue chat leaves that chat, as its own close would; anything else goes to the canvas as before.
+ */
+export function screenSelect(select: (id: string | null) => void, issueChatClose: () => (() => void) | null): (id: string | null) => void {
+  return id => {
+    const close = id === null ? issueChatClose() : null;
+    if (close) close(); else select(id);
+  };
+}
+
 /** What a todo's issue master is doing, as its card and the chat header show a session: working in colour, else grey. */
 export interface AgentLook {
   provider: TodoAgent['provider'];

@@ -5,6 +5,13 @@ import { statusLabels } from '../common/lib';
 import { translate as t } from '../i18n/i18n';
 import { SessionContextIcon } from '../sessions/SessionContextIcon';
 import { agentLook, TodoAgentContext } from './todo-agents';
+
+const stop = (event: { stopPropagation(): void }) => event.stopPropagation();
+/**
+ * A control on a card keeps its presses to itself: the board drags a card from a mouse press (MouseSensor), a held
+ * touch (TouchSensor) or a pointer press, so each of them stops at the control.
+ */
+export const OWN_PRESS = { onPointerDown: stop, onMouseDown: stop, onTouchStart: stop } as const;
 import { useFileDrop } from './attachments/Attachments';
 import { isOpen, type TodoWorld } from './todo-model';
 import { setSubtasksFolded, subtasksFolded } from './todo-prefs';
@@ -131,7 +138,7 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
       </div>
       {/* With an issue master, its state; without, a way to start one, offered to a mouse over the card (a phone has the detail's chat). */}
       {onChat && (agent || (!readOnly && !task.completedAt)) && <button type="button" className={`todo-card-chat icon-button ${agent ? 'active' : ''}`} aria-label={t('이슈 채팅')} title={t('이슈 채팅')}
-        onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); onChat(task.id); }}>
+        {...OWN_PRESS} onClick={event => { event.stopPropagation(); onChat(task.id); }}>
         {agent ? <AgentIcon agent={agent} /> : <MessageCircle size={14} />}
       </button>}
       {onMenu && !readOnly && <button type="button" className="todo-card-more icon-button" aria-label={t('작업 메뉴')} onClick={event => { event.stopPropagation(); onMenu(task, event.currentTarget); }}><MoreHorizontal size={15} /></button>}

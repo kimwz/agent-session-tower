@@ -4,9 +4,9 @@ import { createElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Session } from '../../../shared/types.js';
 import type { TodoAgent, TodoTask } from '../../../shared/todo/types.js';
-import { TaskCard } from '../../../client/src/todo/TaskCard.js';
+import { OWN_PRESS, TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { TaskDetail, type DetailTab } from '../../../client/src/todo/TaskDetail.js';
-import { agentLook, TodoAgentContext, type TodoAgentView } from '../../../client/src/todo/todo-agents.js';
+import { agentLook, screenSelect, TodoAgentContext, type TodoAgentView } from '../../../client/src/todo/todo-agents.js';
 import { cardContext } from '../../../client/src/todo/todo-views.js';
 import { emptyWorld, withDetail, worldFromOverview } from '../../../client/src/todo/todo-model.js';
 import { overview, task } from './fixtures.js';
@@ -81,4 +81,27 @@ test('with an issue master the chat tab is its conversation, and a starting one 
   const starting = within(view([]), detail(task('a'), { a: agent('a', { state: 'starting', sessionId: undefined }) }, 'chat'));
   assert.match(starting, /이슈 마스터를 시작하는 중입니다\./);
   assert.doesNotMatch(starting, /<textarea/);
+});
+
+test('a press on the card\'s chat icon never reaches the board\'s drag sensors', () => {
+  // The board drags from mousedown (MouseSensor), touchstart (TouchSensor) and pointerdown.
+  for (const name of ['onMouseDown', 'onTouchStart', 'onPointerDown'] as const) {
+    let stopped = false;
+    OWN_PRESS[name]({ stopPropagation: () => { stopped = true; } });
+    assert.ok(stopped, name);
+  }
+});
+
+test('the master\'s close leaves an issue chat the Todo page shows, and otherwise closes the canvas conversation', () => {
+  const selected: (string | null)[] = [];
+  let left = 0;
+  let open: (() => void) | null = () => { left++; };
+  const select = screenSelect(id => selected.push(id), () => open);
+  select(null);
+  assert.deepEqual([left, selected], [1, []], 'the issue chat goes back to its details');
+  select('claude:x');
+  assert.deepEqual(selected, ['claude:x'], 'opening a session is the canvas\'s as before');
+  open = null;
+  select(null);
+  assert.deepEqual(selected, ['claude:x', null]);
 });

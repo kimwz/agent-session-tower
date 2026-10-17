@@ -49,7 +49,7 @@ import { localPart, nodeOf, nodePath, pathFor, scopedId, splitScopedId } from '.
 import type { MasterFilter } from '../../../shared/master';
 import { PageSwitch, type TowerPage } from '../todo/PageSwitch';
 import { isTodoPage, pageSearch } from '../todo/todo-url';
-import { TodoAgentContext, useTodoSessionBadges, type TodoAgentView } from '../todo/todo-agents';
+import { screenSelect, TodoAgentContext, useTodoSessionBadges, type TodoAgentView } from '../todo/todo-agents';
 
 type StatusFilter = 'all' | SessionStatus;
 const readSelection = () => new URLSearchParams(window.location.search).get('session');
@@ -99,6 +99,8 @@ function TowerApp() {
   const [showTodoSidebar, setShowTodoSidebar] = useState(false);
   /** The issue master whose chat the Todo page shows. */
   const [issueChatId, setIssueChatId] = useState<string | null>(null);
+  /** How that chat is left, for the master's `close`. */
+  const issueChatClose = useRef<(() => void) | null>(null);
   const { mentionId: selectedSlackId, chatId: activeChatId } = slackChatSelection(slack?.events || [], requestedSlackId, selectedId);
   const [triggerEventId, setTriggerEventId] = useState<string | null>(null);
   /** The trigger monitor panel is open: its overview, a Slack mention, or a trigger run. */
@@ -311,7 +313,7 @@ function TowerApp() {
   const closeAutoPrompt = useCallback(() => setShowAutoPrompt(false), []);
   // The master agent works the page through its own controls and setters, never through state of its own.
   const masterControls = useMemo(() => ({
-    selectSession,
+    selectSession: screenSelect(selectSession, () => issueChatClose.current),
     openNewSession,
     openAutoPrompt,
     showHelp: () => setShowHelp(true),
@@ -482,7 +484,7 @@ function TowerApp() {
       chat: (sessionId, onClose) => {
         const session = byId.get(sessionId);
         const runs = (view?.runs || []).filter(run => run.sessionId === sessionId).sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
-        return <ShownChat sessionId={sessionId} onShown={setIssueChatId}><Suspense fallback={<div className="chat-loading"><LoaderCircle className="spin" size={20} /></div>}>
+        return <ShownChat sessionId={sessionId} onShown={setIssueChatId} onClose={onClose} closer={issueChatClose}><Suspense fallback={<div className="chat-loading"><LoaderCircle className="spin" size={20} /></div>}>
           <ChatPanel key={sessionId} sessionId={sessionId} session={session} allSessions={sessions} workspaceFolders={workspaceFolders} provider={(snapshot?.providers ?? []).find(item => item.provider === (session?.provider ?? (sessionId.startsWith('claude') ? 'claude' : 'codex')))}
             compactionReady={!!snapshot?.compaction} runs={runs} token={token} connected={connection === 'connected'} onClose={onClose} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate}
             onAcknowledgeOutcome={() => acknowledgeOutcomeOf(sessionId)} />
@@ -545,7 +547,13 @@ function TowerApp() {
 }
 
 /** An issue chat the Todo page shows: while it does, the page holds its session's family and the master's screen commands come here. */
-function ShownChat({ sessionId, onShown, children }: { sessionId: string; onShown: (id: string | null) => void; children: ReactNode }) {
-  useEffect(() => { onShown(sessionId); return () => onShown(null); }, [sessionId, onShown]);
+function ShownChat({ sessionId, onShown, onClose, closer, children }: { sessionId: string; onShown: (id: string | null) => void; onClose: () => void; closer: { current: (() => void) | null }; children: ReactNode }) {
+  const latest = useRef(onClose);
+  latest.current = onClose;
+  useEffect(() => {
+    const close = () => latest.current();
+    onShown(sessionId); closer.current = close;
+    return () => { onShown(null); if (closer.current === close) closer.current = null; };
+  }, [sessionId, onShown, closer]);
   return children;
 }
