@@ -202,7 +202,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
           break;
         case 'today': case 'upcoming': case 'inbox': current.goTo({ kind: shortcut.action }); break;
         case 'complete': {
-          if (!task || task.completedAt) break;
+          // A completion chosen in the completed list is done already; E never completes its repeating task again.
+          if (!task || task.completedAt || (!current.openTaskId && current.selectedId?.startsWith('done:'))) break;
           // The choice goes on to a card that stays: below, above, or in the next column; never one of its own sub-tasks,
           // which complete with it.
           const under = (id: string) => { for (let item = current.world.tasks[id]; item?.parentId; item = current.world.tasks[item.parentId]) if (item.parentId === task.id) return true; return false; };
