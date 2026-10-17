@@ -11,8 +11,8 @@ import { checkTodoFileRow, todoFilePath, usableContent } from './files.js';
 import { createComment, deleteComment, updateComment } from './ops/comments.js';
 import { attachFile, checkAttachable, deleteFile, restoreFile, type NewTodoFile } from './ops/files.js';
 import { createLink, deleteLink } from './ops/links.js';
-import { createLabel, createProject, createSection, deleteLabel, deleteProject, deleteSection, moveLabel, moveProject, moveSection, restoreLabel, restoreProject, restoreSection, updateLabel, updateProject, updateSection } from './ops/projects.js';
-import { completeTask, createTask, deleteTask, moveTask, restoreTask, uncompleteTask, updateTask } from './ops/tasks.js';
+import { MAX_PROJECT_LEVELS, createLabel, createProject, createSection, deleteLabel, deleteProject, deleteSection, moveLabel, moveProject, moveSection, restoreLabel, restoreProject, restoreSection, updateLabel, updateProject, updateSection } from './ops/projects.js';
+import { MAX_TASK_DEPTH, completeTask, createTask, deleteTask, moveTask, restoreTask, uncompleteTask, updateTask } from './ops/tasks.js';
 import { TASK_COLUMNS, VISIBLE_FILE, commentOf, completionOf, eventOf, fileOf, labelOf, linkOf, projectOf, sectionOf, taskOf } from './rows.js';
 import { TODO_DATA_TABLES, TODO_SCHEMA, TODO_SCHEMA_STEP, minWriterAt } from './schema.js';
 
@@ -230,7 +230,7 @@ export class TodoStore {
     this.readable();
     const task = this.task(id);
     if (!task || task.deletedAt) throw new TowerError('not-found', '작업을 찾을 수 없습니다.');
-    const subtasks = this.all(`WITH RECURSIVE down(id) AS (SELECT id FROM todo_tasks WHERE parent_id = ? UNION ALL SELECT t.id FROM todo_tasks t JOIN down ON t.parent_id = down.id)
+    const subtasks = this.all(`WITH RECURSIVE down(id, depth) AS (SELECT id, 1 FROM todo_tasks WHERE parent_id = ? UNION ALL SELECT t.id, down.depth + 1 FROM todo_tasks t JOIN down ON t.parent_id = down.id WHERE down.depth < ${MAX_TASK_DEPTH + 2})
       SELECT ${TASK_COLUMNS} FROM todo_tasks t JOIN down ON down.id = t.id WHERE t.deleted_at IS NULL ORDER BY t.sort_key`, id).map(taskOf);
     const related = (column: 'from_task_id' | 'to_task_id', other: 'from_task_id' | 'to_task_id') =>
       this.all<Record<string, unknown> & { other: string }>(`SELECT k.*, k.${other} AS other FROM todo_links k JOIN todo_tasks o ON o.id = k.${other} AND o.deleted_at IS NULL WHERE k.${column} = ? ORDER BY k.created_at`, id)
@@ -394,14 +394,16 @@ export class TodoStore {
    * attachments' key, and the contents the rows name. Undefined when the file cannot be read.
    */
   backupData(): { schema: number; tables: TodoTables; key?: string; contents: Map<string, number> } | undefined {
-    if (!this.db || this.state.state === 'unavailable') return undefined;
+    // A file a newer build changed may hold what this build cannot put in a backup of its own schema.
+    if (!this.db || this.state.state === 'unavailable' || this.fileStep > TODO_SCHEMA_STEP) return undefined;
+    const columns = this.schemaColumns();
     this.db.exec('BEGIN');
     try {
       const tables: TodoTables = {};
       // In the order rows were added, which lists of one moment keep (rowid); a table without one by its key.
       for (const table of TODO_DATA_TABLES) {
         const rowid = !this.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? AND sql LIKE '%WITHOUT ROWID%'", table);
-        tables[table] = this.all(`SELECT * FROM ${table} ORDER BY ${rowid ? 'rowid' : '1, 2'}`);
+        tables[table] = this.all(`SELECT ${[...columns.get(table)!].join(', ')} FROM ${table} ORDER BY ${rowid ? 'rowid' : '1, 2'}`);
       }
       const contents = new Map(this.all<{ sha256: string; size: number }>('SELECT sha256, MAX(size) AS size FROM todo_files GROUP BY sha256').map(row => [row.sha256, Number(row.size)]));
       const key = this.meta('files_key');
@@ -419,9 +421,9 @@ export class TodoStore {
     this.writable();
     if (this.fileStep !== TODO_SCHEMA_STEP) throw new TowerError('locked', '더 새로운 Tower가 만든 할 일 저장소라 복원하지 않았습니다. Tower를 업데이트한 뒤 복원하세요.');
     if (schema > TODO_SCHEMA_STEP) throw new TowerError('conflict', '더 새로운 Tower의 할 일 백업입니다. Tower를 업데이트한 뒤 복원하세요.');
-    const columns = new Map(TODO_DATA_TABLES.map(table => [table, new Set(this.all<{ name: string }>(`PRAGMA table_info(${table})`).map(row => row.name))]));
+    const columns = this.schemaColumns();
     for (const [table, rows] of Object.entries(tables)) {
-      const known = columns.get(table as typeof TODO_DATA_TABLES[number]);
+      const known = columns.get(table);
       if (!known) throw new TowerError('invalid', `할 일 백업에 알 수 없는 표가 있습니다: ${table}`);
       for (const row of rows) {
         for (const [name, value] of Object.entries(row)) {
@@ -432,6 +434,7 @@ export class TodoStore {
     }
     // Contents are found by a row's hash and shown under its name: nothing but what an upload makes goes in.
     for (const row of tables.todo_files ?? []) checkTodoFileRow(row);
+    checkTrees(tables);
     const before = this.copyAside();
     this.revisionValue = this.transaction(() => {
       // Checked when the transaction commits, so rows go in table by table whatever points at what.
@@ -449,6 +452,18 @@ export class TodoStore {
       return this.nextRevision();
     });
     return before;
+  }
+
+  /** The columns of each data table as this build's schema makes them, whatever a newer build added to the file. */
+  private schemaColumns(): Map<string, Set<string>> {
+    if (!schemaColumns) {
+      const memory = new this.sqlite!.DatabaseSync(':memory:');
+      try {
+        for (const step of TODO_SCHEMA) memory.exec(step.sql);
+        schemaColumns = new Map(TODO_DATA_TABLES.map(table => [table, new Set((memory.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(row => row.name))]));
+      } finally { memory.close(); }
+    }
+    return schemaColumns;
   }
 
   /** A consistent copy of the file as it is now, kept beside it (the newest few). */
@@ -493,6 +508,35 @@ export class TodoStore {
   touch(): void {
     if (!this.db || this.state.state !== 'ready') return;
     this.revisionValue = this.transaction(() => this.nextRevision());
+  }
+}
+
+let schemaColumns: Map<string, Set<string>> | undefined;
+
+/**
+ * Throws unless a backup's projects and tasks form the trees the operations keep: no parent cycles, projects at most
+ * MAX_PROJECT_LEVELS levels and sub-tasks MAX_TASK_DEPTH below a top task, a sub-task in its parent's project, and a
+ * task's section in its project. A file that broke them would make the store's walks up and down never end.
+ */
+function checkTrees(tables: TodoTables): void {
+  const wrong = (what: string) => new TowerError('invalid', `할 일 백업의 구조가 올바르지 않습니다: ${what}`);
+  const byId = (rows: Record<string, unknown>[] | undefined) => new Map((rows ?? []).map(row => [String(row.id), row]));
+  const projects = byId(tables.todo_projects), sections = byId(tables.todo_sections), tasks = byId(tables.todo_tasks);
+  /** How many parents above `id`, refusing a cycle or a chain longer than `most`. */
+  const above = (rows: Map<string, Record<string, unknown>>, id: string, most: number, what: string) => {
+    let count = 0;
+    for (let parent = rows.get(id)?.parent_id; parent !== null && parent !== undefined; parent = rows.get(String(parent))?.parent_id) {
+      if (++count > most) throw wrong(`${what} ${id}`);
+    }
+    return count;
+  };
+  for (const id of projects.keys()) above(projects, id, MAX_PROJECT_LEVELS - 1, '프로젝트 단계');
+  for (const [id, task] of tasks) {
+    above(tasks, id, MAX_TASK_DEPTH, '하위 작업 단계');
+    const parent = task.parent_id === null || task.parent_id === undefined ? undefined : tasks.get(String(task.parent_id));
+    if (parent && parent.project_id !== task.project_id) throw wrong(`하위 작업 ${id}의 프로젝트`);
+    const section = task.section_id === null || task.section_id === undefined ? undefined : sections.get(String(task.section_id));
+    if (section && section.project_id !== task.project_id) throw wrong(`작업 ${id}의 섹션`);
   }
 }
 

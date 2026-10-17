@@ -367,3 +367,27 @@ test('a copy from before a restore that cannot be read does not stop the cleanup
   store.purge(); await files.purge();
   assert.equal(await files.hasContent(done.file.sha256, done.file.size), false);
 });
+
+test('a restore whose projects or tasks do not form the trees the store keeps is refused and changes nothing', async t => {
+  const { apply, store } = await fixture(t);
+  apply({ op: 'project.create', id: 'p', name: 'P' }, { op: 'project.create', id: 'q', name: 'Q', parentId: 'p' }, { op: 'project.create', id: 'other', name: 'Other' },
+    { op: 'section.create', id: 's', projectId: 'other', name: 'S' },
+    { op: 'task.create', id: 'a', projectId: 'p', content: 'A' }, { op: 'task.create', id: 'b', parentId: 'a', content: 'B' });
+  const tables = store.backupData()!.tables;
+  const before = { tables: store.backupData()!.tables, revision: store.revision() };
+  const task = (id: string, change: Record<string, unknown>) => tables.todo_tasks!.map(row => row.id === id ? { ...row, ...change } : row);
+  const deep = ['d1', 'd2', 'd3', 'd4', 'd5'].map((id, index, all) => ({ ...tables.todo_tasks![0]!, id, parent_id: index ? all[index - 1] : 'a', sort_key: 'V' }));
+  const cases: [string, TodoTables][] = [
+    ['a task its own parent', { ...tables, todo_tasks: task('a', { parent_id: 'a' }) }],
+    ['two tasks each the other’s parent', { ...tables, todo_tasks: task('a', { parent_id: 'b' }) }],
+    ['a project cycle', { ...tables, todo_projects: tables.todo_projects!.map(row => row.id === 'p' ? { ...row, parent_id: 'q' } : row) }],
+    ['sub-tasks five levels down', { ...tables, todo_tasks: [...tables.todo_tasks!, ...deep] }],
+    ['a sub-task in another project', { ...tables, todo_tasks: task('b', { project_id: 'other' }) }],
+    ['a section of another project', { ...tables, todo_tasks: task('a', { section_id: 's' }) }],
+  ];
+  for (const [what, bad] of cases) {
+    assert.throws(() => store.restoreData(TODO_SCHEMA_STEP, bad), (error: unknown) => kind(error) === 'invalid', what);
+    assert.deepEqual(store.backupData()!.tables, before.tables, what);
+    assert.equal(store.revision(), before.revision, what);
+  }
+});

@@ -37,6 +37,8 @@ export interface TodoBackupSnapshot { part: TodoBackupPart; contents: Map<string
 
 export const TODO_FILES_FOLDER = 'tower-todo-files/';
 const PIECE_BYTES = 8 * 1024 * 1024;
+/** Attachments the bucket refuses one after another before the rest of a round's are given up. */
+const REFUSALS_IN_A_ROW = 3;
 const SEAL_BYTES = 12 + 16;
 const NAMESPACE = /^[a-z0-9-]{1,80}-[0-9a-f]{16}$/;
 const KEY = /^[A-Za-z0-9_-]{43}$/;
@@ -103,6 +105,8 @@ export interface TodoBackupOptions {
 
 export class TodoBackup {
   private readonly pieceBytes: number;
+  /** Counts restores that replaced the todos; a backup round started before one does not speak for what is there now. */
+  private restores = 0;
   /** The last restore's attachments being brought back; `active` until that ends or another restore replaces it. */
   private bringing?: { stop: AbortController; done: Promise<void>; active: boolean };
 
@@ -123,7 +127,7 @@ export class TodoBackup {
    * what the backup could not hold: contents damaged here (`damaged`: not what their hash says, so the copies already
    * in the bucket stay as they are), contents that could not be read or sent (`failed`), and contents neither here nor
    * in the namespace (`missing`). A failure of one object leaves the others to try; a bucket that does not answer at all
-   * (an error marked `unreachable`) fails the rest of them at once. Once `signal` says Tower is stopping, a failure is
+   * (an error marked `unreachable`), or refuses several in a row, fails the rest of them at once. Once `signal` says Tower is stopping, a failure is
    * the backup's.
    */
   async upload(objects: TodoObjectStore, prefix: string, snapshot: TodoBackupSnapshot, signal?: AbortSignal): Promise<{ damaged: string[]; failed: string[]; missing: string[] }> {
@@ -136,19 +140,25 @@ export class TodoBackup {
     try { present = wholeContents((await objects.scan(base)).keys, base); }
     catch (error) { console.warn(`Todo attachments in the backup could not be listed; all are uploaded: ${error instanceof Error ? error.message : String(error)}`); }
     const wanted = [...snapshot.contents].filter(([sha256]) => !present.has(sha256));
+    let refused = 0;
     for (const [index, [sha256, size]] of wanted.entries()) {
       try {
         if (!await this.files.hasContent(sha256, size)) missing.push(sha256);
         else if (!await this.uploadContent(objects, base, key, sha256, size)) damaged.push(sha256);
+        else refused = 0;
       } catch (error) {
         if (signal?.aborted) throw error;
         console.warn(`Todo attachment ${sha256} was not backed up: ${error instanceof Error ? error.message : String(error)}`);
-        if ((error as { unreachable?: boolean }).unreachable) { failed.push(...wanted.slice(index).map(([item]) => item)); break; }
+        // A bucket that does not answer, or refuses several in a row, would refuse the rest too.
+        if ((error as { unreachable?: boolean }).unreachable || ++refused >= REFUSALS_IN_A_ROW) { failed.push(...wanted.slice(index).map(([item]) => item)); break; }
         failed.push(sha256);
       }
     }
     return { damaged, failed, missing };
   }
+
+  /** Moves each time a restore replaces the todos. */
+  generation(): number { return this.restores; }
 
   /** Whether a restore is still bringing attachments back: a backup made now would not hold them. */
   restoring(): boolean { return Boolean(this.bringing?.active); }
@@ -188,6 +198,7 @@ export class TodoBackup {
   async restore(value: unknown, objects: () => TodoObjectStore, prefix: string): Promise<{ before: string }> {
     const part = parseTodoPart(value);
     const before = await this.files.contentTurnOf(() => this.store.restoreData(part.schema, part.tables));
+    this.restores++;
     // Only once these rows are in does the earlier restore's bringing back stop: a refused restore leaves it going.
     this.close();
     const stop = new AbortController();
