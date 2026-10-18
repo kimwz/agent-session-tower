@@ -28,12 +28,12 @@ export function viewKey(view: TodoView): string {
   }
 }
 
-/** The list a `todo=` value names; the Inbox when it names none (the page opens there). */
+/** The list a `todo=` value names; everything (`all`) when it names none (the page opens there). */
 export function parseView(value: string | null): TodoView {
   if (value === 'all' || value === 'inbox' || value === 'today' || value === 'upcoming' || value === 'search') return { kind: value };
   const match = /^([pl]):(.+)$/.exec(value ?? '');
   if (match && ID.test(match[2])) return match[1] === 'p' ? { kind: 'project', id: match[2] } : { kind: 'label', id: match[2] };
-  return { kind: 'inbox' };
+  return { kind: 'all' };
 }
 
 export function readTodoLocation(search: string): TodoLocation {

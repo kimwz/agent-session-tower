@@ -141,23 +141,13 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     if (replace) window.history.replaceState({}, '', url); else window.history.pushState({}, '', url);
     setLocation(next);
   }, []);
-  // Opened without a list or layout (`?view=todo`), the Inbox shows in the layout it was last shown in, as it does when
-  // gone to; once the todos are read, and only if nothing else was chosen meanwhile.
-  const unnamed = useRef((() => { const params = new URLSearchParams(window.location.search); return !params.has('todo') && !params.has('layout'); })());
   useEffect(() => {
-    const onPop = () => { if (!isTodoPage(window.location.search)) return; unnamed.current = false; const next = readTodoLocation(window.location.search); locationRef.current = next; setLocation(next); };
+    const onPop = () => { if (!isTodoPage(window.location.search)) return; const next = readTodoLocation(window.location.search); locationRef.current = next; setLocation(next); };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
   // The address names the list even when it was opened without one.
   useEffect(() => { navigate({}, true); }, [navigate]);
-  useEffect(() => {
-    if (!unnamed.current || state.phase !== 'ready') return;
-    unnamed.current = false;
-    const layout = projectOf(world, { kind: 'inbox' })?.layout;
-    const shown = locationRef.current;
-    if (layout && shown.view.kind === 'inbox' && shown.layout === 'board' && layout !== 'board') navigate({ layout }, true);
-  }, [state.phase, world, navigate]);
   useEffect(() => { client.openDetail(openTaskId); }, [client, openTaskId]);
   useEffect(() => { setStart(today); setSelectedId(null); }, [key, today]);
   useEffect(() => { setShowArchivedSections(false); setExpanded(new Set()); }, [key]);
