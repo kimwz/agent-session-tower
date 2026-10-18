@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { ArchiveRestore, Bell, KeyRound, BrainCircuit, ChevronRight, Cpu, ListChecks, Network, ShieldCheck, SlidersHorizontal, Sparkles, UserRoundCog, X, Zap, type LucideIcon } from 'lucide-react';
+import { ArchiveRestore, Bell, KeyRound, BrainCircuit, ChevronRight, Cpu, ListChecks, LoaderCircle, Network, ShieldCheck, SlidersHorizontal, Sparkles, UserRoundCog, X, Zap, type LucideIcon } from 'lucide-react';
 import type { ProviderHealth } from '../../../shared/types';
 import type { TriggerOverview } from '../../../shared/triggers';
 import { useI18n } from '../i18n/i18n';
@@ -16,7 +16,6 @@ import { RemotePanel, type RemoteTab } from '../remote/RemotePanel';
 import { NotificationPanel } from '../notifications/NotificationPanel';
 import { AccountSection } from '../auth/AccountPanel';
 import { GeneralSettings } from './GeneralSettings';
-import { TodoSettings } from './TodoSettings';
 import { BackupPanel } from '../backup/BackupPanel';
 import { SecretsPanel } from '../secrets/SecretsPanel';
 import type { SecretCanvas } from '../secrets/secrets-client';
@@ -42,6 +41,9 @@ export interface SettingsContext {
 }
 
 export interface SettingsPlace { section: SettingsSection; cwd?: string; remoteTab?: RemoteTab; list?: boolean; secretId?: string }
+
+// Its drag-and-drop library stays with the Todo page's chunk, out of every page's first load.
+const TodoSettings = lazy(() => import('./TodoSettings').then(module => ({ default: module.TodoSettings })));
 
 const ICONS: Record<SettingsSection, LucideIcon> = { general: SlidersHorizontal, todos: ListChecks, models: Cpu, triggers: Zap, skills: Sparkles, permissions: ShieldCheck, decisions: BrainCircuit, remote: Network, notifications: Bell, backup: ArchiveRestore, secrets: KeyRound, account: UserRoundCog };
 const GROUPS: { caption?: string; sections: SettingsSection[] }[] = [
@@ -112,7 +114,7 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
     const clearFolder = () => onPlace({ section, cwd: undefined });
     switch (section) {
       case 'general': return <GeneralSettings canvas={canvas} showHidden={context.showHidden} onShowHiddenChange={context.onShowHiddenChange} />;
-      case 'todos': return <TodoSettings token={context.token} />;
+      case 'todos': return <Suspense fallback={<LoaderCircle className="spin" aria-label={t('연결 중')} />}><TodoSettings token={context.token} /></Suspense>;
       case 'models': return <ModelsPanel token={context.token} providers={context.providers} computers={context.computers} />;
       case 'triggers': return <TriggerPanel token={context.token} overview={context.triggers} providers={context.providers} projects={context.projects}
         computers={context.computers} targets={context.targets} onOpenSlack={() => setSlack(true)} onOpenPublic={() => setPublicAgents(true)} onSeen={onTriggersSeen} />;

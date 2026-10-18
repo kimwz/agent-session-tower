@@ -6,7 +6,7 @@ import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { MAX_CHAT_PRESET_LENGTH, MAX_CHAT_PRESETS } from '../../../shared/todo/chat-presets';
 import { api } from '../common/lib';
 import { useI18n, translateMessage } from '../i18n/i18n';
-import { movePreset, presetsToSave, shownChatPresets } from '../todo/chat-presets';
+import { movePreset, presetsDirty, presetsToSave, shownChatPresets } from '../todo/chat-presets';
 import { useTodoSensors } from '../todo/todo-dnd';
 import { SettingsPane, useSettingsGuard } from './SettingsPane';
 
@@ -22,7 +22,6 @@ export function TodoSettings({ token }: { token: string }) {
   // undefined while reading; null when nothing is saved (the defaults show).
   const [saved, setSaved] = useState<string[] | null>();
   const [rows, setRows] = useState<Row[]>([]);
-  // What the rows started from, so a language change alone (defaults shown translated) is no edit.
   const [baseline, setBaseline] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -36,7 +35,7 @@ export function TodoSettings({ token }: { token: string }) {
     api<{ presets: string[] | null }>(PRESETS_PATH).then(answer => take(answer.presets), cause => setError(cause instanceof Error ? cause.message : String(cause)));
   };
   useEffect(load, []);
-  const dirty = saved !== undefined && JSON.stringify(presetsToSave(rows.map(row => row.text))) !== JSON.stringify(baseline);
+  const dirty = saved !== undefined && presetsDirty(rows.map(row => row.text), baseline);
   useSettingsGuard({ leave: () => !dirty || window.confirm(t('저장하지 않은 프리셋을 버릴까요?')) });
 
   const store = async (presets: string[] | null, done: string) => {
