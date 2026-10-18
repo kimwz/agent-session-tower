@@ -199,11 +199,12 @@ export class RetentionService {
     // Sessions handed over to go once their work ends (a closed todo's issue master and its family) leave soon after:
     // while one waits only for its work to end, cycles come every few minutes. One held back by the owner (a reopened
     // sub-session) waits for the hourly cycle as everything else does.
-    // "Protected" also covers lasting holds (a trigger's target, a coordinator): only a session still running counts.
+    // Only work still running ends by itself soon: a lasting hold (a trigger's target, a coordinator) or a quiet session
+    // with no recorded end waits for the hourly cycle as everything else does.
     const requested = new Set(observation.records.filter(record => record.archiveWhenIdle).map(record => record.session.id));
     const running = (id: string) => observation.records.some(record => (record.session.id === id || record.session.parentId === id)
       && (record.session.status === 'working' || Boolean(record.session.activeProcess) || Boolean(record.session.creationPending)));
-    this.waiting = selected.deferred.some(item => requested.has(item.id) && (item.reason === 'awaiting-idle' || (item.reason === 'protected' && running(item.id))));
+    this.waiting = selected.deferred.some(item => requested.has(item.id) && (item.reason === 'awaiting-idle' || item.reason === 'protected') && running(item.id));
     this.deferred = 0; this.deferredReasons = {};
     for (const item of selected.deferred) this.addDeferred(item.reason);
     if (observation.complete) {

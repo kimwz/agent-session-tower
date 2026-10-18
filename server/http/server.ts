@@ -373,7 +373,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       // An agent of the owner's on this computer (`agent-session-tower mcp`) says so, and its changes count apart too.
       const localAgent = !masterCall && identity.local && req.headers['x-tower-agent'] === 'local';
       // A job this request made, not one an earlier request with the same id made (that one keeps whom it was for).
-      const madeNow = (createdAt: unknown, asked: number) => typeof createdAt === 'string' && Date.parse(createdAt) >= asked - 1000;
+      const madeNow = (createdAt: unknown, asked: number) => typeof createdAt === 'string' && Date.parse(createdAt) >= asked;
       // An issue master calls as the master does, naming its todo; only the verified master is believed.
       const issueOf = (record: (taskId: string) => void) => {
         const issue = masterCall ? req.headers[TODO_MASTER_ISSUE_HEADER.toLowerCase()] : undefined;
