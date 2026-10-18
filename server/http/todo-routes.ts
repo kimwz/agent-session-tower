@@ -18,6 +18,8 @@ export interface TodoBackend {
   startAgent?(id: string, text: string): Promise<TodoAgent>;
   /** Records a session an issue master made (POST /api/sessions on its behalf) in its todo's family. */
   issueSession?(taskId: string, sessionId: string): void;
+  /** An Auto Prompt job an issue master sent: a new session it makes joins that todo's family. */
+  issueJob?(taskId: string, jobId: string): void;
   /** The sessions of open issue masters' families, with their todo. */
   agentSessions?(): Record<string, { taskId: string; title: string }>;
   /** Attachments; absent where they cannot be kept. */

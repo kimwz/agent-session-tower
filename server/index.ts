@@ -563,6 +563,7 @@ async function main() {
       ...todoCalls,
       startAgent: (id, text) => todoAgents.begin(id, text),
       issueSession: (taskId, sessionId) => todoAgents.recordIssueSession(taskId, sessionId),
+      issueJob: (taskId, jobId) => todoAgents.recordIssueJob(taskId, jobId),
       agentSessions: () => todos.agentSessions(),
       files: {
         startUpload: input => todoFiles.startUpload(input),
@@ -599,6 +600,7 @@ async function main() {
     // Only once the worker answered and its sessions are known: an empty list would look like masters gone missing.
     sessions: () => runs.runnerVersion() && runs.storageStatus()?.sessionsAvailable !== false ? sessionViews() : undefined,
     run: id => runs.list().find(run => run.id === id),
+    jobs: () => runs.autoPromptList(),
     reopen: id => backend.setClosed!(id, false),
     // The worker's retention moves them (and their sub-agents) to compressed storage once their work is over.
     requestArchive: ids => runs.retention('requestArchive', ids),

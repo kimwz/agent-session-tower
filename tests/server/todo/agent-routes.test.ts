@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -73,7 +74,10 @@ test('an issue master creates sessions as the main master does, and only the ver
       const id = `s${++count}`;
       return { session: { id } as never, run: { id: `r${count}`, sessionId: id } as never };
     },
-    todos: { overview: unused, detail: unused, completed: unused, search: unused, apply: unused, issueSession: (taskId, sessionId) => { recorded.push([taskId, sessionId]); } },
+    // A request id sent again answers the job it made first: `old` stands for that, made before this request.
+    startAutoPrompt: async input => ({ id: `job-${++count}`, createdAt: (input as { prompt?: string }).prompt === 'old' ? '2026-01-01T00:00:00.000Z' : new Date().toISOString() }) as never,
+    todos: { overview: unused, detail: unused, completed: unused, search: unused, apply: unused, issueSession: (taskId, sessionId) => { recorded.push([taskId, sessionId]); },
+      issueJob: (taskId, jobId) => { recorded.push([taskId, jobId]); } },
   } });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -91,4 +95,12 @@ test('an issue master creates sessions as the main master does, and only the ver
   assert.equal((await create({ [TODO_MASTER_ISSUE_HEADER]: 'task_1', 'X-Tower-Agent': 'local' })).status, 202);
   assert.equal((await create({ 'X-Tower-Master': masterSecret, [TODO_MASTER_ISSUE_HEADER]: '../x' })).status, 202);
   assert.deepEqual(recorded, [['task_1', 's2']]);
+  // An Auto Prompt job it sends is remembered for its todo the same way: a new session the job makes joins the family.
+  const job = (extra: Record<string, string>, prompt = 'do it') => fetch(`${base}/api/auto-prompts`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token, ...extra },
+    body: JSON.stringify({ requestId: randomUUID(), provider: 'claude', prompt }) });
+  assert.equal((await job({ 'X-Tower-Master': masterSecret, [TODO_MASTER_ISSUE_HEADER]: 'task_1' })).status, 202);
+  assert.equal((await job({ [TODO_MASTER_ISSUE_HEADER]: 'task_1', 'X-Tower-Agent': 'local' })).status, 202);
+  // A job an earlier request made (another master's, sent again) is not claimed for this todo.
+  assert.equal((await job({ 'X-Tower-Master': masterSecret, [TODO_MASTER_ISSUE_HEADER]: 'task_1' }, 'old')).status, 202);
+  assert.deepEqual(recorded.slice(1), [['task_1', 'job-5']]);
 });

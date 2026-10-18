@@ -372,6 +372,13 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       const masterCall = Boolean(master && typeof caller === 'string' && caller.length === master.callerSecret.length && timingSafeEqual(Buffer.from(caller), Buffer.from(master.callerSecret)));
       // An agent of the owner's on this computer (`agent-session-tower mcp`) says so, and its changes count apart too.
       const localAgent = !masterCall && identity.local && req.headers['x-tower-agent'] === 'local';
+      // A job this request made, not one an earlier request with the same id made (that one keeps whom it was for).
+      const madeNow = (createdAt: unknown, asked: number) => typeof createdAt === 'string' && Date.parse(createdAt) >= asked;
+      // An issue master calls as the master does, naming its todo; only the verified master is believed.
+      const issueOf = (record: (taskId: string) => void) => {
+        const issue = masterCall ? req.headers[TODO_MASTER_ISSUE_HEADER.toLowerCase()] : undefined;
+        if (typeof issue === 'string' && TODO_MASTER_TASK_ID.test(issue)) record(issue);
+      };
       const callerContext = (): RequestContext | undefined => {
         const capability = req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()];
         // The signed-in owner's page or the verified master; never a local agent, a calling turn or loopback alone.
@@ -436,7 +443,11 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         if (!backend.api) return json(res, 503, { error: 'Tower operations are unavailable.' });
         const input = await readJson(req, 1_000_000);
         if (masterCall && operation[1] === 'autoPrompt.submit') input.modelRole = 'master.worker';
-        return json(res, 200, { result: await backend.api(operation[1], input, callerContext()) });
+        const asked = Date.now();
+        const result = await backend.api(operation[1], input, callerContext());
+        const job = operation[1] === 'autoPrompt.submit' ? (result as { job?: { id?: unknown; createdAt?: unknown } } | undefined)?.job : undefined;
+        if (job && typeof job.id === 'string' && madeNow(job.createdAt, asked)) issueOf(taskId => backend.todos?.issueJob?.(taskId, job.id as string));
+        return json(res, 200, { result });
       }
       if (path === '/api/runner/force-update' && req.method === 'POST') {
         if (!forceRunnerUpdate) return json(res, 503, { error: 'Updates are unavailable.' });
@@ -744,7 +755,10 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const request = parseAutoPrompt(masterCall ? { ...body, modelRole: 'master.worker' } : body);
         if (request.attachmentIds?.length && backend.attachmentReferences?.() !== true) throw Object.assign(new TowerError('unavailable', '실행 작업자가 원본 첨부 지원 업데이트를 기다리고 있습니다. 잠시 후 다시 시도하세요.'), { disposition: 'not-admitted' });
         if (!backend.startAutoPrompt) return json(res, 503, { error: 'Auto Prompt를 현재 사용할 수 없습니다.' });
-        return json(res, 202, { job: await backend.startAutoPrompt(request, callerContext()) });
+        const asked = Date.now();
+        const job = await backend.startAutoPrompt(request, callerContext());
+        if (madeNow(job.createdAt, asked)) issueOf(taskId => backend.todos?.issueJob?.(taskId, job.id));
+        return json(res, 202, { job });
       }
       const autoPromptMatch = url.pathname.match(/^\/api\/auto-prompts\/([a-f\d-]+)(\/cancel)?$/i);
       if (autoPromptMatch && UUID.test(autoPromptMatch[1])) {
@@ -881,9 +895,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const input = parseCreateSession(masterCall ? { ...body, modelRole: 'master.worker' } : body);
         if (!backend.createSession) return json(res, 503, { error: '새 세션을 생성할 수 없습니다.' });
         const result = await backend.createSession(input, callerContext());
-        // An issue master calls as the master does, naming its todo; only the verified master is believed.
-        const issue = masterCall ? req.headers[TODO_MASTER_ISSUE_HEADER.toLowerCase()] : undefined;
-        if (typeof issue === 'string' && TODO_MASTER_TASK_ID.test(issue)) backend.todos?.issueSession?.(issue, result.session.id);
+        issueOf(taskId => backend.todos?.issueSession?.(taskId, result.session.id));
         return json(res, 202, { ...result, session: publicSession(result.session) });
       }
       const compactionMatch = path.match(/^\/api\/sessions\/([^/]+)\/compaction(\/cancel)?$/);

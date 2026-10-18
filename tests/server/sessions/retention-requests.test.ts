@@ -167,8 +167,13 @@ test('a request survives a service restart, archives the master with its subagen
   try {
     // The master is still in its turn: nothing moves.
     let summary = await service.cycle(); assert.equal(summary.archived, 0); assert.deepEqual(adapter.moved, []); assert.equal(summary.deferredReasons?.['awaiting-idle'], 1);
+    // While it only waits for its work to end, the next look comes in minutes, not an hour.
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(service.nextCycleIn(), 2 * 60_000);
     working = false;
     summary = await service.cycle(); assert.equal(summary.archivedMembers, 2); assert.deepEqual(adapter.moved.sort(), ['child', 'master']);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.notEqual(service.nextCycleIn(), 2 * 60_000, 'nothing waits any more');
     await assert.rejects(readFile(join(native, 'master.jsonl')), /ENOENT/);
     hot = false;
     // Reopening (setClosed false) restores the family, then cancels the request.

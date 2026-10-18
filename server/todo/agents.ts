@@ -3,7 +3,7 @@ import { TODO_MASTERS_FOLDER } from '../../shared/master.js';
 import type { ResolvedModel } from '../../shared/models.js';
 import { TowerError } from '../../shared/errors.js';
 import type { TodoAgent, TodoOverview, TodoTaskDetail } from '../../shared/todo/types.js';
-import type { CreateSessionRequest, Run, Session } from '../../shared/types.js';
+import type { AutoPromptJob, CreateSessionRequest, Run, Session } from '../../shared/types.js';
 import { MAX_PROMPT } from '../runs/run-records.js';
 import { issueMasterCandidates, newestIssueMaster, todoMasterTaskId } from '../runs/subscription.js';
 import { todoFilePath } from './files.js';
@@ -46,10 +46,12 @@ export type AgentSession = Pick<Session, 'id' | 'cwd' | 'provider' | 'status' | 
 
 export interface TodoAgentsOptions {
   stateDir: string;
-  store: Pick<TodoStore, 'availability' | 'agentsToSettle' | 'agent' | 'taskState' | 'settleAgents' | 'changeAgent' | 'familyOf' | 'familyTask' | 'addFamily' | 'removeFamily' | 'detail' | 'overview'>;
+  store: Pick<TodoStore, 'availability' | 'agentsToSettle' | 'agent' | 'taskState' | 'settleAgents' | 'changeAgent' | 'familyOf' | 'familyTask' | 'addFamily' | 'removeFamily' | 'detail' | 'overview' | 'claimJob' | 'claimedJobs' | 'forgetJobs'>;
   /** This computer's sessions; undefined while they cannot be known (no worker, sessions unavailable). */
   sessions(): AgentSession[] | undefined;
   run(id: string): Pick<Run, 'sessionId'> | undefined;
+  /** This computer's Auto Prompt jobs, as the snapshot lists them: a job an issue master sent may make a new session. */
+  jobs?(): readonly Pick<AutoPromptJob, 'id' | 'sessionId' | 'decision' | 'delegation'>[] | undefined;
   /**
    * Shows a session as the owner's reopen does: brings it back from compressed storage and takes back its hand-over
    * to retention. Undefined when there is no such session.
@@ -86,6 +88,8 @@ export class TodoAgents {
   private readonly starting = new Set<string>();
   /** Sessions this process handed to retention; after a restart they are handed again once, which changes nothing. */
   private readonly handed = new Set<string>();
+  /** Jobs already looked at for a new session: each is adopted once. */
+  private readonly adopted = new Set<string>();
   /**
    * Todos whose master this process has taken back from retention since the master last (re)opened. Once per process
    * and per reopening, so a hand-over left from before a restart never outlives an open todo.
@@ -214,6 +218,48 @@ export class TodoAgents {
   }
 
   /**
+   * Remembers an Auto Prompt job an issue master sent with the master's own calls (they name the todo, see
+   * TODO_MASTER_ISSUE_HEADER): a new session it makes joins the todo's family (`adoptJobs`).
+   */
+  recordIssueJob(taskId: string, jobId: string): void {
+    try {
+      if (!this.options.store.agent(taskId)) return;
+      this.options.store.claimJob(jobId, taskId);
+      void this.schedule();
+    } catch (error) { console.error(`An Auto Prompt job an issue master sent was not recorded: ${message(error)}`); }
+  }
+
+  /**
+   * Sessions Auto Prompt jobs made for an issue master join its family, as sessions it makes itself do: jobs it sent
+   * with the master's calls (`recordIssueJob`), and jobs its turns or its family's sent with their Tower tools (their
+   * delegation names the calling turn). A job that continued an existing session leaves that session alone: the issue
+   * master used it but did not make it.
+   */
+  private adoptJobs(): void {
+    const jobs = this.options.jobs?.();
+    if (!jobs) return;
+    const listed = new Set(jobs.map(job => job.id));
+    for (const id of this.adopted) if (!listed.has(id)) this.adopted.delete(id);
+    const store = this.options.store;
+    const claimed = store.claimedJobs();
+    // A claim lasts while its job is listed; one adopted or gone is let go.
+    store.forgetJobs([...claimed.keys()].filter(id => !listed.has(id)));
+    for (const job of jobs) {
+      if (this.adopted.has(job.id) || !job.sessionId || job.decision?.action !== 'create') continue;
+      let taskId = claimed.get(job.id);
+      if (!taskId && job.delegation) {
+        const parent = this.options.run(job.delegation.parentRunId) ?? this.options.run(job.delegation.rootRunId);
+        const cwd = parent ? this.options.sessions()?.find(session => session.id === parent.sessionId)?.cwd : undefined;
+        taskId = (cwd ? todoMasterTaskId(this.options.stateDir, cwd) : undefined) ?? (parent ? store.familyTask(parent.sessionId) : undefined);
+      }
+      // Done with only once its session is recorded (or there is nothing to record): a failed write is tried again.
+      if (taskId && store.agent(taskId) && !store.familyTask(job.sessionId)) { store.addFamily(job.sessionId, taskId); this.options.onChange(); }
+      this.adopted.add(job.id);
+      if (claimed.has(job.id)) store.forgetJobs([job.id]);
+    }
+  }
+
+  /**
    * Records a session an issue master made itself (its calls carry the todo, see TODO_MASTER_ISSUE_HEADER) in that
    * todo's family; one made for a closed issue is handed over by the next pass.
    */
@@ -237,6 +283,7 @@ export class TodoAgents {
     // A todo file this build may not change (or cannot open) is left as it is until one that may does.
     const sessions = this.options.sessions();
     if (this.stopped || !sessions || store.availability().state !== 'ready') return;
+    try { this.adoptJobs(); } catch (error) { console.error(`Sessions Auto Prompt made for issue masters were not recorded: ${message(error)}`); }
     const full = this.now() - this.fullCheckAt >= FULL_CHECK_MS;
     const moved = store.settleAgents(full ? 'all' : 'open');
     if (full) this.fullCheckAt = this.now();

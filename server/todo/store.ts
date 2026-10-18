@@ -528,6 +528,27 @@ export class TodoStore {
     });
   }
 
+  /** Remembers the todo an issue master sent an Auto Prompt job for; the first todo named keeps it. */
+  claimJob(jobId: string, taskId: string): void {
+    this.agentWrite(() => {
+      if (this.get('SELECT 1 FROM todo_agent_jobs WHERE job_id = ?', jobId)) return false;
+      this.run('INSERT INTO todo_agent_jobs (job_id, task_id, created_at) VALUES (?, ?, ?)', jobId, taskId, this.now());
+      return true;
+    }, true);
+  }
+  /** The todo an issue master sent a job for, by job. */
+  claimedJobs(): Map<string, string> {
+    this.readable();
+    return new Map(this.all<{ job_id: string; task_id: string }>('SELECT job_id, task_id FROM todo_agent_jobs').map(row => [row.job_id, row.task_id]));
+  }
+  forgetJobs(jobIds: readonly string[]): void {
+    if (!jobIds.length) return;
+    this.agentWrite(() => {
+      for (const id of jobIds) this.run('DELETE FROM todo_agent_jobs WHERE job_id = ?', id);
+      return true;
+    }, true);
+  }
+
   removeFamily(taskId: string): void {
     this.agentWrite(() => {
       if (!this.get('SELECT 1 FROM todo_agent_sessions WHERE task_id = ?', taskId)) return false;
@@ -553,12 +574,13 @@ export class TodoStore {
   }
 
   /** One write of issue masters' rows; a change moves the revision, so open pages load again. */
-  private agentWrite(work: () => boolean): boolean {
+  /** `quiet`: what pages do not show (job claims) leaves the revision as it is. */
+  private agentWrite(work: () => boolean, quiet = false): boolean {
     this.writable();
     let revision: number | undefined;
     this.transaction(() => {
       if (Number(this.meta('min_writer') ?? 1) > TODO_SCHEMA_STEP) throw new TowerError('locked', '더 새로운 Tower가 바꾼 할 일 저장소입니다.');
-      if (work()) revision = this.nextRevision();
+      if (work() && !quiet) revision = this.nextRevision();
     });
     if (revision !== undefined) this.revisionValue = Math.max(this.revisionValue, revision);
     return revision !== undefined;
