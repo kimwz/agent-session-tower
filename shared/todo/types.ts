@@ -191,6 +191,8 @@ export interface TodoOverview {
   agents?: Record<string, TodoAgent>;
   /** Present after a backup was restored here, while and after its attachments are brought back. */
   restore?: TodoRestoreProgress;
+  /** The empty issue chat's first-message buttons, once the owner saved a list (shared/todo/chat-presets.ts). */
+  chatPresets?: string[];
 }
 
 /** What one request changed, including what it deleted (with `deletedAt`) or completed (with `completedAt`). */

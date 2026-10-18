@@ -9,6 +9,7 @@ import { getLanguage, translate as t } from '../i18n/i18n';
 import { DatePicker, type DateValue } from './DatePicker';
 import { Menu, Popover, usePopover, type MenuItem } from './Popover';
 import { AgentIcon, CheckCircle } from './TaskCard';
+import { shownChatPresets } from './chat-presets';
 import { TodoAgentContext } from './todo-agents';
 import { TodoMarkdown } from './TodoMarkdown';
 import { AttachButton, AttachmentList, UploadRows, useFileDrop } from './attachments/Attachments';
@@ -483,23 +484,27 @@ export function CompleteButton({ task, actions, onFollowUp, readOnly }: { task: 
 /** The issue master's first message: the server starts it with the todo's content attached (`POST …/agent`). */
 const AGENT_TEXT_MAX = 32_000;
 
-function AgentStart({ task, client, readOnly }: { task: TodoTask; client: TodoClient; readOnly: boolean }) {
+function AgentStart({ task, presets, client, readOnly }: { task: TodoTask; presets: readonly string[]; client: TodoClient; readOnly: boolean }) {
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const closed = !isOpen(task);
   const disabled = readOnly || closed || sending;
-  const send = async () => {
-    const message = text.trim();
+  // A preset is sent as it is, as if typed; what was typed stays in the box.
+  const send = async (preset?: string) => {
+    const message = (preset ?? text).trim();
     if (!message || disabled) return;
     setSending(true); setError('');
-    try { await client.startAgent(task.id, message); setText(''); }
+    try { await client.startAgent(task.id, message); if (preset === undefined) setText(''); }
     // The message stays, to send again.
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setSending(false); }
   };
   return <form className="todo-comment-form todo-agent-start" onSubmit={event => { event.preventDefault(); void send(); }}>
     <p>{closed ? t('완료하거나 지운 할 일은 채팅을 시작할 수 없습니다. 다시 열면 시작할 수 있습니다.') : t('첫 메시지를 보내면 이 할 일 전용 마스터가 이슈 내용과 첨부를 먼저 읽고 시작합니다.')}</p>
+    {presets.length > 0 && <div className="todo-agent-presets" role="group" aria-label={t('채팅 프리셋')}>
+      {presets.map(preset => <button key={preset} type="button" className="todo-agent-preset" disabled={disabled} title={preset} onClick={() => void send(preset)}>{preset}</button>)}
+    </div>}
     <textarea autoFocus={!disabled} value={text} rows={5} maxLength={AGENT_TEXT_MAX} disabled={disabled} placeholder={t('이슈 마스터에게 보낼 첫 메시지')} aria-label={t('이슈 마스터에게 보낼 첫 메시지')}
       onChange={event => setText(event.target.value)}
       onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) { event.preventDefault(); void send(); } }} />
@@ -513,11 +518,11 @@ function AgentStart({ task, client, readOnly }: { task: TodoTask; client: TodoCl
 }
 
 /** The chat tab: the issue master's conversation once it has a session, the first message before it has one. */
-function AgentChat({ task, agent, client, readOnly, onLeave }: { task: TodoTask; agent: TodoAgent | undefined; client: TodoClient; readOnly: boolean; onLeave: () => void }) {
+function AgentChat({ task, agent, presets, client, readOnly, onLeave }: { task: TodoTask; agent: TodoAgent | undefined; presets: readonly string[] | undefined; client: TodoClient; readOnly: boolean; onLeave: () => void }) {
   const { chat } = useContext(TodoAgentContext);
   if (agent?.sessionId) return <div className="todo-detail-chat">{chat(agent.sessionId, onLeave)}</div>;
   if (agent) return <div className="todo-agent-start todo-agent-starting" role="status"><LoaderCircle className="spin" size={16} /><span>{t('이슈 마스터를 시작하는 중입니다.')}</span></div>;
-  return <AgentStart key={task.id} task={task} client={client} readOnly={readOnly} />;
+  return <AgentStart key={task.id} task={task} presets={shownChatPresets(presets)} client={client} readOnly={readOnly} />;
 }
 
 /** The detail's tabs: the task itself, or its issue chat. The one chosen stays while the page is open. */
@@ -579,7 +584,7 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
       <button type="button" role="tab" aria-selected={!chatting} onClick={() => onTab('detail')}>{t('상세')}</button>
       <button type="button" role="tab" aria-selected={chatting} onClick={() => onTab('chat')}>{agent && <AgentIcon agent={agent} />}{t('채팅')}</button>
     </div>
-    {chatting && task ? <AgentChat task={task} agent={agent} client={client} readOnly={readOnly} onLeave={() => onTab('detail')} />
+    {chatting && task ? <AgentChat task={task} agent={agent} presets={world.chatPresets} client={client} readOnly={readOnly} onLeave={() => onTab('detail')} />
     : !task || !context ? <div className="todo-detail-empty">{error ? <p className="todo-error" role="alert">{error}</p> : <LoaderCircle className="spin" size={18} />}</div> : <div key={task.id} className="todo-detail-body">
       {/* A wide panel puts the properties in a card on the right; a phone shows them as chips under the title (todo.css). */}
       <div className="todo-detail-heading">

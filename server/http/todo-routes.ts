@@ -22,11 +22,16 @@ export interface TodoBackend {
   issueJob?(taskId: string, jobId: string): void;
   /** The sessions of open issue masters' families, with their todo. */
   agentSessions?(): Record<string, { taskId: string; title: string }>;
+  /** The empty issue chat's first-message buttons: the saved list, or null for the defaults. */
+  chatPresets?(): string[] | null;
+  /** Saves the owner's list (`null` goes back to the defaults); refuses an invalid one whole. */
+  setChatPresets?(presets: unknown): string[] | null;
   /** Attachments; absent where they cannot be kept. */
   files?: Pick<TodoFiles, 'startUpload' | 'uploadOffset' | 'appendUpload' | 'completeUpload' | 'cancelUpload' | 'openFile'>;
 }
 
 export const TODO_OPS_PATH = '/api/todos/ops';
+export const CHAT_PRESETS_PATH = '/api/todos/chat-presets';
 /** A request of 100 operations with long descriptions fits; nothing the page sends comes near it otherwise. */
 const MAX_TODO_BODY = 4 * 1024 * 1024;
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -74,7 +79,7 @@ async function sendFile(req: IncomingMessage, res: ServerResponse, files: NonNul
 
 /**
  * Answers `/api/todos…`; false for any other path. `owner` says the request is the owner's own page (see
- * server/http/server.ts), which starting an issue master needs.
+ * server/http/server.ts), which starting an issue master and saving the chat presets need.
  */
 export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: URL, path: string, todos: TodoBackend | undefined,
   json: (res: ServerResponse, status: number, body: unknown) => void, owner = false): Promise<boolean> {
@@ -104,6 +109,15 @@ export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: 
   if (req.method === 'GET' && path === '/api/todos/agents/sessions') {
     if (!todos.agentSessions) { json(res, 503, { error: '이슈 마스터를 사용할 수 없습니다.' }); return true; }
     json(res, 200, { sessions: todos.agentSessions() });
+    return true;
+  }
+  if (path === CHAT_PRESETS_PATH && (req.method === 'GET' || req.method === 'POST')) {
+    if (!todos.chatPresets || !todos.setChatPresets) { json(res, 503, { error: '채팅 프리셋을 사용할 수 없습니다.' }); return true; }
+    if (req.method === 'GET') { json(res, 200, { presets: todos.chatPresets() }); return true; }
+    if (!owner) { json(res, 403, { error: '채팅 프리셋은 소유자의 화면에서만 바꿀 수 있습니다.' }); return true; }
+    const body = await readJson(req, 64 * 1024);
+    if (Object.keys(body).some(key => key !== 'presets') || !('presets' in body)) throw new TowerError('invalid', '채팅 프리셋 형식이 올바르지 않습니다.');
+    json(res, 200, { presets: todos.setChatPresets(body.presets) });
     return true;
   }
   const agent = AGENT.exec(path);

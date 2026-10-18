@@ -26,6 +26,8 @@ export interface TodoWorld {
   agents: Record<string, TodoAgent>;
   /** Bringing back a restored backup's attachments. */
   restore?: TodoRestoreProgress;
+  /** The empty issue chat's buttons the owner saved; absent shows the defaults (`TodoOverview.chatPresets`). */
+  chatPresets?: string[];
   detail: TodoTaskDetail | null;
 }
 
@@ -47,6 +49,7 @@ export function worldFromOverview(overview: TodoOverview, previous?: TodoWorld):
     projects: [...overview.projects].sort(byOrder), sections: [...overview.sections].sort(byOrder), labels: [...overview.labels].sort(byOrder),
     tasks, links: Object.fromEntries(overview.links.map(link => [link.id, link])), commentCounts: { ...overview.commentCounts },
     fileCounts: { ...(overview.fileCounts ?? {}) }, subtaskCounts: { ...(overview.subtaskCounts ?? {}) }, agents: { ...(overview.agents ?? {}) }, ...(overview.restore ? { restore: overview.restore } : {}),
+    ...(overview.chatPresets ? { chatPresets: [...overview.chatPresets] } : {}),
     detail: previous?.detail ? syncDetail(previous.detail, tasks) : null,
   };
 }
