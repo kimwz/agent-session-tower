@@ -21,7 +21,8 @@ export function ViewSwitcher({ anchor, world, current, onChoose, onClose }: {
 }) {
   const targets = switchTargets(world);
   const shown = switchIndex(world, current);
-  const [marked, setMarked] = useState(() => Math.max(0, shown));
+  // A list it does not hold (a label, a search, a later project) marks the Inbox.
+  const [marked, setMarked] = useState(() => shown >= 0 ? shown : 1);
   const state = useRef({ targets, marked, onChoose, onClose });
   state.current = { targets, marked, onChoose, onClose };
   const list = useRef<HTMLDivElement>(null);

@@ -10,9 +10,10 @@ import { applyOps, inverseOps, worldFromOverview } from '../../../client/src/tod
 import { readShortcut, readSwitchKey } from '../../../client/src/todo/todo-shortcuts.js';
 import { moveSelection } from '../../../client/src/todo/todo-views.js';
 import { isTodoPage, pageSearch, readTodoLocation, todoSearch } from '../../../client/src/todo/todo-url.js';
-import { boardColumns, calendarTasks, cardContext, defaultDisplay, dropOps, dropPlace, groupingsFor, sectionDropAfter, manualOrder, overviewGroups, projectOrder, sectionMoveTarget, shapeSections, sidebarCounts, switchIndex, switchTargets, viewTitle, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { boardColumns, calendarTasks, cardContext, defaultDisplay, dropOps, dropPlace, foldGroups, groupingsFor, sectionDropAfter, shownTasks, manualOrder, overviewGroups, projectOrder, sectionMoveTarget, shapeSections, sidebarCounts, switchIndex, switchTargets, viewTitle, type ViewContext } from '../../../client/src/todo/todo-views.js';
 import { nthOf } from '../../../client/src/todo/DatePicker.js';
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
+import { collisionsFor } from '../../../client/src/todo/BoardView.js';
 import { PageSwitch } from '../../../client/src/todo/PageSwitch.js';
 import { recurrenceLabel } from '../../../client/src/todo/todo-format.js';
 import { label, overview, project, section, task } from './fixtures.js';
@@ -320,4 +321,29 @@ test('a section moves only among its own project sections', () => {
   assert.equal(sectionDropAfter(lists, 'a2', 'a2'), undefined);
   assert.equal(sectionDropAfter(lists, 'a2', 'b1'), undefined, "another project's section");
   assert.equal(sectionDropAfter(lists, 'b1', 'task:x'), undefined);
+});
+
+test('the overview shows the first three cards of a column until it is opened, and the arrow keys only those', () => {
+  const many = worldFromOverview(overview(['a', 'b', 'c', 'd', 'e'].map(id => task(id)).concat(task('t', { projectId: 'tower' })), { projects: [project('inbox', { inbox: true }), project('tower')] }));
+  const groups = overviewGroups(defaultDisplay({ kind: 'all' }), context({ world: many }));
+  const folded = foldGroups(groups, new Set());
+  assert.deepEqual(folded.flatMap(group => group.columns).map(column => [column.id, column.shown, shownTasks(column).map(item => item.id)]), [['inbox/section:none', 3, ['a', 'b', 'c']], ['tower/section:none', 3, ['t']]]);
+  const opened = foldGroups(groups, new Set(['inbox/section:none']));
+  assert.deepEqual(shownTasks(opened[0].columns[0]).map(item => item.id), ['a', 'b', 'c', 'd', 'e']);
+  assert.equal(opened[1].columns[0].shown, 3, 'only the column opened');
+  // What the arrow keys go through: the cards shown.
+  const visible = folded.flatMap(group => group.columns).map(column => ({ tasks: shownTasks(column) }));
+  assert.equal(moveSelection(visible, 'c', 'down'), 'c', 'never down to a folded card');
+  assert.equal(moveSelection(visible, 'c', 'right'), 't');
+});
+
+test('on the overview a card let go off every column lands nowhere, not in the nearest project', () => {
+  const rect = (left: number, top: number, width: number, height: number) => ({ left, top, width, height, right: left + width, bottom: top + height });
+  const droppableRects = new Map<string, ReturnType<typeof rect>>([['column:inbox/section:none', rect(0, 0, 280, 200)], ['column:tower/section:none', rect(0, 300, 280, 200)]]);
+  const droppableContainers = [...droppableRects.keys()].map(id => ({ id, rect: { current: droppableRects.get(id) }, data: { current: {} }, disabled: false, node: { current: null } })) as never[];
+  const args = (pointer: { x: number; y: number } | null) => ({ active: { id: 'task:a' } as never, collisionRect: rect(0, 250, 100, 30), droppableRects: droppableRects as never, droppableContainers, pointerCoordinates: pointer });
+  assert.deepEqual(collisionsFor(true)(args({ x: 50, y: 260 })), [], 'between two projects');
+  assert.equal(collisionsFor(true)(args({ x: 50, y: 320 }))[0]?.id, 'column:tower/section:none');
+  assert.ok(collisionsFor(false)(args({ x: 50, y: 260 })).length > 0, 'a project board takes the nearest column');
+  assert.ok(collisionsFor(true)(args(null)).length > 0, 'a keyboard drag has no pointer and goes to the nearest');
 });

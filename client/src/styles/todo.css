@@ -95,10 +95,10 @@
 .todo-add-section > button:hover { opacity:1; color:#e6a16f; background:#151f2c; }
 .todo-add-section input { width:100%; height:34px; padding:0 10px; border:1px solid #3a5476; border-radius:8px; background:#0a111b; color:var(--text); }
 .todo-completed-column .todo-card { opacity:.6; }
-.todo-board.dragging { scroll-snap-type:none !important; }
+.todo-board.dragging, .todo-board.dragging .todo-group-columns { scroll-snap-type:none !important; }
 /* The overview: projects one under another, each a row of its section columns. */
 .todo-board.todo-overview { flex-direction:column; align-items:stretch; gap:18px; overflow-x:hidden; overflow-y:auto; }
-.todo-group { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.todo-group { display:flex; flex-direction:column; gap:4px; min-width:0; padding-left:calc(var(--depth, 0) * 18px); }
 .todo-group-head { display:flex; align-items:center; gap:8px; min-height:30px; padding:0 4px; }
 .todo-group-title { display:inline-flex; align-items:center; gap:8px; min-width:0; padding:3px 6px; margin-left:-6px; border-radius:6px; color:#dfe7f2; }
 .todo-group-title:hover { background:#151f2c; }
@@ -509,7 +509,7 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-column { flex-basis:calc(100vw - 32px); width:calc(100vw - 32px); scroll-snap-align:start; }
   .todo-column .todo-column-head { display:none; }
   .todo-board.todo-overview { padding:0 16px 24px; scroll-snap-type:none; }
-  .todo-group { padding-left:0 !important; }
+  .todo-group { padding-left:0; }
   .todo-group-columns { gap:10px; scroll-snap-type:x mandatory; }
   .todo-overview .todo-column { flex-basis:calc(100vw - 56px); width:calc(100vw - 56px); }
   .todo-overview .todo-column .todo-column-head { display:flex; }

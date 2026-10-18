@@ -21,7 +21,7 @@ import { readShortcut, typingIn } from './todo-shortcuts';
 import { httpTransport, localToday, newId, TodoClient, useTodoState } from './todo-store';
 import { isTodoPage, readTodoLocation, todoSearch, viewKey, type TodoLocation, type TodoView } from './todo-url';
 import { isOpen } from './todo-model';
-import { archivedColumns, overviewGroups, OVERVIEW_SHOWN, shapeSections, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
+import { archivedColumns, foldGroups, overviewGroups, shapeSections, shownTasks, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
 import { CalendarView } from './calendar/CalendarView';
 import type { TodoLayout } from '../../../shared/todo/types';
 
@@ -200,8 +200,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
 
   const setDisplay = (value: DisplaySettings) => { setDisplays(previous => ({ ...previous, [key]: value })); saveDisplay(key, value); };
   // The overview: every project with its sections, each column showing its first cards until opened.
-  const overview = useMemo(() => view.kind !== 'all' ? null : overviewGroups(display, { world, today, start, query, searchResults })
-    .map(group => ({ ...group, columns: group.columns.map(column => expanded.has(column.id) ? column : { ...column, shown: OVERVIEW_SHOWN }) })), [view.kind, display, world, today, start, query, searchResults, expanded]);
+  const groups = useMemo(() => view.kind !== 'all' ? null : overviewGroups(display, { world, today, start: today, query: '', searchResults: null }), [view.kind, display, world, today]);
+  const overview = useMemo(() => groups && foldGroups(groups, expanded), [groups, expanded]);
   const sectionShape = useMemo(() => {
     if (overview) return { columns: overview.flatMap(group => group.columns), archived: 0 };
     const context = { world, today, start, query, searchResults };
@@ -216,7 +216,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   // The overview names each project above its columns.
   const showProject = !project && display.group !== 'project' && view.kind !== 'all';
   // The cards that show: a column that shows only its first ones hides the rest from the arrow keys too.
-  const visibleColumns = useMemo(() => columns.map(column => column.shown === undefined ? column : { ...column, tasks: column.tasks.slice(0, column.shown) }), [columns]);
+  const visibleColumns = useMemo(() => columns.map(column => column.shown === undefined ? column : { ...column, tasks: shownTasks(column) }), [columns]);
   const shown = useMemo(() => new Set(visibleColumns.flatMap(column => column.tasks.map(item => item.id))), [visibleColumns]);
   // A card folded out of sight on the overview is no longer the chosen one, so E never completes a task not shown.
   useEffect(() => { if (overview && selectedId && !selectedId.startsWith('done:') && !shown.has(selectedId)) setSelectedId(null); }, [overview, selectedId, shown]);

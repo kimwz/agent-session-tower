@@ -375,17 +375,22 @@ export interface BoardGroup { project: TodoProject; depth: number; parents: stri
  */
 export function overviewGroups(display: DisplaySettings, context: ViewContext): BoardGroup[] {
   const { world } = context;
-  const tasks = viewTasks({ kind: 'all' }, context);
   type Place = { project: TodoProject; depth: number; parents: string[] };
   const walk = (nodes: ProjectNode[], parents: string[]): Place[] => nodes.flatMap(node => [{ project: node.project, depth: node.depth, parents }, ...walk(node.children, [...parents, node.project.name])]);
   const inbox = world.projects.filter(project => project.inbox).map(project => ({ project, depth: 0, parents: [] }));
   return [...inbox, ...walk(projectTree(world), [])].map(({ project, depth, parents }) => {
-    const own = tasks.filter(task => task.projectId === project.id);
-    const columns = GROUPINGS.section({ kind: 'project', id: project.id }, own, context).map(column => ({ ...column, tasks: sortTasks(column.tasks, display.sort, 'section') }));
+    const columns = boardColumns({ kind: 'project', id: project.id }, { ...display, group: 'section' }, context);
     const shaped = shapeSections(columns, world.sections.filter(section => section.projectId === project.id), { collapse: true, showArchived: false }).columns;
-    return { project, depth, parents, count: own.length, columns: shaped.map(column => ({ ...column, id: `${project.id}/${column.id}` })) };
+    return { project, depth, parents, count: columns.reduce((sum, column) => sum + column.tasks.length, 0), columns: shaped.map(column => ({ ...column, id: `${project.id}/${column.id}` })) };
   });
 }
+
+/** The overview's columns as they show: each its first cards (`OVERVIEW_SHOWN`), but those opened (`expanded`) whole. */
+export const foldGroups = (groups: readonly BoardGroup[], expanded: ReadonlySet<string>): BoardGroup[] =>
+  groups.map(group => ({ ...group, columns: group.columns.map(column => expanded.has(column.id) ? column : { ...column, shown: OVERVIEW_SHOWN }) }));
+
+/** The tasks of `column` that have a card: those `shown`, or all. */
+export const shownTasks = (column: Pick<BoardColumn, 'tasks' | 'shown'>): TodoTask[] => column.shown === undefined ? column.tasks : column.tasks.slice(0, column.shown);
 
 /**
  * Where a card let go on column `target` goes, as `dropOps`' `afterId` (undefined: wherever the server puts it), or
