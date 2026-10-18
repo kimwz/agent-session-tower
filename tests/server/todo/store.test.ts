@@ -477,7 +477,7 @@ test('a backup holds every table but the file’s own bookkeeping and this compu
   const db = new DatabaseSync(join(dir, 'todos.sqlite'), { readOnly: true });
   t.after(() => db.close());
   const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name).sort();
-  assert.deepEqual(tables, [...TODO_DATA_TABLES, 'todo_meta', 'todo_requests', 'todo_agents', 'todo_agent_sessions'].sort());
+  assert.deepEqual(tables, [...TODO_DATA_TABLES, 'todo_meta', 'todo_requests', 'todo_agents', 'todo_agent_sessions', 'todo_agent_jobs'].sort());
 });
 
 test('restoring below a task closed with its parent ties the restored task to the top completion', async t => {

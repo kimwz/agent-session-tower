@@ -46,7 +46,7 @@ export type AgentSession = Pick<Session, 'id' | 'cwd' | 'provider' | 'status' | 
 
 export interface TodoAgentsOptions {
   stateDir: string;
-  store: Pick<TodoStore, 'availability' | 'agentsToSettle' | 'agent' | 'taskState' | 'settleAgents' | 'changeAgent' | 'familyOf' | 'familyTask' | 'addFamily' | 'removeFamily' | 'detail' | 'overview'>;
+  store: Pick<TodoStore, 'availability' | 'agentsToSettle' | 'agent' | 'taskState' | 'settleAgents' | 'changeAgent' | 'familyOf' | 'familyTask' | 'addFamily' | 'removeFamily' | 'detail' | 'overview' | 'claimJob' | 'claimedJobs' | 'forgetJobs'>;
   /** This computer's sessions; undefined while they cannot be known (no worker, sessions unavailable). */
   sessions(): AgentSession[] | undefined;
   run(id: string): Pick<Run, 'sessionId'> | undefined;
@@ -88,8 +88,6 @@ export class TodoAgents {
   private readonly starting = new Set<string>();
   /** Sessions this process handed to retention; after a restart they are handed again once, which changes nothing. */
   private readonly handed = new Set<string>();
-  /** Auto Prompt jobs an issue master sent through the master's own calls, by job: the todo they work for. */
-  private readonly issueJobs = new Map<string, string>();
   /** Jobs already looked at for a new session: each is adopted once. */
   private readonly adopted = new Set<string>();
   /**
@@ -224,7 +222,11 @@ export class TodoAgents {
    * TODO_MASTER_ISSUE_HEADER): a new session it makes joins the todo's family (`adoptJobs`).
    */
   recordIssueJob(taskId: string, jobId: string): void {
-    if (this.options.store.agent(taskId)) { this.issueJobs.set(jobId, taskId); void this.schedule(); }
+    try {
+      if (!this.options.store.agent(taskId)) return;
+      this.options.store.claimJob(jobId, taskId);
+      void this.schedule();
+    } catch (error) { console.error(`An Auto Prompt job an issue master sent was not recorded: ${message(error)}`); }
   }
 
   /**
@@ -238,22 +240,22 @@ export class TodoAgents {
     if (!jobs) return;
     const listed = new Set(jobs.map(job => job.id));
     for (const id of this.adopted) if (!listed.has(id)) this.adopted.delete(id);
-    for (const id of this.issueJobs.keys()) if (!listed.has(id)) this.issueJobs.delete(id);
     const store = this.options.store;
+    const claimed = store.claimedJobs();
+    // A claim lasts while its job is listed; one adopted or gone is let go.
+    store.forgetJobs([...claimed.keys()].filter(id => !listed.has(id)));
     for (const job of jobs) {
       if (this.adopted.has(job.id) || !job.sessionId || job.decision?.action !== 'create') continue;
-      this.adopted.add(job.id);
-      const named = this.issueJobs.get(job.id);
-      this.issueJobs.delete(job.id);
-      let taskId = named;
+      let taskId = claimed.get(job.id);
       if (!taskId && job.delegation) {
         const parent = this.options.run(job.delegation.parentRunId) ?? this.options.run(job.delegation.rootRunId);
         const cwd = parent ? this.options.sessions()?.find(session => session.id === parent.sessionId)?.cwd : undefined;
         taskId = (cwd ? todoMasterTaskId(this.options.stateDir, cwd) : undefined) ?? (parent ? store.familyTask(parent.sessionId) : undefined);
       }
-      if (!taskId || !store.agent(taskId) || store.familyTask(job.sessionId)) continue;
-      store.addFamily(job.sessionId, taskId);
-      this.options.onChange();
+      // Done with only once its session is recorded (or there is nothing to record): a failed write is tried again.
+      if (taskId && store.agent(taskId) && !store.familyTask(job.sessionId)) { store.addFamily(job.sessionId, taskId); this.options.onChange(); }
+      this.adopted.add(job.id);
+      if (claimed.has(job.id)) store.forgetJobs([job.id]);
     }
   }
 

@@ -636,10 +636,39 @@ test('sessions Auto Prompt makes for an issue master join its family, sent with 
   made('j4', 'create');
   await agents.schedule();
   assert.deepEqual(store.familyOf('a').map(member => member.sessionId).sort(), ['s-j1', 's-j2']);
+  // A job claimed for one todo stays that todo's: a later claim for another changes nothing.
+  apply({ op: 'task.create', id: 'b', content: 'B' });
+  await agents.begin('b', 'go');
+  agents.recordIssueJob('a', 'j5');
+  agents.recordIssueJob('b', 'j5');
+  made('j5', 'create');
+  await agents.schedule();
+  assert.equal(store.familyTask('s-j5'), 'a');
+  assert.equal(store.claimedJobs().size, 0, 'a claim is let go once its session is recorded');
   // Closing the todo hands them over with the master.
   calls.length = 0;
   apply(complete('a', 'ca'));
   await agents.schedule();
   assert.ok(calls.some(call => /^archive .*s-j1.*s-j2|^archive .*s-j2.*s-j1/.test(call)), calls.join(' | '));
   assert.ok(!calls.some(call => /s-j3|s-j4/.test(call)), 'the continued and the unrelated sessions stay');
+});
+
+test('a job an issue master sent is still its todo\'s after a restart, while the job is routed', async t => {
+  const { dir, store, agents, jobs, session, apply } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'A' });
+  await agents.begin('a', 'go');
+  agents.recordIssueJob('a', 'routing');
+  jobs.push({ id: 'routing' });
+  await agents.schedule();
+  assert.equal(store.claimedJobs().get('routing'), 'a', 'kept while the job has no session yet');
+  agents.close();
+  // A new process (a web restart) finds the claim in the store.
+  const again = new TodoAgents({ stateDir: dir, store, sessions: () => [{ id: 's-routing', cwd: '/work', provider: 'claude', status: 'idle', createdAt: new Date().toISOString(), isSubagent: false }],
+    run: () => undefined, jobs: () => jobs, reopen: async () => undefined, requestArchive: async () => {}, createSession: async () => { throw new Error('unused'); },
+    uncertain: () => false, model: async () => ({ provider: 'claude' }), writeGuide: async () => {}, removeGuide: async () => {}, startHost: async () => {}, onChange: () => {} });
+  t.after(() => again.close());
+  session('s-routing', '/work');
+  jobs[0] = { id: 'routing', sessionId: 's-routing', decision: { action: 'create', cwd: '/work', reason: 'r' } };
+  await again.schedule();
+  assert.equal(store.familyTask('s-routing'), 'a');
 });
