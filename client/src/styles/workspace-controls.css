@@ -1,11 +1,14 @@
 /* Keep the canvas free; filtering belongs to the session sidebar. */
 .app-header { height:56px; min-height:56px; }
+/* With the page's sidebar closed, canvas and todo share one compact header: the sidebar toggle and the page switch
+   on the left, settings on the right. Over the canvas it also floats, giving the canvas the header's room. */
+.sidebar-closed .app-header .brand > :not(.sidebar-toggle, .page-switch),
+.sidebar-closed .app-header .header-center { display:none; }
 .app.canvas-only { position:relative; }
 .canvas-only .app-header { position:absolute; inset:0 0 auto; border-color:transparent; background:transparent; pointer-events:none; }
-.canvas-only .app-header .brand > :not(.sidebar-toggle),
-.canvas-only .app-header .header-center { display:none; }
-.canvas-only .sidebar-toggle { pointer-events:auto; background:#142030ed; }
-.canvas-only .sidebar-toggle:hover { background:#2a405c; }
+.sidebar-closed .sidebar-toggle { background:#142030ed; }
+.sidebar-closed .sidebar-toggle:hover { background:#2a405c; }
+.canvas-only .sidebar-toggle { pointer-events:auto; }
 .graph-canvas { container:canvas / inline-size; }
 .sidebar-filters { margin:0 16px 4px; flex-shrink:0; container:session-filters / inline-size; }
 .sidebar-status-filters { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:2px; padding:3px; border:1px solid #2d3d53; border-radius:7px; background:#111d2b; }
@@ -39,22 +42,14 @@
 @container canvas (max-width:280px) { .canvas-find-session { display:none!important; } }
 .new-session-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #3c526e; background: #1d2f46; color: #d2e2f6; padding: 7px 10px; border-radius: 6px; font-size: 11px; white-space: nowrap; }
 .new-session-button:hover { border-color: #7c9abe; background: #293f5b; }
-.canvas-new-session { position:absolute; z-index:5; top:13px; left:14px; height:29px; padding-block:0; }
+/* The canvas's new-session button leads its view tools at the top right, as tall as the zoom group. */
+.canvas-quick-controls .canvas-new-session { align-self:stretch; height:auto; padding:0 11px; border-radius:7px; background:#1d2f46ed; }
 .main-area { container:canvas-area / inline-size; }
-.canvas-only .canvas-new-session { left:60px; }
-.canvas-new-session:focus-visible { outline:2px solid #97c4ff; outline-offset:2px; }
 .canvas-new-session:disabled { opacity:.45; cursor:default; }
-@media (max-width:680px) {
-  .canvas-only .canvas-new-session { left:48px; }
-  .canvas-new-session { width:32px; padding:0; }
-  .canvas-new-session > span { display:none; }
-}
 @container canvas-area (max-width:420px) {
-  .canvas-new-session { width:32px; padding:0; }
+  .canvas-quick-controls .canvas-new-session { width:38px; padding:0; }
+  .canvas-only .canvas-quick-controls .canvas-new-session { width:32px; }
   .canvas-new-session > span { display:none; }
-}
-@container canvas-area (max-width:360px) {
-  .canvas-quick-controls { top:60px; }
 }
 .closed-sessions-toggle { display: flex; align-items: center; gap: 7px; width: 100%; color: #8295af; padding: 9px 6px 6px; font-size: 10px; }
 .closed-sessions-toggle > b { margin-left: auto; font-weight: 400; color: #637b99; }
@@ -76,7 +71,6 @@
   .header-actions .connection-state { display: none; }
   .brand-local { display: none; }
   .new-session-button { font-size: 10px; padding: 6px 8px; }
-  .new-session-button.canvas-new-session { top:13.5px; height:28px; padding:0; }
   .sidebar-scrim, .has-chat .sidebar-scrim { inset-block-start: 56px; }
   .chat-header { padding: 10px 15px 8px; }
   .chat-panel .close-chat { right: 10px; top: 10px; }
