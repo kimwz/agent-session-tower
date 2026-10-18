@@ -84,6 +84,16 @@ export function AgentIcon({ agent }: { agent: TodoAgent }) {
   </span>;
 }
 
+/**
+ * A todo at work (its issue master, or work it handed out, still running) wears the canvas's moving border, as a working
+ * agent does. Only cards with an issue master read the sessions, so a session's update redraws just those.
+ */
+function AgentActivity({ agent }: { agent: TodoAgent }) {
+  const { session, running } = useContext(TodoAgentContext);
+  const look = agentLook(agent, agent.sessionId ? session(agent.sessionId) : undefined, running(agent.taskId));
+  return look.status === 'working' ? <span className="agent-activity-border" aria-hidden="true" /> : null;
+}
+
 export interface TaskCardProps {
   task: TodoTask;
   context: CardContext;
@@ -113,15 +123,12 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
   const children = task.completedAt ? [] : (context.children.get(task.id) ?? []).filter(child => isOpen(child) && !context.shown?.has(child.id));
   const chips = CARD_META.filter(chip => chip.visible(task, context));
   const agent = context.world.agents[task.id];
-  // A todo at work (its issue master or the work it handed out) wears the canvas's moving border, as a working agent does.
-  const { session, running } = useContext(TodoAgentContext);
-  const atWork = !!agent && !task.completedAt && agentLook(agent, agent.sessionId ? session(agent.sessionId) : undefined, running(agent.taskId)).status === 'working';
   // A file dragged from the computer is not a card being dragged (dnd-kit follows the pointer, not HTML drag events).
   // A paste is the detail's: a card taking one would attach files to whichever card the keyboard is on.
   const drop = useFileDrop(files => onFiles?.(task, files), !onFiles || readOnly || !!task.completedAt);
   const { onDragOver, onDragLeave, onDrop } = drop.handlers;
   const dropHandlers = { onDragOver, onDragLeave, onDrop };
-  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''} ${drop.over ? 'file-target' : ''} ${atWork ? 'working' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={task.content}
+  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''} ${drop.over ? 'file-target' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={task.content}
     {...dropHandlers}
     onClick={() => onOpen(task.id)} onFocus={() => onSelect?.(selectId)}
     onPointerMove={event => {
@@ -134,7 +141,7 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
       if (active instanceof HTMLElement && !event.currentTarget.contains(active) && active.closest('.todo-card')) event.currentTarget.focus({ preventScroll: true });
     }}
     onKeyDown={event => { if (event.key === 'Enter' && event.target === event.currentTarget) { event.preventDefault(); onOpen(task.id); } }}>
-    {atWork && <span className="agent-activity-border" aria-hidden="true" />}
+    {agent && !task.completedAt && <AgentActivity agent={agent} />}
     <div className="todo-card-main">
       <CheckCircle task={task} disabled={readOnly} onComplete={() => onComplete(task)} onCompleteNext={() => onCompleteNext(task)} onReopen={onReopen && (() => onReopen(task))} />
       <div className="todo-card-body">

@@ -575,9 +575,11 @@ a.todo-file-name:hover { text-decoration:underline; }
 .todo-agent-flag.blocked, .todo-agent-flag.error { --flag:#ff6b6b; }
 /* How much work the issue master handed out is still running. */
 .todo-agent-running { position:absolute; right:-5px; bottom:-4px; min-width:13px; height:13px; padding:0 3px; border-radius:7px; background:#5b6cff; color:#fff; font-size:9px; font-weight:600; line-height:13px; text-align:center; box-shadow:0 0 0 2px var(--todo-card); }
-/* A todo at work: the canvas's moving border (graph-nodes.css), in the canvas's colours. */
-.todo-card.working { --activity-cyan:#56edff; --activity-accent:#ff87bc; border-color:transparent; }
-.todo-card.working > .agent-activity-border { border-radius:10px; }
+/* A todo at work: the canvas's moving border (graph-nodes.css), in the canvas's colours. A chosen card or one a file is
+   dragged over keeps its own border instead, so the choice stays visible; its icon still shows the work. */
+.todo-card { --activity-cyan:#56edff; --activity-accent:#ff87bc; }
+.todo-card > .agent-activity-border { border-radius:10px; }
+.todo-card.selected > .agent-activity-border, .todo-card.file-target > .agent-activity-border { display:none; }
 .todo-detail-tabs { display:flex; gap:2px; padding:0 18px; border-bottom:1px solid #1f2a39; }
 .todo-detail-tabs button { display:inline-flex; align-items:center; gap:7px; height:36px; margin-bottom:-1px; padding:0 10px; border-bottom:2px solid transparent; border-radius:0; color:#8492a6; font-size:12.5px; font-weight:600; }
 .todo-detail-tabs button:hover { color:var(--text); }

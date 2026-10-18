@@ -99,8 +99,11 @@ async function harness(t: test.TestContext) {
   const room = new MasterRoom(join(data, 'voice'));
   await room.start();
   let main: MasterSession | undefined;
+  /** What pages were told of the issue masters' running work, in order. */
+  const told: Record<string, number>[] = [];
   const openIssues = () => {
-    const opened = new IssueMasters({ stateDir: dir, dataDir: data, tower, live, screen: new MasterScreen({ broadcast: () => {} }), main: { binding: () => main?.binding() }, followMs: 60_000, reportRetryMs: 1 });
+    const opened = new IssueMasters({ stateDir: dir, dataDir: data, tower, live, screen: new MasterScreen({ broadcast: () => {} }), main: { binding: () => main?.binding() }, followMs: 60_000, reportRetryMs: 1,
+      onChange: () => told.push(opened.runningTasks()) });
     cleanup.push(() => opened.close());
     return opened;
   };
@@ -119,7 +122,7 @@ async function harness(t: test.TestContext) {
   };
   const reports = (sessionId: string) => runs.filter(run => run.sessionId === sessionId && run.prompt.startsWith('[Tower report]')).map(run => run.prompt);
   const follow = async () => { await issues.refresh(); await main.follow(); for (const id of ['task-a', 'task-b']) await issues.get(id)?.follow(); };
-  return { dir, data, tower, sessions, runs, headers, tick, turn, from, finish, main: main!, issues: () => issues, reopen: () => { issues = openIssues(); return issues; }, issueSession, reports, follow, hold, refuse: (value: boolean) => { refuse = value; },
+  return { dir, data, tower, sessions, runs, headers, tick, turn, from, finish, main: main!, issues: () => issues, told, reopen: () => { issues = openIssues(); return issues; }, issueSession, reports, follow, hold, refuse: (value: boolean) => { refuse = value; },
     pause: () => { let release!: () => void; paused = new Promise<void>(resolve => { release = resolve; }); return () => { paused = undefined; release(); }; } };
 }
 
@@ -143,6 +146,10 @@ test('each issue master follows its own work and reports to its own session, apa
   h.finish(forMain, 'main done'); h.finish(forA, 'a done'); h.finish(forB, 'b done');
   await h.follow();
   assert.deepEqual(h.issues().runningTasks(), {}, 'ended work leaves the count, its report pending or not');
+  // Pages are told only when the running work changed: never the same counts twice in a row, ending with none.
+  assert.ok(h.told.every((counts, index) => index === 0 || JSON.stringify(counts) !== JSON.stringify(h.told[index - 1])), JSON.stringify(h.told));
+  assert.ok(h.told.some(counts => counts['task-a'] === 1 && counts['task-b'] === 1));
+  assert.deepEqual(h.told.at(-1), {});
   assert.equal(h.reports(MAIN).length, 1);
   assert.match(h.reports(MAIN)[0], /main done/);
   assert.equal(h.reports(a.id).length, 1);

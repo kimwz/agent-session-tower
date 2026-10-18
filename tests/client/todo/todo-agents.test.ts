@@ -109,11 +109,12 @@ test('the master\'s close leaves an issue chat the Todo page shows, and otherwis
 test('a todo whose issue master waits while the work it handed out runs is at work: coloured icon, the count, the moving border', () => {
   assert.equal(agentLook(agent('a'), session('claude:a'), 2).status, 'working');
   const busy = within(view([session('claude:a')], undefined, { a: 2 }), card(task('a'), { a: agent('a') }));
-  assert.match(busy, /todo-card[^"]* working"/, 'the card wears the canvas\'s moving border');
-  assert.match(busy, /agent-activity-border/);
+  assert.match(busy, /agent-activity-border/, 'the card wears the canvas\'s moving border');
   assert.match(busy, /todo-agent-icon working/);
   assert.match(busy, /class="todo-agent-running"[^>]*>2</);
   const idle = within(view([session('claude:a')]), card(task('a'), { a: agent('a') }));
   assert.doesNotMatch(idle, /agent-activity-border|todo-agent-running/, 'nothing under way: no border, no count');
   assert.doesNotMatch(within(view([session('claude:a', { status: 'working' })], undefined, { a: 1 }), card(task('a', { completedAt: 'x' }), { a: agent('a', { state: 'closing' }) })), /agent-activity-border/, 'a completed card is not at work');
+  // What waits for the owner stays flagged while handed-out work runs.
+  assert.equal(agentLook(agent('a'), session('claude:a', { outcome: 'needsOwner' }), 1).flag, 'needsOwner');
 });

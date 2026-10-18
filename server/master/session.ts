@@ -145,6 +145,8 @@ export interface MasterSessionOptions {
  */
 export class MasterSession {
   readonly folder: string;
+  /** When each joined computer's work was last seen, for `runningTasks`. */
+  private readonly nodesSeen = new Map<string, number>();
   private file: FollowFile = { version: 1, baselineAt: new Date().toISOString(), masterRuns: [], followed: [] };
   private readonly path: string;
   /** Off while the follow file could not be read or moved aside: it is never written over. */
@@ -268,8 +270,14 @@ export class MasterSession {
   /** This master's own turns, as far back as they are kept. */
   ownRuns(): readonly string[] { return this.file.masterRuns; }
 
-  /** Work handed out that is still running (its end not seen yet), so the owner sees what is under way. */
-  runningTasks(): number { return this.file.followed.filter(item => item.kind === 'delegated' && item.state === 'running').length; }
+  /**
+   * Work handed out that is still running (its end not seen yet), so the owner sees what is under way. Work on a joined
+   * computer counts only while that computer is seen: one out of reach would otherwise show as running for good.
+   */
+  runningTasks(): number {
+    const now = Date.now();
+    return this.file.followed.filter(item => item.kind === 'delegated' && item.state === 'running' && (!item.node || now - (this.nodesSeen.get(item.node) ?? 0) < UNKNOWN_MS)).length;
+  }
   /** Work handed out and not reported yet. */
   activeTasks(): number { return this.file.followed.filter(item => item.kind === 'delegated' && (item.state === 'running' || (item.report !== undefined && item.report !== 'sent' && item.report !== 'failed'))).length; }
   /** Reports Tower kept refusing, which the master never got. */
@@ -429,6 +437,7 @@ export class MasterSession {
     for (const item of this.file.followed.filter(entry => entry.state === 'running')) {
       if (this.closed) return;
       const where = item.node ? this.options.live.node(item.node) ?? await this.nodeSnapshot(item.node) : snapshot;
+      if (item.node && where) this.nodesSeen.set(item.node, Date.now());
       const current = item.currentRunId;
       if (where && await this.check(item, where)) changed = true;
       // Saved as soon as it moves, so the chain is still found after a restart.
