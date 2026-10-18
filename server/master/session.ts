@@ -145,8 +145,6 @@ export interface MasterSessionOptions {
  */
 export class MasterSession {
   readonly folder: string;
-  /** When each joined computer's work was last seen, for `runningTasks`. */
-  private readonly nodesSeen = new Map<string, number>();
   private file: FollowFile = { version: 1, baselineAt: new Date().toISOString(), masterRuns: [], followed: [] };
   private readonly path: string;
   /** Off while the follow file could not be read or moved aside: it is never written over. */
@@ -272,11 +270,12 @@ export class MasterSession {
 
   /**
    * Work handed out that is still running (its end not seen yet), so the owner sees what is under way. Work on a joined
-   * computer counts only while that computer is seen: one out of reach would otherwise show as running for good.
+   * computer counts only while its state is arriving here (`RemoteNode.streaming`): one out of reach shows only the last
+   * state it sent, which would keep its work running for good.
    */
   runningTasks(): number {
-    const now = Date.now();
-    return this.file.followed.filter(item => item.kind === 'delegated' && item.state === 'running' && (!item.node || now - (this.nodesSeen.get(item.node) ?? 0) < UNKNOWN_MS)).length;
+    const streaming = new Set((this.options.live.snapshot()?.nodes ?? []).filter(node => node.streaming).map(node => node.id));
+    return this.file.followed.filter(item => item.kind === 'delegated' && item.state === 'running' && (!item.node || streaming.has(item.node))).length;
   }
   /** Work handed out and not reported yet. */
   activeTasks(): number { return this.file.followed.filter(item => item.kind === 'delegated' && (item.state === 'running' || (item.report !== undefined && item.report !== 'sent' && item.report !== 'failed'))).length; }
@@ -436,11 +435,7 @@ export class MasterSession {
     let changed = this.discover(snapshot, binding);
     for (const item of this.file.followed.filter(entry => entry.state === 'running')) {
       if (this.closed) return;
-      const mirrored = item.node ? this.options.live.node(item.node) : undefined;
-      const where = item.node ? mirrored ?? await this.nodeSnapshot(item.node) : snapshot;
-      // Seen when it last arrived (or, asked for, as the computer dated it), not when it was read: a computer gone keeps
-      // its last snapshot, which must not keep its work counted as running.
-      if (item.node && where) this.nodesSeen.set(item.node, Math.max(this.nodesSeen.get(item.node) ?? 0, mirrored ? this.options.live.nodeAt(item.node) : Date.parse(where.updatedAt) || 0));
+      const where = item.node ? this.options.live.node(item.node) ?? await this.nodeSnapshot(item.node) : snapshot;
       const current = item.currentRunId;
       if (where && await this.check(item, where)) changed = true;
       // Saved as soon as it moves, so the chain is still found after a restart.

@@ -2,8 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import { applySnapshotPatch, type SnapshotPatch } from '../../shared/snapshot-patch.js';
 import type { Snapshot } from '../../shared/types.js';
 
-/** `at`: when it last arrived here, so a joined computer's snapshot kept after it went away reads as old. */
-interface Stream { sequence: number; snapshot: Snapshot; at?: number }
+interface Stream { sequence: number; snapshot: Snapshot }
 /** Opens the page's live event stream; the TowerClient provides it with the web's credentials. */
 export type OpenStream = (path: string, signal: AbortSignal) => Promise<IncomingMessage>;
 
@@ -65,8 +64,6 @@ export class LiveState {
   /** This computer's snapshot as last received, without connecting. */
   snapshot(): Snapshot | undefined { return this.local?.snapshot; }
   node(id: string): Snapshot | undefined { return this.nodes.get(id)?.snapshot; }
-  /** When a joined computer's snapshot last arrived on the stream (0 when it never did). */
-  nodeAt(id: string): number { return this.nodes.get(id)?.at ?? 0; }
   nodeSnapshots(): ReadonlyMap<string, Snapshot> { return new Map([...this.nodes].map(([id, stream]) => [id, stream.snapshot])); }
   /** Changes whenever anything received changes, so derived views can be rebuilt only then. */
   version(): number { return this.revision; }
@@ -152,11 +149,11 @@ export class LiveState {
       if (frame.removed) this.nodes.delete(frame.node);
       else {
         if (!Number.isSafeInteger(frame.sequence)) return false;
-        if (frame.snapshot) this.nodes.set(frame.node, { sequence: frame.sequence!, snapshot: frame.snapshot, at: Date.now() });
+        if (frame.snapshot) this.nodes.set(frame.node, { sequence: frame.sequence!, snapshot: frame.snapshot });
         else {
           const current = this.nodes.get(frame.node);
           if (!current || !frame.patch || frame.patch.base !== current.sequence) return false;
-          try { this.nodes.set(frame.node, { sequence: frame.sequence!, snapshot: applySnapshotPatch(current.snapshot, frame.patch), at: Date.now() }); } catch { return false; }
+          try { this.nodes.set(frame.node, { sequence: frame.sequence!, snapshot: applySnapshotPatch(current.snapshot, frame.patch) }); } catch { return false; }
         }
       }
     } else return true;

@@ -10,7 +10,7 @@ import type { Run, Snapshot } from '../../shared/types.js';
 
 const NODE = 'a'.repeat(32);
 
-test('work on a joined computer counts as running while that computer is seen, not on a snapshot it left behind', async t => {
+test('work on a joined computer counts as running while its state arrives here, not on a snapshot it left behind', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-remote-running-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await mkdir(join(dir, 'data'), { recursive: true });
@@ -18,9 +18,10 @@ test('work on a joined computer counts as running while that computer is seen, n
   const run: Run = { id: 'remote-run', sessionId: 'codex:remote', prompt: 'work', status: 'running', createdAt: now, output: '', origin: { kind: 'owner' } };
   const local: Snapshot = { sessions: [], runs: [], autoPrompts: [], providers: [], scanning: false, hostname: 'h', version: 't', updatedAt: now } as unknown as Snapshot;
   const remote = { ...local, runs: [run] } as Snapshot;
-  // The joined computer's last snapshot stays mirrored; when it last arrived decides whether it still counts.
-  let arrivedAt = Date.now();
-  const live = { fresh: async () => local, snapshot: () => local, node: (id: string) => id === NODE ? remote : undefined, nodeAt: () => arrivedAt } as unknown as LiveState;
+  // The joined computer's last snapshot stays mirrored; whether its state is arriving now decides whether its work counts.
+  let streaming = true;
+  const here = () => ({ ...local, nodes: [{ id: NODE, name: 'other', status: 'connected', features: [], streaming }] }) as unknown as Snapshot;
+  const live = { fresh: async () => here(), snapshot: here, node: (id: string) => id === NODE ? remote : undefined } as unknown as LiveState;
   const tower = { hasCredentials: () => true, call: async () => ({ state: 'succeeded', status: 200, body: {} }) } as unknown as TowerClient;
   const master = new MasterSession({ stateDir: dir, dataDir: join(dir, 'data'), binding: () => ({ sessionId: 'claude:issue', provider: 'claude', startedAt: now }), folder: join(dir, 'f'),
     writeGuide: async () => {}, tower, live, followMs: 60_000 });
@@ -28,12 +29,10 @@ test('work on a joined computer counts as running while that computer is seen, n
   await master.start();
   await master.started({ local: '/api/sessions', node: NODE } as never, { prompt: 'work' }, { session: { id: 'codex:remote' }, run: { id: run.id } });
   await master.follow();
-  assert.equal(master.runningTasks(), 1, 'seen just now');
-  arrivedAt = Date.now() - 31 * 60_000;
-  const gone = new MasterSession({ stateDir: dir, dataDir: join(dir, 'data'), binding: () => ({ sessionId: 'claude:issue', provider: 'claude', startedAt: now }), folder: join(dir, 'f'),
-    writeGuide: async () => {}, tower, live, followMs: 60_000 });
-  t.after(() => gone.close());
-  await gone.start();
-  await gone.follow();
-  assert.equal(gone.runningTasks(), 0, 'a snapshot that last arrived over 30 minutes ago does not keep the work running');
+  assert.equal(master.runningTasks(), 1, 'its state arrives: quiet work still counts');
+  streaming = false;
+  await master.follow();
+  assert.equal(master.runningTasks(), 0, 'out of reach, the snapshot it left behind does not keep the work running');
+  streaming = true;
+  assert.equal(master.runningTasks(), 1, 'back in reach, it counts again');
 });
