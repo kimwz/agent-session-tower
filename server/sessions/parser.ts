@@ -1,7 +1,7 @@
 import { parseExecLaunch, promptDigest, type ExecLaunch } from './exec-lineage.js';
 import { isTaskNotification, taskNotice, TASK_NOTICE } from '../../shared/task-notification.js';
 import { readdir, stat } from 'node:fs/promises';
-import { compressedTranscript, openTranscript } from './transcript-file.js';
+import { compressedTranscript, transcriptChunks } from './transcript-file.js';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { ChatMessage, Provider, Session } from '../../shared/types.js';
 import type { ProcessSnapshot } from './processes.js';
@@ -422,11 +422,9 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
 
 /**
  * Stream each file once, then only appended bytes. Keep summaries, never entire transcripts. Without `end`, reads to the
- * end of the content (a compressed transcript, read whole).
+ * end of the content (a compressed transcript is read whole, as it decompresses). Says where the content read ends.
  */
 export async function appendFile(state: RecordState, end?: number): Promise<number> {
-  const file = await openTranscript(state.session.filePath!, { cache: false });
-  end ??= file.size;
   let position = state.offset;
   let fragments: Buffer[] = [];
   let pendingBytes = 0;
@@ -437,30 +435,24 @@ export async function appendFile(state: RecordState, end?: number): Promise<numb
     if (pendingBytes > MAX_LINE) { fragments = []; droppingOversizedLine = true; }
     else fragments.push(fragment);
   };
-  try {
-    while (position < end) {
-      const buffer = Buffer.allocUnsafe(Math.min(CHUNK, end - position));
-      const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
-      if (!bytesRead) break;
-      const data = buffer.subarray(0, bytesRead);
-      let start = 0;
-      for (let newline = data.indexOf(10); newline !== -1; newline = data.indexOf(10, start)) {
-        append(data.subarray(start, newline));
-        if (!droppingOversizedLine) {
-          try { consume(state, JSON.parse(Buffer.concat(fragments, pendingBytes).toString('utf8')), state.offset, state.ordinal); }
-          catch { /* A malformed complete record cannot prevent later valid records. */ }
-        }
-        fragments = []; pendingBytes = 0; droppingOversizedLine = false;
-        state.ordinal++;
-        start = newline + 1;
-        state.offset = position + start;
+  for await (const data of transcriptChunks(state.session.filePath!, position, end)) {
+    let start = 0;
+    for (let newline = data.indexOf(10); newline !== -1; newline = data.indexOf(10, start)) {
+      append(data.subarray(start, newline));
+      if (!droppingOversizedLine) {
+        try { consume(state, JSON.parse(Buffer.concat(fragments, pendingBytes).toString('utf8')), state.offset, state.ordinal); }
+        catch { /* A malformed complete record cannot prevent later valid records. */ }
       }
-      append(data.subarray(start));
-      position += bytesRead;
+      fragments = []; pendingBytes = 0; droppingOversizedLine = false;
+      state.ordinal++;
+      start = newline + 1;
+      state.offset = position + start;
     }
-    // A final record without a newline may be in the middle of a write. Re-read it on the next append.
-  } finally { await file.close(); }
-  return end;
+    append(data.subarray(start));
+    position += data.length;
+  }
+  // A final record without a newline may be in the middle of a write. Re-read it on the next append.
+  return position;
 }
 
 export function applyStatus(state: RecordState, processes: ProcessSnapshot, now: number): void {

@@ -2,7 +2,7 @@ import { createReadStream } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { promisify } from 'node:util';
-import { zstdDecompress } from 'node:zlib';
+import { createZstdDecompress, zstdDecompress } from 'node:zlib';
 
 /**
  * How a native transcript's bytes are read. Codex's rollout compression worker replaces a rollout it has not touched for
@@ -40,8 +40,42 @@ function remember(key: string, content: Buffer): void {
   }
 }
 
-/** `cache: false` reads without keeping the content: the scan reads every compressed transcript once. */
-export async function openTranscript(path: string, options: { cache?: boolean } = {}): Promise<TranscriptFile> {
+const CHUNK = 128 * 1024;
+
+/**
+ * The content from `from` to `end` (or to the end), in chunks, for one pass from start to end: a compressed transcript
+ * is decompressed as it is read and never held whole, so the scan of hundreds of them stays small.
+ */
+export async function* transcriptChunks(path: string, from = 0, end?: number): AsyncGenerator<Buffer> {
+  if (compressedTranscript(path)) {
+    let position = 0;
+    const input = createReadStream(path), output = input.pipe(createZstdDecompress());
+    input.on('error', error => output.destroy(error));
+    try {
+      for await (const chunk of output as AsyncIterable<Buffer>) {
+        const data = chunk.subarray(Math.max(0, from - position), end === undefined ? chunk.length : Math.max(0, end - position));
+        position += chunk.length;
+        if (data.length) yield data;
+        if (end !== undefined && position >= end) break;
+        if (position > MAX_CONTENT) throw new Error('Compressed transcript exceeds the content limit.');
+      }
+    } finally { input.destroy(); output.destroy(); }
+    return;
+  }
+  const file = await open(path, 'r');
+  try {
+    const last = end ?? (await file.stat()).size;
+    for (let position = from; position < last;) {
+      const buffer = Buffer.allocUnsafe(Math.min(CHUNK, last - position));
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
+      if (!bytesRead) return;
+      position += bytesRead;
+      yield buffer.subarray(0, bytesRead);
+    }
+  } finally { await file.close(); }
+}
+
+export async function openTranscript(path: string): Promise<TranscriptFile> {
   const handle = await open(path, 'r');
   if (!compressedTranscript(path)) {
     try {
@@ -64,7 +98,7 @@ export async function openTranscript(path: string, options: { cache?: boolean } 
         void pending.finally(() => decompressing.delete(key)).catch(() => {});
       }
       content = await pending;
-      if (options.cache !== false && !cache.has(key)) remember(key, content);
+      if (!cache.has(key)) remember(key, content);
     }
   } finally { await handle.close(); }
   return {
