@@ -83,11 +83,13 @@ export async function startMasterHost(options: MasterHostOptions) {
     const voiceConfigured = Boolean(settings.voiceKey());
     const heartbeatStatus = heartbeat?.status();
     const heartbeatProblem = [heartbeatStatus?.problem, heartbeatTools?.diagnostic()].filter(Boolean).join(' ');
+    const issueTasks = issues?.runningTasks() ?? {};
     return {
       available: true, version: APP_VERSION, settings: current,
       ...(binding ? { session: { id: binding.sessionId, provider: binding.provider, ...(shown ? { status: shown.status, title: shown.customTitle || shown.title } : {}) } } : {}),
       voiceConfigured, ...(voiceConfigured ? { voiceKeyHint: settings.voiceKeyHint() } : {}),
       activeTasks: session?.activeTasks() ?? 0,
+      ...(Object.keys(issueTasks).length ? { issueTasks } : {}),
       ...(heartbeatStatus ? { heartbeat: { ...heartbeatStatus, ...(heartbeatProblem ? { problem: heartbeatProblem } : {}) } } : {}),
       ...(session?.failedReports() ? { failedReports: session.failedReports() } : {}),
       ...(session?.stateProblem() ? { followState: session.stateProblem() } : {}),
@@ -249,7 +251,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     await room.start();
     // The owner's screen is one, whichever master uses it.
     const screen = new MasterScreen({ broadcast: event => room.broadcast(event) });
-    const masters = issues = new IssueMasters({ stateDir: paths.stateDir, dataDir: paths.data, tower, live, ...(readDb ? { readDb } : {}), screen, main: { binding: () => session?.binding() },
+    const masters = issues = new IssueMasters({ stateDir: paths.stateDir, dataDir: paths.data, tower, live, ...(readDb ? { readDb } : {}), screen, main: { binding: () => session?.binding() }, onChange: broadcastOverview,
       ...(options.followMs ? { followMs: options.followMs } : {}) });
     session = new MasterSession({ stateDir: paths.stateDir, dataDir: paths.data, settings, tower, live, room, onChange: broadcastOverview,
       otherMaster: { session: id => masters.masterSession(id), run: id => masters.masterRun(id) }, turns: masters.turnsOf(), ...(options.followMs ? { followMs: options.followMs } : {}) });

@@ -40,7 +40,7 @@ function tabId(): string {
  * again above the settings icon. Hidden when this Tower has no master. `sessionId` is the
  * open conversation; `issueChat`, a todo's issue master shown on the Todo page, which works the screen the same way.
  */
-export function MasterDock({ token, controls, sessionId, issueChat = false }: { token: string; controls: MasterControls; sessionId: string | null; issueChat?: boolean }) {
+export function MasterDock({ token, controls, sessionId, issueChat = false, onIssueTasks }: { token: string; controls: MasterControls; sessionId: string | null; issueChat?: boolean; onIssueTasks?: (tasks: Readonly<Record<string, number>>) => void }) {
   const words = useWords();
   const [open, setOpen] = useState(false);
   const [room, setRoom] = useState<RoomState>({});
@@ -62,6 +62,10 @@ export function MasterDock({ token, controls, sessionId, issueChat = false }: { 
 
   const overview = room.overview;
   const masterId = overview?.session?.id;
+  // The Todo page's cards show which todos have work under way (their issue masters' running work).
+  const issueTasks = overview?.issueTasks;
+  const issueTasksKey = JSON.stringify(issueTasks ?? {});
+  useEffect(() => { onIssueTasks?.(issueTasks ?? {}); }, [issueTasksKey, onIssueTasks]); // eslint-disable-line react-hooks/exhaustive-deps
   const { node: viewNode, id: viewSession } = sessionId ? splitScopedId(sessionId) : { node: undefined, id: undefined };
   const masterOpen = Boolean(masterId && !viewNode && viewSession === masterId);
   const masterOpenRef = useRef(masterOpen);

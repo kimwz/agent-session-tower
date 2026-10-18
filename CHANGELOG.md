@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.146.0] - 2026-10-18
+
+- **진행 중인 할 일이 보드에서 바로 보입니다.** 이슈 마스터가 일하거나, 이슈 마스터가 맡긴 작업(새로 만든 세션, 기존 세션에 보낸 메시지, Auto Prompt)이 아직 돌고 있으면 그 할 일 카드에 캔버스와 같은 움직이는 테두리가 생기고 아이콘이 색으로 바뀝니다. 아이콘 옆 숫자는 아직 돌고 있는 맡긴 작업 수입니다. 마스터 호스트가 이미 추적하던 위임 작업을 그대로 화면에 보내므로 따로 세지 않습니다.
+
 ## [1.145.1] - 2026-10-18
 
 - **캔버스와 할 일이 같은 헤더를 씁니다.** 사이드바를 접으면 두 화면 모두 왼쪽에 사이드바 버튼과 "캔버스 | 할 일" 전환, 오른쪽에 설정만 남습니다. 할 일에서도 로고·이름·호스트가 사라지고, 두 사이드바 폭이 같아졌습니다.

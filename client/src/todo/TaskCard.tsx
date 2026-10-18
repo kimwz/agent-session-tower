@@ -69,17 +69,29 @@ export function CheckCircle({ task, onComplete, onCompleteNext, onReopen, size =
 
 /**
  * A todo's issue master as the chat header shows a session: the provider's orb in its context ring, in colour while it
- * works and grey otherwise, with a dot when something waits for the owner.
+ * or the work it handed out runs and grey otherwise, with a dot when something waits for the owner and the count of
+ * that running work.
  */
 export function AgentIcon({ agent }: { agent: TodoAgent }) {
-  const { session } = useContext(TodoAgentContext);
+  const { session, running } = useContext(TodoAgentContext);
   const description = useId();
-  const look = agentLook(agent, agent.sessionId ? session(agent.sessionId) : undefined);
-  const label = `${t('이슈 마스터')} · ${statusLabels[look.status]}`;
+  const look = agentLook(agent, agent.sessionId ? session(agent.sessionId) : undefined, running(agent.taskId));
+  const label = [t('이슈 마스터'), statusLabels[look.status], ...(look.running ? [t('맡긴 작업 {0}개 진행 중', { 0: look.running })] : [])].join(' · ');
   return <span className={`chat-context-icon todo-agent-icon ${look.status}`}>
     <SessionContextIcon provider={look.provider} usage={look.usage} descriptionId={description} compact label={label} />
     {look.flag && <i className={`todo-agent-flag ${look.flag}`} aria-hidden="true" />}
+    {look.running > 0 && <b className="todo-agent-running" aria-hidden="true">{look.running}</b>}
   </span>;
+}
+
+/**
+ * A todo at work (its issue master, or work it handed out, still running) wears the canvas's moving border, as a working
+ * agent does. Only cards with an issue master read the sessions, so a session's update redraws just those.
+ */
+function AgentActivity({ agent }: { agent: TodoAgent }) {
+  const { session, running } = useContext(TodoAgentContext);
+  const look = agentLook(agent, agent.sessionId ? session(agent.sessionId) : undefined, running(agent.taskId));
+  return look.status === 'working' ? <span className="agent-activity-border" aria-hidden="true" /> : null;
 }
 
 export interface TaskCardProps {
@@ -129,6 +141,7 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
       if (active instanceof HTMLElement && !event.currentTarget.contains(active) && active.closest('.todo-card')) event.currentTarget.focus({ preventScroll: true });
     }}
     onKeyDown={event => { if (event.key === 'Enter' && event.target === event.currentTarget) { event.preventDefault(); onOpen(task.id); } }}>
+    {agent && !task.completedAt && <AgentActivity agent={agent} />}
     <div className="todo-card-main">
       <CheckCircle task={task} disabled={readOnly} onComplete={() => onComplete(task)} onCompleteNext={() => onCompleteNext(task)} onReopen={onReopen && (() => onReopen(task))} />
       <div className="todo-card-body">

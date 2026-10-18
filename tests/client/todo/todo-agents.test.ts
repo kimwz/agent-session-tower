@@ -14,7 +14,7 @@ import { overview, task } from './fixtures.js';
 const agent = (taskId: string, patch: Partial<TodoAgent> = {}): TodoAgent => ({ taskId, provider: 'claude', state: 'active', sessionId: `claude:${taskId}`, createdAt: 'x', updatedAt: 'x', ...patch });
 const session = (id: string, patch: Partial<Session> = {}): Session => ({ id, nativeId: id, provider: 'claude', title: id, cwd: '/state/todo-masters/a', project: 'a', status: 'idle', statusReason: '',
   createdAt: 'x', updatedAt: 'x', lastMessage: '', messageCount: 1, isSubagent: false, resumable: true, master: true, ...patch });
-const view = (sessions: Session[], chat = (id: string) => `chat of ${id}`): TodoAgentView => ({ session: id => sessions.find(item => item.id === id), chat: id => chat(id) });
+const view = (sessions: Session[], chat = (id: string) => `chat of ${id}`, running: Record<string, number> = {}): TodoAgentView => ({ session: id => sessions.find(item => item.id === id), chat: id => chat(id), running: id => running[id] ?? 0 });
 const within = (value: TodoAgentView, element: ReactNode) => renderToStaticMarkup(createElement(TodoAgentContext.Provider, { value }, element));
 
 const card = (item: TodoTask, agents: Record<string, TodoAgent>, extra: Record<string, unknown> = {}) => {
@@ -46,7 +46,7 @@ test('a card that cannot start a chat offers none, but still shows a master it h
 });
 
 test('the icon follows the session: starting shows at work, and what waits for the owner is flagged', () => {
-  assert.deepEqual(agentLook(agent('a', { state: 'starting', sessionId: undefined }), undefined), { provider: 'claude', status: 'working' });
+  assert.deepEqual(agentLook(agent('a', { state: 'starting', sessionId: undefined }), undefined), { provider: 'claude', status: 'working', running: 0 });
   assert.equal(agentLook(agent('a'), session('claude:a', { status: 'error' })).flag, 'error');
   assert.equal(agentLook(agent('a'), session('claude:a', { outcome: 'needsOwner' })).flag, 'needsOwner');
   assert.equal(agentLook(agent('a'), session('claude:a', { status: 'working', outcome: 'needsOwner' })).flag, undefined, 'at work again, nothing waits');
@@ -104,4 +104,17 @@ test('the master\'s close leaves an issue chat the Todo page shows, and otherwis
   open = null;
   select(null);
   assert.deepEqual(selected, ['claude:x', null]);
+});
+
+test('a todo whose issue master waits while the work it handed out runs is at work: coloured icon, the count, the moving border', () => {
+  assert.equal(agentLook(agent('a'), session('claude:a'), 2).status, 'working');
+  const busy = within(view([session('claude:a')], undefined, { a: 2 }), card(task('a'), { a: agent('a') }));
+  assert.match(busy, /agent-activity-border/, 'the card wears the canvas\'s moving border');
+  assert.match(busy, /todo-agent-icon working/);
+  assert.match(busy, /class="todo-agent-running"[^>]*>2</);
+  const idle = within(view([session('claude:a')]), card(task('a'), { a: agent('a') }));
+  assert.doesNotMatch(idle, /agent-activity-border|todo-agent-running/, 'nothing under way: no border, no count');
+  assert.doesNotMatch(within(view([session('claude:a', { status: 'working' })], undefined, { a: 1 }), card(task('a', { completedAt: 'x' }), { a: agent('a', { state: 'closing' }) })), /agent-activity-border/, 'a completed card is not at work');
+  // What waits for the owner stays flagged while handed-out work runs.
+  assert.equal(agentLook(agent('a'), session('claude:a', { outcome: 'needsOwner' }), 1).flag, 'needsOwner');
 });

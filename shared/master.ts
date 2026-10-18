@@ -87,6 +87,8 @@ export interface MasterOverview {
   voiceKeyHint?: string;
   /** Work the master handed out that has not been reported yet. */
   activeTasks: number;
+  /** Work each todo's issue master handed out that is still running, by todo id; absent when none (and from older hosts). */
+  issueTasks?: Record<string, number>;
   heartbeat?: MasterHeartbeatStatus;
   /** Reports of finished work Tower could not give the master session, after trying for a while. */
   failedReports?: number;

@@ -13,9 +13,11 @@ export interface TodoAgentView {
   session: (id: string) => Session | undefined;
   /** The conversation of an issue master's session, filling its container; `onClose` leaves it. */
   chat: (sessionId: string, onClose: () => void) => ReactNode;
+  /** Work a todo's issue master handed out that is still running (the master host follows it). */
+  running: (taskId: string) => number;
 }
 
-export const TodoAgentContext = createContext<TodoAgentView>({ session: () => undefined, chat: () => null });
+export const TodoAgentContext = createContext<TodoAgentView>({ session: () => undefined, chat: () => null, running: () => 0 });
 
 /**
  * The page's session choice as the master's screen commands use it. Closing (`null`) while the Todo page shows an
@@ -35,14 +37,17 @@ export interface AgentLook {
   usage?: Session['contextUsage'];
   /** Something for the owner: the canvas's outcome, or a turn that ended in an error. */
   flag?: Extract<SessionOutcome, 'needsOwner' | 'blocked'> | 'error';
+  /** Work it handed out that is still running; the todo is at work while there is any, even with the master waiting. */
+  running: number;
 }
 
-export function agentLook(agent: TodoAgent, session: Session | undefined): AgentLook {
-  // Until its session is known it is being started: shown at work.
-  const status: SessionStatus = agent.state === 'starting' ? 'working' : session?.status ?? 'idle';
+export function agentLook(agent: TodoAgent, session: Session | undefined, running = 0): AgentLook {
+  // Until its session is known it is being started: shown at work. Work it handed out keeps the todo at work too.
+  const status: SessionStatus = agent.state === 'starting' || running > 0 ? 'working' : session?.status ?? 'idle';
   const flag = session?.status === 'error' ? 'error' as const
-    : status !== 'working' && (session?.outcome === 'needsOwner' || session?.outcome === 'blocked') ? session.outcome : undefined;
-  return { provider: session?.provider ?? agent.provider, status, ...(session?.contextUsage ? { usage: session.contextUsage } : {}), ...(flag ? { flag } : {}) };
+    // What waits for the owner is the master's own, whatever the work it handed out is doing.
+    : session?.status !== 'working' && (session?.outcome === 'needsOwner' || session?.outcome === 'blocked') ? session.outcome : undefined;
+  return { provider: session?.provider ?? agent.provider, status, running, ...(session?.contextUsage ? { usage: session.contextUsage } : {}), ...(flag ? { flag } : {}) };
 }
 
 /** A canvas card's todo: the open issue family its session belongs to. */
