@@ -22,20 +22,21 @@ export function TodoSettings({ token }: { token: string }) {
   // undefined while reading; null when nothing is saved (the defaults show).
   const [saved, setSaved] = useState<string[] | null>();
   const [rows, setRows] = useState<Row[]>([]);
+  // What the rows started from, so a language change alone (defaults shown translated) is no edit.
+  const [baseline, setBaseline] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const next = useRef(0);
   const sensors = useTodoSensors();
   const toRows = (presets: readonly string[]) => presets.map(text => ({ id: next.current++, text }));
-  const take = (presets: string[] | null) => { setSaved(presets); setRows(toRows(shownChatPresets(presets))); };
+  const take = (presets: string[] | null) => { const shown = shownChatPresets(presets); setSaved(presets); setBaseline(shown); setRows(toRows(shown)); };
   const load = () => {
     setError('');
     api<{ presets: string[] | null }>(PRESETS_PATH).then(answer => take(answer.presets), cause => setError(cause instanceof Error ? cause.message : String(cause)));
   };
   useEffect(load, []);
-  const shown = saved === undefined ? undefined : shownChatPresets(saved);
-  const dirty = !!shown && JSON.stringify(presetsToSave(rows.map(row => row.text))) !== JSON.stringify(shown);
+  const dirty = saved !== undefined && JSON.stringify(presetsToSave(rows.map(row => row.text))) !== JSON.stringify(baseline);
   useSettingsGuard({ leave: () => !dirty || window.confirm(t('저장하지 않은 프리셋을 버릴까요?')) });
 
   const store = async (presets: string[] | null, done: string) => {
