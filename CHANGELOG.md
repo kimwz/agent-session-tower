@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.149.2] - 2026-10-18
+
+- **할 일 '전체' 보기에서 프로젝트끼리 구분이 잘 됩니다.** 프로젝트마다 은은한 테두리·둥근 모서리·배경으로 묶어 보여 주고, 하위 프로젝트는 그 묶음째로 들여 씁니다.
+- **'전체' 보기에서 빈 '섹션 없음' 칸을 숨깁니다.** 섹션이 있는 프로젝트의 '섹션 없음'은 섹션 없는 작업이 있을 때만 맨 앞에 나옵니다(`Q` 빠른 추가로 섹션 없이 만들면 바로 보임). 섹션이 하나도 없는 프로젝트와 관리함은 작업을 추가하고 놓을 칸으로 그대로 둡니다. 프로젝트 보드에서는 지금처럼 항상 보입니다.
+
 ## [1.149.1] - 2026-10-18
 
 - **할 일 화면은 이제 '전체'에서 시작합니다.** 주소에 목록이 없을 때(처음 들어올 때) 관리함 대신 전체 보기를 보드로 보여 줍니다. 주소로 연 목록과, 캔버스에 다녀올 때 보던 목록은 그대로 돌아옵니다.

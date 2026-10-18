@@ -370,8 +370,9 @@ export interface BoardGroup { project: TodoProject; depth: number; parents: stri
 
 /**
  * The overview (`all`): the Inbox, then every project shown in the sidebar's order, sub-projects each on their own
- * (a project's board leaves out its sub-projects' tasks), each with the section columns its own board shows. A column's
- * id names its project, since every project has its own "섹션 없음".
+ * (a project's board leaves out its sub-projects' tasks), each with the section columns its own board shows, but for an
+ * empty "섹션 없음" before its sections (a project without sections keeps it, to add to and drop on). A column's id names
+ * its project, since every project has its own "섹션 없음".
  */
 export function overviewGroups(display: DisplaySettings, context: ViewContext): BoardGroup[] {
   const { world } = context;
@@ -380,7 +381,8 @@ export function overviewGroups(display: DisplaySettings, context: ViewContext): 
   const inbox = world.projects.filter(project => project.inbox).map(project => ({ project, depth: 0, parents: [] }));
   return [...inbox, ...walk(projectTree(world), [])].map(({ project, depth, parents }) => {
     const columns = boardColumns({ kind: 'project', id: project.id }, { ...display, group: 'section' }, context);
-    const shaped = shapeSections(columns, world.sections.filter(section => section.projectId === project.id), { collapse: true, showArchived: false }).columns;
+    const shaped = shapeSections(columns, world.sections.filter(section => section.projectId === project.id), { collapse: true, showArchived: false }).columns
+      .filter((column, _, all) => column.id !== 'section:none' || column.tasks.length > 0 || all.length === 1);
     return { project, depth, parents, count: columns.reduce((sum, column) => sum + column.tasks.length, 0), columns: shaped.map(column => ({ ...column, id: `${project.id}/${column.id}` })) };
   });
 }

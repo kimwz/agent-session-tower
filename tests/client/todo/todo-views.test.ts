@@ -251,17 +251,25 @@ test('the overview lists the Inbox, then each shown project in the sidebar order
     'a sub-project on its own after its parent, an empty project kept to drop on; archived projects (and those under them) left out');
   assert.deepEqual(groups.map(group => group.columns.map(column => [column.id, column.tasks.map(item => item.id)])), [
     [['inbox/section:none', ['i1', 'i2', 'i3', 'i4']]],
-    [['tower/section:none', []], ['tower/section:design', ['t1']], ['tower/section:folded', []]],
+    [['tower/section:design', ['t1']], ['tower/section:folded', []]],
     [['home/section:none', ['h1']]],
     [['empty/section:none', []]],
-  ], 'completed, deleted and archived-section tasks left out; a sub-task stays in its parent card; a folded section keeps only its count');
-  assert.equal(groups[1].columns[2].collapsed, true);
-  assert.equal(groups[1].columns[2].count, 1);
-  // The same columns as the project's own board, but for the ids that name their project.
+  ], 'completed, deleted and archived-section tasks left out; a sub-task stays in its parent card; a folded section keeps only its count; an empty "섹션 없음" shows only in a project without sections');
+  const tower = (groups: ReturnType<typeof overviewGroups>) => groups.find(group => group.project.id === 'tower')!.columns;
+  const folded = tower(groups).find(column => column.sectionId === 'folded')!, design = tower(groups).find(column => column.sectionId === 'design')!;
+  assert.equal(folded.collapsed, true);
+  assert.equal(folded.count, 1);
+  // The same columns as the project's own board, but for the ids that name their project; the board keeps its empty
+  // "섹션 없음", to add to and drop on.
   const own = shapeSections(boardColumns({ kind: 'project', id: 'tower' }, defaultDisplay({ kind: 'project', id: 'tower' }), at), all.sections.filter(item => item.projectId === 'tower'), { collapse: true, showArchived: false }).columns;
-  assert.deepEqual(groups[1].columns.map(column => ({ ...column, id: '' })), own.map(column => ({ ...column, id: '' })));
-  assert.deepEqual(groups[1].columns[1].drop, { kind: 'section', projectId: 'tower', sectionId: 'design' });
-  assert.deepEqual(groups[1].columns[1].preset, { projectId: 'tower', sectionId: 'design' });
+  assert.deepEqual(own.map(column => [column.id, column.tasks.length]).slice(0, 1), [['section:none', 0]]);
+  assert.deepEqual(tower(groups).map(column => ({ ...column, id: '' })), own.slice(1).map(column => ({ ...column, id: '' })));
+  assert.deepEqual(design.drop, { kind: 'section', projectId: 'tower', sectionId: 'design' });
+  assert.deepEqual(design.preset, { projectId: 'tower', sectionId: 'design' });
+  // A task added without a section (a quick add) shows the project's "섹션 없음" first.
+  const loose = { ...all, tasks: { ...all.tasks, t3: task('t3', { projectId: 'tower' }) } };
+  assert.deepEqual(tower(overviewGroups(display, context({ world: loose }))).map(column => [column.id, column.tasks.map(item => item.id)]),
+    [['tower/section:none', ['t3']], ['tower/section:design', ['t1']], ['tower/section:folded', []]]);
   // The overview is grouped by sections only, without a completed list; its calendar shows every open task.
   assert.deepEqual(groupingsFor({ kind: 'all' }), ['section']);
   assert.deepEqual(calendarTasks({ kind: 'all' }, at).map(item => item.id).sort(), ['h1', 'i1', 'i2', 'i3', 'i4', 't1', 't1a', 't2']);
