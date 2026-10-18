@@ -2,20 +2,30 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNod
 import { closestCorners, DndContext, DragOverlay, pointerWithin, useDroppable, type CollisionDetection, type DragEndEvent, type DragOverEvent, type DragStartEvent } from '@dnd-kit/core';
 import { horizontalListSortingStrategy, SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { useTodoSensors } from './todo-dnd';
-import { GripVertical, MoreHorizontal, Plus } from 'lucide-react';
-import type { TodoTask } from '../../../shared/todo/types';
+import { GripVertical, Inbox, MoreHorizontal, Plus } from 'lucide-react';
+import type { TodoProject, TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { TaskCard, type TaskCardProps } from './TaskCard';
-import { dayAfterOf, type BoardColumn, type CardContext } from './todo-views';
+import { colorOf } from './todo-format';
+import { dayAfterOf, dropPlace, OVERVIEW_SHOWN, sectionDropAfter, shownTasks, type BoardColumn, type BoardGroup, type CardContext } from './todo-views';
 
 /**
  * Columns of cards. Cards are dragged with a mouse, a held touch or the keyboard: within a column to put them in order
  * (when the list keeps a hand-made order), onto another column (or its tab on a phone) to change what the column
  * stands for. A project's section columns are put in order by dragging their headers.
+ *
+ * The overview (`groups`) shows one project after another, each with its section columns, in one drag area: a card
+ * goes to another project's section, and a section moves only among its own project's.
  */
 
 export interface BoardProps {
   columns: BoardColumn[];
+  /** The overview: projects one under another, each with its columns (then `columns` is all of them, in order). */
+  groups?: BoardGroup[];
+  /** A project's header on the overview opens its own list. */
+  onGroup?: (project: TodoProject) => void;
+  /** "더 보기" and "접기" on a column that shows only its first cards (`BoardColumn.shown`). */
+  onFold?: (columnId: string) => void;
   context: CardContext;
   /**
    * Cards can be put in order within a column: siblings in a section column, the tasks of one date in a date column
@@ -44,14 +54,21 @@ const cardId = (id: string) => `task:${id}`;
 const columnDrop = (id: string) => `column:${id}`;
 const sectionDrag = (id: string) => `section:${id}`;
 
-/** A press on a card's empty area first lands on the column under it; the card wins when the pointer is on it. */
-const collisions: CollisionDetection = args => {
+/**
+ * A press on a card's empty area first lands on the column under it; the card wins when the pointer is on it. Off every
+ * column the nearest one takes it, but on the overview, where the nearest can be another project's, nothing does (a
+ * keyboard drag, without a pointer, still goes to the nearest).
+ */
+export const collisionsFor = (overview: boolean): CollisionDetection => args => {
   const within = pointerWithin(args);
   const card = within.find(item => String(item.id).startsWith('task:'));
   if (card) return [card];
   if (within.length) return within;
-  return closestCorners(args);
+  return overview && args.pointerCoordinates ? [] : closestCorners(args);
 };
+const collisions = collisionsFor(false), overviewCollisions = collisionsFor(true);
+
+const groupName = (group: BoardGroup) => group.project.inbox ? t('관리함') : group.project.name;
 
 const transformOf = (transform: { x: number; y: number } | null) => transform ? `translate3d(${Math.round(transform.x)}px, ${Math.round(transform.y)}px, 0)` : undefined;
 
@@ -88,6 +105,9 @@ function Column({ column, board, active, over, children }: { column: BoardColumn
     </header>
     <div ref={setNodeRef} className="todo-column-cards">
       {children}
+      {column.shown !== undefined && column.tasks.length > column.shown
+        ? <button type="button" className="todo-fold-cards" onClick={() => board.onFold?.(column.id)}>{t('더 보기')} <b>{column.tasks.length - column.shown}</b></button>
+        : board.onFold && column.tasks.length > OVERVIEW_SHOWN && <button type="button" className="todo-fold-cards" onClick={() => board.onFold?.(column.id)}>{t('접기')}</button>}
       {column.drop && <button type="button" className="todo-add-card" onClick={() => board.onAdd(column)}><Plus size={14} />{t('작업 추가')}</button>}
     </div>
   </section>;
@@ -112,7 +132,8 @@ function AddSection({ onAdd }: { onAdd: (name: string) => void }) {
 }
 
 export function BoardView(board: BoardProps) {
-  const { columns, context, manual, mobile } = board;
+  const { columns, groups, context, manual, mobile } = board;
+  const overview = !!groups;
   const sensors = useTodoSensors();
   const [activeTask, setActiveTask] = useState<TodoTask | null>(null);
   // Anything dragged, a card or a section: the arrow keys are the drag's meanwhile.
@@ -121,17 +142,19 @@ export function BoardView(board: BoardProps) {
   const [current, setCurrent] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   const tabMenu = useRef<HTMLButtonElement>(null);
-  const sectionIds = useMemo(() => columns.filter(column => column.sectionId).map(column => sectionDrag(column.sectionId!)), [columns]);
+  // The sections that can trade places: one project's (each group's on the overview).
+  const sectionLists = useMemo(() => (groups ? groups.map(group => group.columns) : [columns]).map(list => list.filter(column => column.sectionId).map(column => column.sectionId!)), [groups, columns]);
 
   // A phone shows one column at a time; the tabs follow the swipes (and the arrow keys), by where each column starts.
   const columnStarts = () => { const element = scroller.current; const all = element ? [...element.querySelectorAll<HTMLElement>(':scope > .todo-column')] : []; return all.map(column => column.offsetLeft - (all[0]?.offsetLeft ?? 0)); };
   useEffect(() => {
     const element = scroller.current;
-    if (!mobile || !element) return;
+    if (!mobile || !element || overview) return;
     const onScroll = () => { const starts = columnStarts(); let nearest = 0; starts.forEach((start, index) => { if (Math.abs(start - element.scrollLeft) < Math.abs(starts[nearest] - element.scrollLeft)) nearest = index; }); setCurrent(nearest); };
     element.addEventListener('scroll', onScroll, { passive: true });
     return () => element.removeEventListener('scroll', onScroll);
-  }, [mobile]);
+  }, [mobile, overview]);
+  const sectionItems = useMemo(() => sectionLists.map(list => list.map(sectionDrag)), [sectionLists]);
   useEffect(() => { if (current >= columns.length) setCurrent(Math.max(0, columns.length - 1)); }, [columns.length, current]);
   const pick = (index: number) => { setCurrent(index); scroller.current?.scrollTo({ left: columnStarts()[index] ?? 0, behavior: 'smooth' }); };
 
@@ -148,12 +171,9 @@ export function BoardView(board: BoardProps) {
     if (!over) return;
     const data = active.data.current;
     if (data?.type === 'section') {
-      const from = sectionIds.indexOf(String(active.id)), to = sectionIds.indexOf(String(over.id));
-      if (from < 0 || to < 0 || from === to) return;
-      const order = sectionIds.filter(id => id !== active.id);
-      order.splice(to, 0, String(active.id));
-      const index = order.indexOf(String(active.id));
-      board.onSectionMove((columnOf(data)!.sectionId)!, index > 0 ? order[index - 1].slice('section:'.length) : null);
+      const sectionOf = (id: string | number) => String(id).startsWith('section:') ? String(id).slice('section:'.length) : '';
+      const afterId = sectionDropAfter(sectionLists, sectionOf(active.id), sectionOf(over.id));
+      if (afterId !== undefined) board.onSectionMove(sectionOf(active.id), afterId);
       return;
     }
     if (data?.type !== 'task') return;
@@ -167,26 +187,19 @@ export function BoardView(board: BoardProps) {
       return;
     }
     if (!target?.drop) return;
-    const list = target.tasks.filter(item => item.id !== task.id);
-    // A folded column hides its tasks: what is let go on it goes last.
-    if (!manual || target.collapsed) { if (target.id !== source.id) board.onDrop(task, target, undefined); return; }
-    let index = overTask ? target.tasks.findIndex(item => item.id === overTask.id) : list.length;
-    if (target.id === source.id) {
-      const from = source.tasks.findIndex(item => item.id === task.id);
-      if (from === index || index < 0) return;
-    } else if (index < 0) index = list.length;
-    board.onDrop(task, target, index === 0 ? null : list[index - 1]?.id ?? (list.length ? list[list.length - 1].id : null));
+    const place = dropPlace(task.id, source, target, overTask?.id, { manual, emptyFirst: !!groups });
+    if (place) board.onDrop(task, target, place.afterId);
   };
 
   const renderColumn = (column: BoardColumn) => <Column key={column.id} column={column} board={board} active={!!activeTask} over={overColumn === column.id}>
-    <SortableContext items={column.tasks.map(task => cardId(task.id))} strategy={verticalListSortingStrategy}>
-      {column.tasks.map(task => <SortableCard key={task.id} task={task} column={column.locked || !board.taskLocked?.(task) ? column : { ...column, locked: true }} context={context} selected={board.selectedId === task.id} {...board.card}
+    <SortableContext items={shownTasks(column).map(task => cardId(task.id))} strategy={verticalListSortingStrategy}>
+      {shownTasks(column).map(task => <SortableCard key={task.id} task={task} column={column.locked || !board.taskLocked?.(task) ? column : { ...column, locked: true }} context={context} selected={board.selectedId === task.id} {...board.card}
         {...(column.locked || board.taskLocked?.(task) ? { readOnly: true } : {})} />)}
     </SortableContext>
   </Column>;
 
-  return <DndContext sensors={sensors} collisionDetection={collisions} onDragStart={onStart} onDragOver={onOver} onDragEnd={onEnd} onDragCancel={() => { setActiveTask(null); setOverColumn(null); setDragging(false); }}>
-    {mobile && (columns.length > 1 || columns[current]?.sectionId) && <div className="todo-column-tabs-bar">
+  return <DndContext sensors={sensors} collisionDetection={overview ? overviewCollisions : collisions} onDragStart={onStart} onDragOver={onOver} onDragEnd={onEnd} onDragCancel={() => { setActiveTask(null); setOverColumn(null); setDragging(false); }}>
+    {mobile && !groups && (columns.length > 1 || columns[current]?.sectionId) && <div className="todo-column-tabs-bar">
       <div className="todo-column-tabs" role="tablist" aria-label={t('열')}>
         {columns.map((column, index) => <ColumnTab key={column.id} column={column} index={index} current={index === current} onPick={pick} />)}
       </div>
@@ -194,13 +207,29 @@ export function BoardView(board: BoardProps) {
       {columns[current]?.sectionId && <button ref={tabMenu} type="button" className="icon-button" aria-label={t('“{0}” 섹션 메뉴', { 0: columns[current].title })}
         onClick={() => tabMenu.current && board.onSectionMenu(columns[current].sectionId!, tabMenu.current)}><MoreHorizontal size={15} /></button>}
     </div>}
-    <div ref={scroller} className={`todo-board ${dragging ? 'dragging' : ''}`}>
-      <SortableContext items={sectionIds} strategy={horizontalListSortingStrategy}>
+    {groups ? <div ref={scroller} className={`todo-board todo-overview ${dragging ? 'dragging' : ''}`}>
+      {groups.map((group, index) => <section key={group.project.id} className="todo-group" aria-label={groupName(group)} style={{ '--depth': group.depth } as CSSProperties}>
+        <header className="todo-group-head">
+          <button type="button" className="todo-group-title" onClick={() => board.onGroup?.(group.project)}>
+            {group.project.inbox ? <Inbox size={14} /> : <i className="todo-dot" style={{ background: colorOf(group.project.color) }} />}
+            {group.parents.length > 0 && <span className="todo-group-path">{group.parents.join(' / ')} /</span>}
+            <h3>{groupName(group)}</h3>
+          </button>
+          <span className="todo-column-count">{group.count || ''}</span>
+        </header>
+        <div className="todo-group-columns">
+          <SortableContext items={sectionItems[index]} strategy={horizontalListSortingStrategy}>
+            {group.columns.map(renderColumn)}
+          </SortableContext>
+        </div>
+      </section>)}
+    </div> : <div ref={scroller} className={`todo-board ${dragging ? 'dragging' : ''}`}>
+      <SortableContext items={sectionItems[0]} strategy={horizontalListSortingStrategy}>
         {columns.map(renderColumn)}
       </SortableContext>
       {board.sections && <AddSection onAdd={board.onAddSection} />}
       {board.completed}
-    </div>
+    </div>}
     <DragOverlay dropAnimation={null}>{activeTask && <div className="todo-drag-overlay"><TaskCard task={activeTask} context={context} {...board.card} /></div>}</DragOverlay>
   </DndContext>;
 }

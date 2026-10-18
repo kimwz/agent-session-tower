@@ -6,13 +6,14 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { english } from '../../../client/src/i18n/messages.js';
 import { getLanguage, setLanguage } from '../../../client/src/i18n/i18n.js';
-import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
+import { applyOps, inverseOps, worldFromOverview } from '../../../client/src/todo/todo-model.js';
 import { readShortcut, readSwitchKey } from '../../../client/src/todo/todo-shortcuts.js';
 import { moveSelection } from '../../../client/src/todo/todo-views.js';
 import { isTodoPage, pageSearch, readTodoLocation, todoSearch } from '../../../client/src/todo/todo-url.js';
-import { boardColumns, cardContext, defaultDisplay, dropOps, manualOrder, projectOrder, sectionMoveTarget, sidebarCounts, switchIndex, switchTargets, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { boardColumns, calendarTasks, cardContext, defaultDisplay, dropOps, dropPlace, foldGroups, groupingsFor, sectionDropAfter, shownTasks, manualOrder, overviewGroups, projectOrder, sectionMoveTarget, shapeSections, sidebarCounts, switchIndex, switchTargets, viewTitle, type ViewContext } from '../../../client/src/todo/todo-views.js';
 import { nthOf } from '../../../client/src/todo/DatePicker.js';
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
+import { collisionsFor } from '../../../client/src/todo/BoardView.js';
 import { PageSwitch } from '../../../client/src/todo/PageSwitch.js';
 import { recurrenceLabel } from '../../../client/src/todo/todo-format.js';
 import { label, overview, project, section, task } from './fixtures.js';
@@ -146,7 +147,7 @@ test('keys: a G chord, task keys, and undo', () => {
     // A Korean input mode gives another letter for the same key: the key's place decides.
     assert.deepEqual(readShortcut({ ...key('ㅠ'), code: `Key${letter.toUpperCase()}` }, false), { shortcut: { action }, pending: false });
   }
-  assert.deepEqual(readShortcut(key('b'), true), { pending: false }, 'after G only T, U and I count');
+  assert.deepEqual(readShortcut(key('b'), true), { pending: false }, 'after G only A, T, U and I count');
   assert.deepEqual(readShortcut(key('M', { shiftKey: true }), false), { pending: false }, 'Shift+M stays the master\'s');
   assert.deepEqual(readShortcut(key('ArrowDown'), false), { shortcut: { action: 'move', direction: 'down' }, pending: false });
   assert.deepEqual(readShortcut(key('ArrowLeft'), false), { shortcut: { action: 'move', direction: 'left' }, pending: false });
@@ -195,28 +196,32 @@ test('arrow keys move the chosen card through columns that have cards, from the 
   assert.equal(moveSelection([{ tasks: [] }] as never[], null, 'down'), null);
 });
 
-test('V offers the Inbox, Today, Upcoming and the first six projects as the sidebar lists them', () => {
-  assert.deepEqual(switchTargets(world), [{ kind: 'inbox' }, { kind: 'today' }, { kind: 'upcoming' }, { kind: 'project', id: 'tower' }, { kind: 'project', id: 'home' }],
+test('V offers everything, the Inbox, Today, Upcoming and the first six projects as the sidebar lists them, from 0', () => {
+  assert.deepEqual(switchTargets(world), [{ kind: 'all' }, { kind: 'inbox' }, { kind: 'today' }, { kind: 'upcoming' }, { kind: 'project', id: 'tower' }, { kind: 'project', id: 'home' }],
     'a sub-project follows its parent; an archived one is left out');
   const many = worldFromOverview(overview([], { projects: [project('inbox', { inbox: true }), ...['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'].map(id => project(id, { sortKey: id }))] }));
-  assert.deepEqual(switchTargets(many).map(view => view.kind === 'project' ? view.id : view.kind), ['inbox', 'today', 'upcoming', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6']);
+  assert.deepEqual(switchTargets(many).map(view => view.kind === 'project' ? view.id : view.kind), ['all', 'inbox', 'today', 'upcoming', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6']);
   // The list opens marking the list shown: the Inbox opened as its project too; none for a list it does not hold.
-  assert.equal(switchIndex(world, { kind: 'project', id: 'inbox' }), 0);
-  assert.equal(switchIndex(world, { kind: 'project', id: 'home' }), 4);
+  assert.equal(switchIndex(world, { kind: 'project', id: 'inbox' }), 1);
+  assert.equal(switchIndex(world, { kind: 'project', id: 'home' }), 5);
+  assert.equal(switchIndex(world, { kind: 'all' }), 0);
   assert.equal(switchIndex(world, { kind: 'label', id: 'call' }), -1);
   assert.equal(switchIndex(many, { kind: 'project', id: 'p7' }), -1);
   const key = (value: string, code?: string, mods: Partial<{ shiftKey: boolean; metaKey: boolean; repeat: boolean }> = {}) => ({ key: value, code, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, ...mods });
   assert.deepEqual(readShortcut(key('v'), false), { shortcut: { action: 'views' }, pending: false });
   assert.deepEqual(readShortcut(key('ㅍ', 'KeyV'), false), { shortcut: { action: 'views' }, pending: false }, 'a Korean input mode keeps V');
   assert.deepEqual(readShortcut(key('V', 'KeyV', { shiftKey: true }), false), { shortcut: { action: 'layout' }, pending: false }, 'Shift+V still switches board and calendar');
-  assert.deepEqual(readShortcut(key('v'), true), { pending: false }, 'after G only T, U and I count');
-  // In the list: numbers choose, one past the list is swallowed, arrows go around, Enter chooses, V closes.
-  assert.deepEqual(readSwitchKey(key('1', 'Digit1'), 5, 2), { action: 'choose', index: 0 });
-  assert.deepEqual(readSwitchKey(key('4', 'Numpad4'), 5, 0), { action: 'choose', index: 3 });
+  assert.deepEqual(readShortcut(key('v'), true), { pending: false }, 'after G only A, T, U and I count');
+  assert.deepEqual(readShortcut(key('ㅁ', 'KeyA'), true), { shortcut: { action: 'all' }, pending: false }, 'G A goes to everything');
+  // In the list: numbers choose the entry they number (0 is everything), one past the list is swallowed, arrows go around, Enter chooses, V closes.
+  assert.deepEqual(readSwitchKey(key('1', 'Digit1'), 5, 2), { action: 'choose', index: 1 });
+  assert.deepEqual(readSwitchKey(key('4', 'Numpad4'), 5, 0), { action: 'choose', index: 4 });
+  assert.deepEqual(readSwitchKey(key('9', 'Digit9'), 10, 0), { action: 'choose', index: 9 }, 'the sixth project keeps 9');
   assert.equal(readSwitchKey(key('ArrowLeft', 'Numpad4'), 5, 0), undefined, 'a number pad without Num Lock is not a number');
   assert.deepEqual(readSwitchKey(key('!', 'Digit1', { shiftKey: true }), 5, 0), undefined);
   assert.equal(readSwitchKey(key('7', 'Digit7'), 5, 2), undefined, 'a number past the list does nothing');
-  assert.equal(readSwitchKey(key('0', 'Digit0'), 5, 2), undefined);
+  assert.equal(readSwitchKey(key('5', 'Digit5'), 5, 2), undefined);
+  assert.deepEqual(readSwitchKey(key('0', 'Digit0'), 5, 2), { action: 'choose', index: 0 });
   assert.deepEqual(readSwitchKey(key('ArrowDown', 'ArrowDown'), 5, 4), { action: 'mark', index: 0 });
   assert.deepEqual(readSwitchKey(key('ArrowUp', 'ArrowUp'), 5, 0), { action: 'mark', index: 4 });
   assert.deepEqual(readSwitchKey(key('Enter', 'Enter'), 5, 3), { action: 'choose', index: 3 });
@@ -225,4 +230,120 @@ test('V offers the Inbox, Today, Upcoming and the first six projects as the side
   assert.deepEqual(readSwitchKey(key('Enter', 'Enter'), 4, 6), { action: 'choose', index: 3 }, 'the list shrank while open');
   assert.equal(readSwitchKey(key('1', 'Digit1', { metaKey: true }), 5, 0), undefined);
   assert.equal(readSwitchKey(key('q', 'KeyQ'), 5, 0), undefined);
+});
+
+test('the overview lists the Inbox, then each shown project in the sidebar order with the columns of its own board', () => {
+  const all = worldFromOverview(overview([
+    task('i1', { sortKey: 'a' }), task('i2', { sortKey: 'b' }), task('i3', { sortKey: 'c' }), task('i4', { sortKey: 'd' }),
+    task('done', { completedAt: 'x' }), task('removed', { deletedAt: 'x' }),
+    task('t1', { projectId: 'tower', sectionId: 'design' }), task('t1a', { projectId: 'tower', sectionId: 'design', parentId: 't1' }),
+    task('t2', { projectId: 'tower', sectionId: 'folded' }), task('kept', { projectId: 'tower', sectionId: 'shelved' }),
+    task('h1', { projectId: 'home' }), task('o1', { projectId: 'old' }), task('u1', { projectId: 'under-old' }),
+  ], {
+    projects: [project('inbox', { inbox: true, name: 'Inbox' }), project('tower', { name: 'Tower', sortKey: 'b' }), project('home', { name: 'Home', parentId: 'tower' }),
+      project('empty', { sortKey: 'c' }), project('old', { archivedAt: 'x', sortKey: 'a' }), project('under-old', { parentId: 'old' })],
+    sections: [section('design', 'tower', { sortKey: 'a' }), section('folded', 'tower', { sortKey: 'b', collapsed: true }), section('shelved', 'tower', { sortKey: 'c', archivedAt: 'x' })],
+  }));
+  const at = context({ world: all });
+  const display = defaultDisplay({ kind: 'all' });
+  const groups = overviewGroups(display, at);
+  assert.deepEqual(groups.map(group => [group.project.id, group.depth, group.parents, group.count]), [['inbox', 0, [], 4], ['tower', 0, [], 2], ['home', 1, ['Tower'], 1], ['empty', 0, [], 0]],
+    'a sub-project on its own after its parent, an empty project kept to drop on; archived projects (and those under them) left out');
+  assert.deepEqual(groups.map(group => group.columns.map(column => [column.id, column.tasks.map(item => item.id)])), [
+    [['inbox/section:none', ['i1', 'i2', 'i3', 'i4']]],
+    [['tower/section:none', []], ['tower/section:design', ['t1']], ['tower/section:folded', []]],
+    [['home/section:none', ['h1']]],
+    [['empty/section:none', []]],
+  ], 'completed, deleted and archived-section tasks left out; a sub-task stays in its parent card; a folded section keeps only its count');
+  assert.equal(groups[1].columns[2].collapsed, true);
+  assert.equal(groups[1].columns[2].count, 1);
+  // The same columns as the project's own board, but for the ids that name their project.
+  const own = shapeSections(boardColumns({ kind: 'project', id: 'tower' }, defaultDisplay({ kind: 'project', id: 'tower' }), at), all.sections.filter(item => item.projectId === 'tower'), { collapse: true, showArchived: false }).columns;
+  assert.deepEqual(groups[1].columns.map(column => ({ ...column, id: '' })), own.map(column => ({ ...column, id: '' })));
+  assert.deepEqual(groups[1].columns[1].drop, { kind: 'section', projectId: 'tower', sectionId: 'design' });
+  assert.deepEqual(groups[1].columns[1].preset, { projectId: 'tower', sectionId: 'design' });
+  // The overview is grouped by sections only, without a completed list; its calendar shows every open task.
+  assert.deepEqual(groupingsFor({ kind: 'all' }), ['section']);
+  assert.deepEqual(calendarTasks({ kind: 'all' }, at).map(item => item.id).sort(), ['h1', 'i1', 'i2', 'i3', 'i4', 't1', 't1a', 't2']);
+  assert.equal(viewTitle({ kind: 'all' }, all, ''), '전체');
+  assert.deepEqual(readTodoLocation('?view=todo&todo=all').view, { kind: 'all' });
+  assert.equal(todoSearch('', { view: { kind: 'all' }, layout: 'calendar', task: null, query: '' }), '?view=todo&todo=all&layout=calendar');
+});
+
+test('a card let go on a card takes its place; on a folded column, or the empty space of an overview column, it goes first', () => {
+  const column = (id: string, tasks: string[], patch: { collapsed?: boolean } = {}) => ({ id, tasks: tasks.map(item => task(item)), ...patch });
+  const inbox = column('inbox', ['a', 'b']), target = column('target', ['x', 'y', 'z', 'w', 'v']);
+  const manual = { manual: true, emptyFirst: false }, overviewDrop = { manual: true, emptyFirst: true };
+  assert.deepEqual(dropPlace('a', inbox, target, 'y', manual), { afterId: 'x' }, 'before the card it is let go on');
+  assert.deepEqual(dropPlace('a', inbox, target, 'x', manual), { afterId: null });
+  assert.deepEqual(dropPlace('a', inbox, target, 'z', overviewDrop), { afterId: 'y' }, 'the third card of a column that shows three');
+  assert.deepEqual(dropPlace('a', inbox, target, undefined, manual), { afterId: 'v' }, 'a project board: the empty space is the end');
+  assert.deepEqual(dropPlace('a', inbox, target, undefined, overviewDrop), { afterId: null }, 'the overview: the empty space is the top');
+  assert.deepEqual(dropPlace('a', inbox, column('folded', [], { collapsed: true }), undefined, manual), { afterId: null }, 'a folded section: the top, on a project board too');
+  assert.deepEqual(dropPlace('a', inbox, column('empty', []), undefined, manual), { afterId: null });
+  // Within its own column.
+  assert.equal(dropPlace('x', target, target, 'x', manual), null, 'let go where it was');
+  assert.deepEqual(dropPlace('x', target, target, 'z', manual), { afterId: 'z' }, 'down: after the card it is let go on');
+  assert.deepEqual(dropPlace('w', target, target, 'y', manual), { afterId: 'x' }, 'up: before it');
+  assert.equal(dropPlace('v', target, target, undefined, manual), null, 'the last card let go on the empty space stays');
+  assert.equal(dropPlace('x', target, target, undefined, overviewDrop), null, 'the first card let go on the empty space of the overview stays');
+  assert.deepEqual(dropPlace('z', target, target, undefined, overviewDrop), { afterId: null });
+  // Without an order kept by hand, only another column changes anything: where the server puts it, but first on a
+  // folded section or the overview.
+  assert.deepEqual(dropPlace('a', inbox, target, 'y', { manual: false, emptyFirst: false }), { afterId: undefined });
+  assert.deepEqual(dropPlace('a', inbox, column('folded', [], { collapsed: true }), undefined, { manual: false, emptyFirst: false }), { afterId: null });
+  assert.deepEqual(dropPlace('a', inbox, target, 'y', { manual: false, emptyFirst: true }), { afterId: null });
+  assert.equal(dropPlace('a', inbox, inbox, 'b', { manual: false, emptyFirst: true }), null);
+});
+
+test('a task moved to another project section takes its sub-tasks along, and undoing brings them all back', () => {
+  const start = worldFromOverview(overview([
+    task('p', { sortKey: 'a' }), task('p1', { parentId: 'p' }), task('p2', { parentId: 'p1' }), task('q', { sortKey: 'b' }),
+    task('s1', { projectId: 'tower', sectionId: 'design', sortKey: 'a' }),
+  ], { projects: [project('inbox', { inbox: true }), project('tower')], sections: [section('design', 'tower')] }));
+  const target = overviewGroups(defaultDisplay({ kind: 'all' }), context({ world: start }))[1].columns.find(column => column.sectionId === 'design')!;
+  const ops = dropOps(start.tasks.p, target.drop!, null);
+  assert.deepEqual(ops, [{ op: 'task.move', id: 'p', projectId: 'tower', sectionId: 'design', parentId: null, afterId: null }]);
+  const moved = applyOps(start, ops, { now: 'later', today });
+  assert.deepEqual(['p', 'p1', 'p2'].map(id => [moved.tasks[id].projectId, moved.tasks[id].sectionId]), Array(3).fill(['tower', 'design']));
+  assert.equal(moved.tasks.p.sortKey < moved.tasks.s1.sortKey, true, 'first in the section');
+  assert.deepEqual([moved.tasks.p1.parentId, moved.tasks.p2.parentId], ['p', 'p1']);
+  const back = applyOps(moved, inverseOps(start, ops, () => 'new')!, { now: 'later', today });
+  assert.deepEqual(['p', 'p1', 'p2'].map(id => [back.tasks[id].projectId, back.tasks[id].sectionId]), Array(3).fill(['inbox', null]));
+  assert.equal(back.tasks.p.sortKey < back.tasks.q.sortKey, true, 'back in its place');
+});
+
+test('a section moves only among its own project sections', () => {
+  const lists = [['a1', 'a2', 'a3'], ['b1', 'b2']];
+  assert.equal(sectionDropAfter(lists, 'a3', 'a1'), null, 'first');
+  assert.equal(sectionDropAfter(lists, 'a1', 'a3'), 'a3', 'last');
+  assert.equal(sectionDropAfter(lists, 'b2', 'b1'), null, "the next project's first, never after the last of the one before");
+  assert.equal(sectionDropAfter(lists, 'a2', 'a2'), undefined);
+  assert.equal(sectionDropAfter(lists, 'a2', 'b1'), undefined, "another project's section");
+  assert.equal(sectionDropAfter(lists, 'b1', 'task:x'), undefined);
+});
+
+test('the overview shows the first three cards of a column until it is opened, and the arrow keys only those', () => {
+  const many = worldFromOverview(overview(['a', 'b', 'c', 'd', 'e'].map(id => task(id)).concat(task('t', { projectId: 'tower' })), { projects: [project('inbox', { inbox: true }), project('tower')] }));
+  const groups = overviewGroups(defaultDisplay({ kind: 'all' }), context({ world: many }));
+  const folded = foldGroups(groups, new Set());
+  assert.deepEqual(folded.flatMap(group => group.columns).map(column => [column.id, column.shown, shownTasks(column).map(item => item.id)]), [['inbox/section:none', 3, ['a', 'b', 'c']], ['tower/section:none', 3, ['t']]]);
+  const opened = foldGroups(groups, new Set(['inbox/section:none']));
+  assert.deepEqual(shownTasks(opened[0].columns[0]).map(item => item.id), ['a', 'b', 'c', 'd', 'e']);
+  assert.equal(opened[1].columns[0].shown, 3, 'only the column opened');
+  // What the arrow keys go through: the cards shown.
+  const visible = folded.flatMap(group => group.columns).map(column => ({ tasks: shownTasks(column) }));
+  assert.equal(moveSelection(visible, 'c', 'down'), 'c', 'never down to a folded card');
+  assert.equal(moveSelection(visible, 'c', 'right'), 't');
+});
+
+test('on the overview a card let go off every column lands nowhere, not in the nearest project', () => {
+  const rect = (left: number, top: number, width: number, height: number) => ({ left, top, width, height, right: left + width, bottom: top + height });
+  const droppableRects = new Map<string, ReturnType<typeof rect>>([['column:inbox/section:none', rect(0, 0, 280, 200)], ['column:tower/section:none', rect(0, 300, 280, 200)]]);
+  const droppableContainers = [...droppableRects.keys()].map(id => ({ id, rect: { current: droppableRects.get(id) }, data: { current: {} }, disabled: false, node: { current: null } })) as never[];
+  const args = (pointer: { x: number; y: number } | null) => ({ active: { id: 'task:a' } as never, collisionRect: rect(0, 250, 100, 30), droppableRects: droppableRects as never, droppableContainers, pointerCoordinates: pointer });
+  assert.deepEqual(collisionsFor(true)(args({ x: 50, y: 260 })), [], 'between two projects');
+  assert.equal(collisionsFor(true)(args({ x: 50, y: 320 }))[0]?.id, 'column:tower/section:none');
+  assert.ok(collisionsFor(false)(args({ x: 50, y: 260 })).length > 0, 'a project board takes the nearest column');
+  assert.ok(collisionsFor(true)(args(null)).length > 0, 'a keyboard drag has no pointer and goes to the nearest');
 });

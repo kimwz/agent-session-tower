@@ -21,7 +21,7 @@ import { readShortcut, typingIn } from './todo-shortcuts';
 import { httpTransport, localToday, newId, TodoClient, useTodoState } from './todo-store';
 import { isTodoPage, readTodoLocation, todoSearch, viewKey, type TodoLocation, type TodoView } from './todo-url';
 import { isOpen } from './todo-model';
-import { archivedColumns, shapeSections, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
+import { archivedColumns, foldGroups, overviewGroups, shapeSections, shownTasks, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
 import { CalendarView } from './calendar/CalendarView';
 import type { TodoLayout } from '../../../shared/todo/types';
 
@@ -90,6 +90,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   // Renaming opens after the menu closes, so the menu's closing never undoes it.
   const [sectionRename, setSectionRename] = useState<string | null>(null);
   const [showArchivedSections, setShowArchivedSections] = useState(false);
+  // The overview's columns opened past their first cards ("더 보기"), until the list changes.
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   // The list of lists (`V`), opened under the page's title.
   const [switcher, setSwitcher] = useState(false);
   const titleRef = useRef<HTMLHeadingElement>(null);
@@ -158,7 +160,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   }, [state.phase, world, navigate]);
   useEffect(() => { client.openDetail(openTaskId); }, [client, openTaskId]);
   useEffect(() => { setStart(today); setSelectedId(null); }, [key, today]);
-  useEffect(() => { setShowArchivedSections(false); }, [key]);
+  useEffect(() => { setShowArchivedSections(false); setExpanded(new Set()); }, [key]);
 
   const openTask = useCallback((id: string) => navigate({ task: id }), [navigate]);
   const openChat = useCallback((id: string) => { chooseTab('chat'); navigate({ task: id }); }, [chooseTab, navigate]);
@@ -183,7 +185,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     return () => { current = false; };
   }, [client, view.kind, query, world.revision, searchDone]);
 
-  const completedAvailable = view.kind !== 'upcoming' && view.kind !== 'search';
+  const completedAvailable = view.kind !== 'all' && view.kind !== 'upcoming' && view.kind !== 'search';
   const layout = location.layout;
   const setLayout = useCallback((next: TodoLayout) => {
     if (locationRef.current.layout === next) return;
@@ -197,18 +199,27 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   useEffect(() => { if (completedScope === null) client.hideCompleted(); else void readCompleted(client, completedScope, false, completedLabel); }, [client, completedScope, completedLabel]);
 
   const setDisplay = (value: DisplaySettings) => { setDisplays(previous => ({ ...previous, [key]: value })); saveDisplay(key, value); };
+  // The overview: every project with its sections, each column showing its first cards until opened.
+  const groups = useMemo(() => view.kind !== 'all' ? null : overviewGroups(display, { world, today, start: today, query: '', searchResults: null }), [view.kind, display, world, today]);
+  const overview = useMemo(() => groups && foldGroups(groups, expanded), [groups, expanded]);
   const sectionShape = useMemo(() => {
+    if (overview) return { columns: overview.flatMap(group => group.columns), archived: 0 };
     const context = { world, today, start, query, searchResults };
     const base = locked && project ? archivedColumns(view, display, context, project.id) : boardColumns(view, display, context);
     if (!project || !base.some(column => column.id === 'section:none')) return { columns: base, archived: 0 };
     const shaped = shapeSections(base, world.sections.filter(item => item.projectId === project.id), { collapse: !locked, showArchived: showArchivedSections, tasks: Object.values(world.tasks) });
     // An archived project's archived sections show too, read-only and without a section menu like the rest of it.
     return locked ? { ...shaped, columns: shaped.columns.map(column => ({ ...column, sectionId: undefined })) } : shaped;
-  }, [view, display, world, today, start, query, searchResults, locked, project, showArchivedSections]);
+  }, [overview, view, display, world, today, start, query, searchResults, locked, project, showArchivedSections]);
   const columns = sectionShape.columns;
   // A card names its project where the list is not one project and its column does not already.
-  const showProject = !project && display.group !== 'project';
-  const shown = useMemo(() => new Set(columns.flatMap(column => column.tasks.map(item => item.id))), [columns]);
+  // The overview names each project above its columns.
+  const showProject = !project && display.group !== 'project' && view.kind !== 'all';
+  // The cards that show: a column that shows only its first ones hides the rest from the arrow keys too.
+  const visibleColumns = useMemo(() => columns.map(column => column.shown === undefined ? column : { ...column, tasks: shownTasks(column) }), [columns]);
+  const shown = useMemo(() => new Set(visibleColumns.flatMap(column => column.tasks.map(item => item.id))), [visibleColumns]);
+  // A card folded out of sight on the overview is no longer the chosen one, so E never completes a task not shown.
+  useEffect(() => { if (overview && selectedId && !selectedId.startsWith('done:') && !shown.has(selectedId)) setSelectedId(null); }, [overview, selectedId, shown]);
   const context = useMemo(() => cardContext(world, today, showProject, shown), [world, today, showProject, shown]);
   const counts = useMemo(() => sidebarCounts(world, today), [world, today]);
 
@@ -249,7 +260,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   };
   const setCalendar = (mode: DisplaySettings['calendar']) => { setLayout('calendar'); if (display.calendar !== mode) setDisplay({ ...display, calendar: mode }); };
   // The columns the arrow keys go through: the board's, and the completed list when it shows.
-  const navColumns = completedItems.length ? [...columns, { tasks: completedItems.map(item => ({ ...item.task, id: doneKey(item.completion.id) })) }] : columns;
+  const navColumns = completedItems.length ? [...visibleColumns, { tasks: completedItems.map(item => ({ ...item.task, id: doneKey(item.completion.id) })) }] : visibleColumns;
   const shortcuts = { ready: state.phase === 'ready', setSwitcher, target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout, setCalendar, navColumns, selectedId, choose, letGo, world, locked, lockedTask };
   const shortcutState = useRef(shortcuts);
   shortcutState.current = shortcuts;
@@ -278,7 +289,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
           else if (!current.sidebarOpen) current.onSidebarOpen(true);
           requestAnimationFrame(() => searchRef.current?.focus());
           break;
-        case 'today': case 'upcoming': case 'inbox': current.goTo({ kind: shortcut.action }); break;
+        case 'all': case 'today': case 'upcoming': case 'inbox': current.goTo({ kind: shortcut.action }); break;
         case 'complete': {
           // A completion chosen in the completed list is done already; E never completes its repeating task again.
           if (!task || task.completedAt || (!current.openTaskId && current.selectedId?.startsWith('done:'))) break;
@@ -354,7 +365,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   };
   const onDrop = (task: TodoTask, column: BoardColumn, afterId: string | null | undefined) => {
     if (!column.drop || locked || isLocked(task)) return;
-    const ops = dropOps(task, column.drop, manualOrder(display) ? afterId : undefined);
+    // The board gives a place only where it keeps one (todo-views `dropPlace`).
+    const ops = dropOps(task, column.drop, afterId);
     if (ops.length) client.apply(ops);
   };
   const cardMenuItems = (task: TodoTask): (MenuItem | 'separator')[] => [
@@ -397,7 +409,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const doneColumn = completedColumn ?? searchDoneColumn;
 
   const total = columns.reduce((sum, column) => sum + column.tasks.length, 0);
-  const emptyBoard = total === 0 && !project && !completedColumn && !doneResults.length;
+  const emptyBoard = total === 0 && !project && !overview && !completedColumn && !doneResults.length;
   const title = viewTitle(view, world, query);
   const section = world.sections.find(item => item.id === (sectionMenu ?? sectionRename));
   const siblings = section ? world.sections.filter(item => item.projectId === section.projectId && !item.archivedAt) : [];
@@ -413,7 +425,9 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     onChange={ops => client.apply(ops)} />;
   else if (emptyBoard) body = <div className="todo-state todo-empty"><p>{view.kind === 'today' ? t('오늘 할 일을 모두 끝냈습니다.') : view.kind === 'search' ? (searchResults === null ? t('검색어를 입력하세요.') : t('찾은 작업이 없습니다.')) : t('작업이 없습니다.')}</p>
     {view.kind !== 'search' && !readOnly && !locked && <button type="button" className="secondary-button" onClick={() => openAdd()}><Plus size={13} />{t('작업 추가')}</button>}</div>;
-  else body = <BoardView columns={columns} context={context} manual={manualOrder(display) && !readOnly && !locked} sections={!!project && display.group === 'section' && !readOnly && !locked} mobile={mobile} selectedId={boardChosen}
+  else body = <BoardView columns={columns} groups={overview ?? undefined} context={context} manual={manualOrder(display) && !readOnly && !locked} sections={(!!project || !!overview) && display.group === 'section' && !readOnly && !locked} mobile={mobile} selectedId={boardChosen}
+    onGroup={item => goTo(item.inbox ? { kind: 'inbox' } : { kind: 'project', id: item.id })}
+    onFold={overview ? id => setExpanded(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; }) : undefined}
     card={card} onAdd={column => openAdd({ ...column.preset })} onDrop={onDrop}
     onDayMove={(task, afterId) => { if (!locked && !isLocked(task)) client.apply([{ op: 'task.move', id: task.id, dayAfterId: afterId }]); }} taskLocked={isLocked}
     onSectionMove={(id, afterId) => client.apply([{ op: 'section.move', id, afterId }])}

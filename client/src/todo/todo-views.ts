@@ -41,6 +41,8 @@ export interface BoardColumn {
   collapsed?: boolean;
   /** How many tasks it holds when they are not shown (collapsed). */
   count?: number;
+  /** How many of its first tasks show, the rest behind "더 보기" (the overview's columns); all when absent. */
+  shown?: number;
   /** What a task added in this column starts with. */
   preset: { projectId?: string; sectionId?: string | null; dueDate?: string; priority?: TodoPriority };
 }
@@ -74,7 +76,7 @@ export function calendarTasks(view: TodoView, context: ViewContext): TodoTask[] 
   const tasks = openTasks(context.world);
   switch (view.kind) {
     case 'inbox': case 'project': { const project = projectOf(context.world, view); return project ? tasks.filter(task => task.projectId === project.id) : []; }
-    case 'today': case 'upcoming': return tasks;
+    case 'all': case 'today': case 'upcoming': return tasks;
     case 'label': case 'search': return viewTasks(view, context);
   }
 }
@@ -83,6 +85,8 @@ export function calendarTasks(view: TodoView, context: ViewContext): TodoTask[] 
 export function groupingsFor(view: TodoView): GroupKey[] {
   switch (view.kind) {
     case 'project': case 'inbox': return ['section', 'priority', 'date'];
+    // Each project in its sections, one after another (`overviewGroups`).
+    case 'all': return ['section'];
     case 'today': return ['date', 'priority', 'project'];
     case 'upcoming': return ['date'];
     case 'label': return ['project', 'priority', 'date'];
@@ -105,12 +109,16 @@ export function openTasks(world: TodoWorld): TodoTask[] {
   return Object.values(world.tasks).filter(task => isOpen(task) && live.has(task.projectId) && !(task.sectionId && shelved.has(task.sectionId)));
 }
 
-/** The tasks a list holds, before grouping: top-level ones in a project, every dated one in date lists. */
+/**
+ * The tasks a list holds, before grouping: top-level ones in a project (in every project for the overview), every
+ * dated one in date lists.
+ */
 export function viewTasks(view: TodoView, context: ViewContext): TodoTask[] {
   const { world, today } = context;
   const tasks = openTasks(world);
   switch (view.kind) {
     case 'inbox': case 'project': { const project = projectOf(world, view); return project ? tasks.filter(task => task.projectId === project.id && !task.parentId) : []; }
+    case 'all': return tasks.filter(task => !task.parentId);
     case 'today': return tasks.filter(task => task.dueDate !== null && task.dueDate <= today);
     case 'upcoming': return tasks.filter(task => task.dueDate !== null && task.dueDate < addDays(context.start, UPCOMING_DAYS));
     case 'label': return tasks.filter(task => task.labelIds.includes(view.id));
@@ -258,10 +266,10 @@ export function projectOrder(world: TodoWorld): TodoProject[] {
   return [...world.projects.filter(project => project.inbox), ...walk(projectTree(world))];
 }
 
-/** The lists `V` offers, numbered from 1: the Inbox, Today, Upcoming, then the first six projects as the sidebar lists them. */
+/** The lists `V` offers, numbered from 0: everything, the Inbox, Today, Upcoming, then the first six projects as the sidebar lists them. */
 export function switchTargets(world: TodoWorld): TodoView[] {
   const projects = projectOrder(world).filter(project => !project.inbox).slice(0, 6);
-  return [{ kind: 'inbox' }, { kind: 'today' }, { kind: 'upcoming' }, ...projects.map((project): TodoView => ({ kind: 'project', id: project.id }))];
+  return [{ kind: 'all' }, { kind: 'inbox' }, { kind: 'today' }, { kind: 'upcoming' }, ...projects.map((project): TodoView => ({ kind: 'project', id: project.id }))];
 }
 
 /** Where `view` is in `switchTargets`, the Inbox opened as its project (`p:<inbox>`) included; -1 when it is not there. */
@@ -273,6 +281,7 @@ export function switchIndex(world: TodoWorld, view: TodoView): number {
 /** The view's title. */
 export function viewTitle(view: TodoView, world: TodoWorld, query: string): string {
   switch (view.kind) {
+    case 'all': return t('전체');
     case 'today': return t('오늘');
     case 'upcoming': return t('다가오는');
     case 'inbox': return t('관리함');
@@ -348,6 +357,69 @@ export function shapeSections(columns: readonly BoardColumn[], sections: readonl
     id: `section:${section.id}`, title: section.name, note: t('보관됨'), sectionId: section.id, drop: null, locked: true, preset: {}, tasks: stored.filter(task => task.sectionId === section.id),
   });
   return { columns: shaped, archived: archived.length };
+}
+
+/** How many cards each of the overview's columns shows before "더 보기". */
+export const OVERVIEW_SHOWN = 3;
+
+/**
+ * One project on the overview: its header (with the names of the projects above it) and its section columns, as its
+ * own board makes them, and how many open top-level tasks it has.
+ */
+export interface BoardGroup { project: TodoProject; depth: number; parents: string[]; columns: BoardColumn[]; count: number }
+
+/**
+ * The overview (`all`): the Inbox, then every project shown in the sidebar's order, sub-projects each on their own
+ * (a project's board leaves out its sub-projects' tasks), each with the section columns its own board shows. A column's
+ * id names its project, since every project has its own "섹션 없음".
+ */
+export function overviewGroups(display: DisplaySettings, context: ViewContext): BoardGroup[] {
+  const { world } = context;
+  type Place = { project: TodoProject; depth: number; parents: string[] };
+  const walk = (nodes: ProjectNode[], parents: string[]): Place[] => nodes.flatMap(node => [{ project: node.project, depth: node.depth, parents }, ...walk(node.children, [...parents, node.project.name])]);
+  const inbox = world.projects.filter(project => project.inbox).map(project => ({ project, depth: 0, parents: [] }));
+  return [...inbox, ...walk(projectTree(world), [])].map(({ project, depth, parents }) => {
+    const columns = boardColumns({ kind: 'project', id: project.id }, { ...display, group: 'section' }, context);
+    const shaped = shapeSections(columns, world.sections.filter(section => section.projectId === project.id), { collapse: true, showArchived: false }).columns;
+    return { project, depth, parents, count: columns.reduce((sum, column) => sum + column.tasks.length, 0), columns: shaped.map(column => ({ ...column, id: `${project.id}/${column.id}` })) };
+  });
+}
+
+/** The overview's columns as they show: each its first cards (`OVERVIEW_SHOWN`), but those opened (`expanded`) whole. */
+export const foldGroups = (groups: readonly BoardGroup[], expanded: ReadonlySet<string>): BoardGroup[] =>
+  groups.map(group => ({ ...group, columns: group.columns.map(column => expanded.has(column.id) ? column : { ...column, shown: OVERVIEW_SHOWN }) }));
+
+/** The tasks of `column` that have a card: those `shown`, or all. */
+export const shownTasks = (column: Pick<BoardColumn, 'tasks' | 'shown'>): TodoTask[] => column.shown === undefined ? column.tasks : column.tasks.slice(0, column.shown);
+
+/**
+ * Where a card let go on column `target` goes, as `dropOps`' `afterId` (undefined: wherever the server puts it), or
+ * null when nothing changes. On a card it takes that card's place. A collapsed column shows no cards, so what is let go
+ * on it goes first; so does what is let go on a column's empty space when `emptyFirst` (the overview, whose columns may
+ * hide cards after the third), and otherwise last. Without an order kept by hand, only another column changes anything,
+ * and the card goes where the server puts it but first on a folded column or the overview, as by hand.
+ */
+export function dropPlace(taskId: string, source: Pick<BoardColumn, 'id' | 'tasks'>, target: Pick<BoardColumn, 'id' | 'tasks' | 'collapsed'>, overId: string | undefined, options: { manual: boolean; emptyFirst: boolean }): { afterId: string | null | undefined } | null {
+  if (!options.manual) return target.id === source.id ? null : { afterId: target.collapsed || options.emptyFirst ? null : undefined };
+  const list = target.tasks.filter(item => item.id !== taskId);
+  const over = overId && !target.collapsed ? target.tasks.findIndex(item => item.id === overId) : -1;
+  const index = over >= 0 ? over : target.collapsed || options.emptyFirst ? 0 : list.length;
+  if (target.id === source.id && source.tasks.findIndex(item => item.id === taskId) === index) return null;
+  return { afterId: index === 0 ? null : list[index - 1]?.id ?? list.at(-1)?.id ?? null };
+}
+
+/**
+ * Where section `activeId` let go on section `overId` goes (the section before it, null: first), among the list of
+ * `lists` that holds it (one project's sections): undefined when it stays, or when `overId` is another project's.
+ */
+export function sectionDropAfter(lists: readonly (readonly string[])[], activeId: string, overId: string): string | null | undefined {
+  const list = lists.find(ids => ids.includes(activeId)) ?? [];
+  const from = list.indexOf(activeId), to = list.indexOf(overId);
+  if (from < 0 || to < 0 || from === to) return undefined;
+  const order = list.filter(id => id !== activeId);
+  order.splice(to, 0, activeId);
+  const index = order.indexOf(activeId);
+  return index > 0 ? order[index - 1] : null;
 }
 
 /**
