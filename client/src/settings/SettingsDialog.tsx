@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { ArchiveRestore, Bell, KeyRound, BrainCircuit, ChevronRight, Cpu, Network, ShieldCheck, SlidersHorizontal, Sparkles, UserRoundCog, X, Zap, type LucideIcon } from 'lucide-react';
+import { ArchiveRestore, Bell, KeyRound, BrainCircuit, ChevronRight, Cpu, ListChecks, LoaderCircle, Network, ShieldCheck, SlidersHorizontal, Sparkles, UserRoundCog, X, Zap, type LucideIcon } from 'lucide-react';
 import type { ProviderHealth } from '../../../shared/types';
 import type { TriggerOverview } from '../../../shared/triggers';
 import { useI18n } from '../i18n/i18n';
@@ -20,7 +20,7 @@ import { BackupPanel } from '../backup/BackupPanel';
 import { SecretsPanel } from '../secrets/SecretsPanel';
 import type { SecretCanvas } from '../secrets/secrets-client';
 import { ModelsPanel } from '../models/ModelsPanel';
-import { SettingsFrameContext, type SettingsFrame, type SettingsGuard } from './SettingsPane';
+import { SettingsFrameContext, SettingsPane, type SettingsFrame, type SettingsGuard } from './SettingsPane';
 import { markText, sectionMark, type SettingsAttention, type SettingsSection } from './settings-sections';
 
 /** What the sections need from the page. */
@@ -42,9 +42,12 @@ export interface SettingsContext {
 
 export interface SettingsPlace { section: SettingsSection; cwd?: string; remoteTab?: RemoteTab; list?: boolean; secretId?: string }
 
-const ICONS: Record<SettingsSection, LucideIcon> = { general: SlidersHorizontal, models: Cpu, triggers: Zap, skills: Sparkles, permissions: ShieldCheck, decisions: BrainCircuit, remote: Network, notifications: Bell, backup: ArchiveRestore, secrets: KeyRound, account: UserRoundCog };
+// Its drag-and-drop library stays with the Todo page's chunk, out of every page's first load.
+const TodoSettings = lazy(() => import('./TodoSettings').then(module => ({ default: module.TodoSettings })));
+
+const ICONS: Record<SettingsSection, LucideIcon> = { general: SlidersHorizontal, todos: ListChecks, models: Cpu, triggers: Zap, skills: Sparkles, permissions: ShieldCheck, decisions: BrainCircuit, remote: Network, notifications: Bell, backup: ArchiveRestore, secrets: KeyRound, account: UserRoundCog };
 const GROUPS: { caption?: string; sections: SettingsSection[] }[] = [
-  { sections: ['general', 'models'] },
+  { sections: ['general', 'todos', 'models'] },
   { caption: '자동화', sections: ['triggers', 'skills', 'permissions', 'decisions'] },
   { caption: '연결', sections: ['remote', 'notifications'] },
   { caption: '데이터', sections: ['secrets', 'backup'] },
@@ -52,7 +55,7 @@ const GROUPS: { caption?: string; sections: SettingsSection[] }[] = [
 ];
 
 export function sectionLabel(section: SettingsSection, t: (key: string) => string): string {
-  const labels: Record<SettingsSection, string> = { general: '일반', models: '모델', triggers: '트리거', skills: '스킬', permissions: '권한', decisions: '빠른 판단', remote: '원격 컴퓨터', notifications: '알림', backup: '백업', secrets: '시크릿', account: '계정' };
+  const labels: Record<SettingsSection, string> = { general: '일반', todos: '할 일', models: '모델', triggers: '트리거', skills: '스킬', permissions: '권한', decisions: '빠른 판단', remote: '원격 컴퓨터', notifications: '알림', backup: '백업', secrets: '시크릿', account: '계정' };
   return t(labels[section]);
 }
 
@@ -111,6 +114,8 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
     const clearFolder = () => onPlace({ section, cwd: undefined });
     switch (section) {
       case 'general': return <GeneralSettings canvas={canvas} showHidden={context.showHidden} onShowHiddenChange={context.onShowHiddenChange} />;
+      // While it loads, the section's frame (title, back and close) is already there.
+      case 'todos': return <Suspense fallback={<SettingsPane title={t('할 일')}><LoaderCircle className="spin" aria-label={t('연결 중')} /></SettingsPane>}><TodoSettings token={context.token} /></Suspense>;
       case 'models': return <ModelsPanel token={context.token} providers={context.providers} computers={context.computers} />;
       case 'triggers': return <TriggerPanel token={context.token} overview={context.triggers} providers={context.providers} projects={context.projects}
         computers={context.computers} targets={context.targets} onOpenSlack={() => setSlack(true)} onOpenPublic={() => setPublicAgents(true)} onSeen={onTriggersSeen} />;

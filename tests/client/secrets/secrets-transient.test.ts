@@ -61,6 +61,9 @@ function fixture(file: string, component: string, props: Record<string, unknown>
     useCallback: (callback: unknown) => callback,
     useMemo: (build: () => unknown) => build(),
     useId: () => 'fixture',
+    // Lazily loaded sections are never drawn by these fixtures.
+    lazy: () => () => null,
+    Suspense: ({ children }: { children?: unknown }) => children,
   };
   const t = (value: string, values: Record<string, unknown> = {}) => value.replace(/\{(\w+)\}/g, (match, name) => name in values ? String(values[name]) : match);
   const module = { exports: {} as Record<string, (props: unknown) => Element> };

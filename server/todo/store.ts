@@ -3,6 +3,7 @@ import { constants, lstatSync, openSync, closeSync, fchmodSync, readdirSync, rmS
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { TowerError } from '../../shared/errors.js';
+import { parseChatPresets } from '../../shared/todo/chat-presets.js';
 import type { TodoOp, TodoOpName, TodoOpOf, TodoRequest } from '../../shared/todo/ops.js';
 import type { TodoAgent, TodoAgentState, TodoAvailability, TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoRestoreProgress, TodoSubtaskCount, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { nodeVerified, sqlitePatched } from '../storage/runtime.js';
@@ -228,7 +229,33 @@ export class TodoStore {
       tasks, links, commentCounts, fileCounts, subtaskCounts: this.subtaskCounts(),
       agents: Object.fromEntries(this.all("SELECT * FROM todo_agents WHERE state != 'closed'").map(agentOf).map(agent => [agent.taskId, agent])),
       ...(this.restoreProgress ? { restore: { ...this.restoreProgress } } : {}),
+      ...this.savedChatPresets(),
     };
+  }
+
+  /** The empty issue chat's buttons the owner saved, or null for the defaults (shared/todo/chat-presets.ts). */
+  chatPresets(): string[] | null {
+    this.readable();
+    return this.savedChatPresets().chatPresets ?? null;
+  }
+
+  private savedChatPresets(): { chatPresets?: string[] } {
+    const saved = this.meta('chat_presets');
+    if (saved === undefined) return {};
+    // best-effort: a value this build cannot read shows the defaults until the owner saves again.
+    try { return { chatPresets: parseChatPresets(JSON.parse(saved)) ?? undefined }; } catch { return {}; }
+  }
+
+  /** Saves the owner's list (`null` goes back to the defaults); the revision moves so open pages show it. */
+  setChatPresets(input: unknown): string[] | null {
+    const presets = parseChatPresets(input);
+    this.writable();
+    this.revisionValue = this.transaction(() => {
+      if (presets) this.setMeta('chat_presets', JSON.stringify(presets));
+      else this.run('DELETE FROM todo_meta WHERE key = ?', 'chat_presets');
+      return this.nextRevision();
+    });
+    return presets;
   }
 
   /** Direct sub-tasks not deleted, and how many are completed: of every open task that has any, or of `parents`. */

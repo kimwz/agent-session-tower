@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.150.0] - 2026-10-18
+
+- **할 일 채팅을 처음 열면 프리셋 버튼이 보입니다.** 이슈 마스터가 아직 없는 빈 채팅에 "작업 시작 해줘", "설계 해줘", "조사 해줘" 버튼이 나오고, 누르면 확인 없이 그 문구로 바로 채팅을 시작합니다(입력창에 쓰고 보낸 것과 같음). 입력창에 쓰던 글은 그대로 남습니다.
+- **설정 › 할 일에서 프리셋을 고칩니다.** 추가·수정·삭제하고 손잡이를 끌어 순서를 바꾼 뒤 저장합니다(12개까지, 각 500자까지). 서버(`todos.sqlite`)에 저장되어 원격·다른 기기의 화면에도 같은 버튼이 보이고, 열려 있는 할 일 화면에도 바로 반영됩니다. 모두 지우면 버튼이 사라지고, **기본값으로**를 누르면 기본 3개로 돌아갑니다. 저장한 적이 없으면 기본 프리셋은 화면 언어(영어: Start the work, Design it, Research it)로 보입니다. 프리셋은 백업에 들어가지 않습니다.
+
 ## [1.149.2] - 2026-10-18
 
 - **할 일 '전체' 보기에서 프로젝트끼리 구분이 잘 됩니다.** 프로젝트마다 은은한 테두리·둥근 모서리·배경으로 묶어 보여 주고, 하위 프로젝트는 그 묶음째로 들여 씁니다.

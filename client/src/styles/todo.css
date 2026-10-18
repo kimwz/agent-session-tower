@@ -625,6 +625,11 @@ a.todo-file-name:hover { text-decoration:underline; }
 .todo-detail-tabs .agent-orb-wrap.compact .session-context-ring { width:24px; height:24px; }
 .todo-agent-start { padding:22px 26px; }
 .todo-agent-start > p { margin:0 0 4px; color:#93a3b8; font-size:12.5px; line-height:1.55; }
+/* First messages offered as buttons (Settings › 할 일); a click sends one as it is. */
+.todo-agent-presets { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 2px; }
+.todo-agent-preset { max-width:100%; overflow:hidden; padding:6px 12px; border:1px solid #2c4060; border-radius:16px; background:#142034; color:#c5d6ed; font-size:12.5px; text-overflow:ellipsis; white-space:nowrap; }
+.todo-agent-preset:hover:not(:disabled) { border-color:#4a6fa5; background:#1a2b45; color:var(--bright); }
+.todo-agent-preset:disabled { opacity:.45; cursor:default; }
 .todo-agent-starting { flex-direction:row; align-items:center; gap:8px; color:#93a3b8; font-size:12.5px; }
 /* The conversation fills the panel below its tabs, as the canvas's fills the right of the canvas. */
 .todo-detail-chat { display:flex; flex:1; min-height:0; }

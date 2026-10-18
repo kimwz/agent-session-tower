@@ -102,6 +102,22 @@ label.settings-row { cursor:pointer; }
 .settings-switch:disabled { opacity:.45; cursor:default; }
 .settings-switch:focus-visible, .settings-segmented button:focus-visible, .settings-row select:focus-visible { outline:2px solid #97c4ff; outline-offset:2px; }
 
+/* Todo settings: the empty issue chat's presets, one row each, put in order by their grip. */
+.settings-presets { list-style:none; margin:0; padding:0; }
+.settings-preset { display:flex; align-items:center; gap:8px; padding:8px 10px; background:#0d141e; }
+.settings-preset + .settings-preset { border-top:1px solid var(--line); }
+.settings-preset input { flex:1; min-width:0; padding:7px 9px; border:1px solid #334962; border-radius:7px; background:#132235; color:#c5d6ed; font-size:13px; }
+.settings-preset input:focus-visible { outline:2px solid #97c4ff; outline-offset:1px; }
+.settings-preset-grip { display:inline-flex; padding:4px; color:var(--subtle); cursor:grab; touch-action:none; }
+.settings-preset-empty { margin:0; padding:14px; color:var(--subtle); font-size:12.5px; }
+.settings-presets-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:10px; }
+.settings-presets-actions .settings-spacer { flex:1; }
+.settings-presets-actions button { display:inline-flex; align-items:center; gap:6px; }
+.settings-presets-actions .primary-button { padding:6px 14px; border:1px solid #5278a9; border-radius:7px; background:#254c7a; color:#edf5ff; font-size:13px; font-weight:600; cursor:pointer; }
+.settings-presets-actions .primary-button:hover:not(:disabled) { background:#305e92; border-color:#729cd0; }
+.settings-presets-actions .primary-button:disabled { opacity:.5; cursor:not-allowed; }
+.settings-presets-note { margin:8px 2px 0; color:var(--subtle); font-size:11.5px; }
+
 /* A conversation covers the right of the page, header included; the settings button stays beside it. */
 @media (min-width:681px) {
   .has-chat .app-header .header-actions { margin-right:var(--chat-panel-width, 0px); }

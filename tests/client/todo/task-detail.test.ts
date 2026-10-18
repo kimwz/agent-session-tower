@@ -7,13 +7,15 @@ import { worldFromOverview, emptyWorld, withDetail } from '../../../client/src/t
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { cardContext } from '../../../client/src/todo/todo-views.js';
 import { forgetFoldedForTests } from '../../../client/src/todo/todo-prefs.js';
+import { movePreset, presetsDirty, presetsToSave, shownChatPresets } from '../../../client/src/todo/chat-presets.js';
+import { setLanguage } from '../../../client/src/i18n/i18n.js';
 import { overview, task } from './fixtures.js';
 
-const render = (item: ReturnType<typeof task>) => {
-  const world = withDetail(worldFromOverview(overview([item]), emptyWorld()), { task: item, subtasks: [], comments: [], files: [], completions: [], events: [], previous: [], next: [] });
+const render = (item: ReturnType<typeof task>, options: { tab?: 'detail' | 'chat'; chatPresets?: string[]; readOnly?: boolean } = {}) => {
+  const world = withDetail(worldFromOverview({ ...overview([item]), ...(options.chatPresets ? { chatPresets: options.chatPresets } : {}) }, emptyWorld()), { task: item, subtasks: [], comments: [], files: [], completions: [], events: [], previous: [], next: [] });
   const uploads = { subscribe: () => () => undefined, getJobs: () => [], add() {}, cancel() {}, retry() {} };
   return renderToStaticMarkup(createElement(TaskDetail, { taskId: item.id, world, error: '', today: '2026-10-14', client: { today: () => '2026-10-14' } as never, actions: {} as never,
-    readOnly: false, uploads: uploads as never, onClose() {}, onOpen() {}, onProject() {}, onFollowUp() {}, tab: 'detail', onTab() {} }));
+    readOnly: options.readOnly ?? false, uploads: uploads as never, onClose() {}, onOpen() {}, onProject() {}, onFollowUp() {}, tab: options.tab ?? 'detail', onTab() {} }));
 };
 
 test('the detail puts the most used properties first; rare ones without a value become one row of additions', () => {
@@ -66,4 +68,35 @@ test('a sub-task with a card of its own on the board is not listed again under i
   const markup = renderToStaticMarkup(createElement(TaskCard, { task: parent, context: cardContext(world, '2026-10-14', false, new Set(['p', 'c1'])), onOpen() {}, onComplete() {}, onCompleteNext() {} }));
   assert.doesNotMatch(markup, />c1</);
   assert.match(markup, />c2</);
+});
+
+test('an empty issue chat offers the presets as buttons: the saved ones in order, else the defaults, none for an empty list', t => {
+  t.after(() => setLanguage('ko'));
+  const presets = (markup: string) => [...markup.matchAll(/class="todo-agent-preset"( disabled="")? title="([^"]*)"/g)].map(match => `${match[1] ? '-' : ''}${match[2]}`);
+  setLanguage('ko');
+  assert.deepEqual(presets(render(task('a'), { tab: 'chat' })), ['작업 시작 해줘', '설계 해줘', '조사 해줘']);
+  assert.deepEqual(presets(render(task('a'), { tab: 'chat', chatPresets: ['조사 해줘', '리뷰 해줘'] })), ['조사 해줘', '리뷰 해줘']);
+  assert.doesNotMatch(render(task('a'), { tab: 'chat', chatPresets: [] }), /todo-agent-presets/);
+  // They are disabled wherever sending is: a read-only page, a completed todo.
+  assert.deepEqual(presets(render(task('a'), { tab: 'chat', chatPresets: ['go'], readOnly: true })), ['-go']);
+  assert.deepEqual(presets(render(task('a', { completedAt: '2026-10-14T01:00:00.000Z' }), { tab: 'chat', chatPresets: ['go'] })), ['-go']);
+  // The defaults follow the page's language; a saved list shows as written.
+  setLanguage('en');
+  assert.deepEqual(presets(render(task('a'), { tab: 'chat' })), ['Start the work', 'Design it', 'Research it']);
+  assert.deepEqual(presets(render(task('a'), { tab: 'chat', chatPresets: ['조사 해줘'] })), ['조사 해줘']);
+});
+
+test('the presets editor saves trimmed rows without blanks, and a drag moves one row', () => {
+  assert.deepEqual(presetsToSave([' a ', '', '  ', 'b']), ['a', 'b']);
+  assert.deepEqual(movePreset(['a', 'b', 'c'], 0, 2), ['b', 'c', 'a']);
+  assert.deepEqual(movePreset(['a', 'b', 'c'], 2, 0), ['c', 'a', 'b']);
+  assert.deepEqual(movePreset(['a', 'b'], 0, -1), ['a', 'b'], 'a drop outside the list changes nothing');
+  assert.deepEqual(shownChatPresets([]), []);
+  // An edit is what would be saved differing from where the rows started.
+  const start = ['작업 시작 해줘', '설계 해줘'];
+  assert.equal(presetsDirty([...start], start), false);
+  assert.equal(presetsDirty([...start, '  '], start), false, 'a blank row added is not saved, so no edit');
+  assert.equal(presetsDirty(['설계 해줘', '작업 시작 해줘'], start), true, 'a new order is an edit');
+  assert.equal(presetsDirty(['작업 시작 해줘 ', '설계 해줘'], start), false, 'spaces around are trimmed on saving');
+  assert.equal(presetsDirty(['작업 시작 해줘'], start), true);
 });

@@ -565,6 +565,8 @@ async function main() {
       issueSession: (taskId, sessionId) => todoAgents.recordIssueSession(taskId, sessionId),
       issueJob: (taskId, jobId) => todoAgents.recordIssueJob(taskId, jobId),
       agentSessions: () => todos.agentSessions(),
+      chatPresets: () => todos.chatPresets(),
+      setChatPresets: presets => { const saved = todos.setChatPresets(presets); changed(); return saved; },
       files: {
         startUpload: input => todoFiles.startUpload(input),
         uploadOffset: id => todoFiles.uploadOffset(id),
