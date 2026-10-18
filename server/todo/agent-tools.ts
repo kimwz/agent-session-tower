@@ -339,7 +339,7 @@ const TOOLS: Tool[] = [
     description: 'Adds a comment (Markdown) to a task, with files from this computer shown in it: screenshots, screen recordings or audio, which the owner sees and plays in the comment from any device. When you report work on a todo whose result can be seen and you have real captures of it, attach them: before and after screenshots, or a short recording (H.264 mp4 plays everywhere). It is optional; attach only what you actually captured, never a made-up "before", and say so when you only have the "after".',
     input: z.object({ id, body: z.string().trim().min(1).max(15_000),
       files: z.array(z.string().min(1).max(4096)).max(MAX_COMMENT_FILES).optional()
-        .describe(`Absolute paths on this computer, at most ${MAX_COMMENT_FILES}, 100MB each: ${LOCAL_MEDIA}. Shown in this order.`) }).strict(),
+        .describe(`Absolute paths on this computer, at most ${MAX_COMMENT_FILES}, 100MB each: ${LOCAL_MEDIA}. Images show first, then recordings and audio, each kind in this order.`) }).strict(),
     run: async ({ id: taskId, body, files = [] }, context) => {
       if (files.length && !context.store.attachFile) throw new TowerError('unavailable', 'Attachments cannot be kept on this computer now; comment without files.');
       // Every file is checked first, so a wrong path is told before the comment is made.

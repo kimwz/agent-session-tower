@@ -2,6 +2,7 @@ import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { link, mkdir, mkdtemp, open, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -427,6 +428,8 @@ test('an agent attaches screenshots and recordings from this computer as uploads
   await symlink(join(shots, 'after.png'), join(shots, 'linked.png'));
   await refused(join(shots, 'linked.png'), /symlink is not followed/);
   await refused(join(shots, 'missing.mp4'), /no readable file/);
+  execFileSync('mkfifo', [join(shots, 'pipe.mp4')]);
+  await refused(join(shots, 'pipe.mp4'), /not a plain file/, 'a named pipe is refused at once, without waiting for a writer');
   const huge = await open(join(shots, 'huge.mp4'), 'w');
   await huge.truncate(TODO_FILE_MAX_BYTES + 1); await huge.close();
   await assert.rejects(files.attachLocal({ taskId: 't', commentId: 'c', path: join(shots, 'huge.mp4') }), (error: unknown) => kind(error) === 'too-large');

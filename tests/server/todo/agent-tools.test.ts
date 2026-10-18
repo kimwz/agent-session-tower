@@ -192,4 +192,11 @@ test('a comment carries screenshots and recordings from this computer, every pat
   assert.deepEqual(detail.files.map((file: { name: string; commentId: string }) => [file.name, file.commentId]), [['before.png', result.commented.id], ['after.mp4', result.commented.id]]);
   assert.deepEqual(store.detail(item.id).files.map(file => file.mimeType), ['image/png', 'video/mp4']);
   assert.deepEqual(Object.keys(await withFiles({ id: item.id, body: 'No files' })), ['commented'], 'without files the answer is as before');
+  // A file that fails once the comment is made is reported, and the comment and the other files stay.
+  const failing = { ...calls, attachFile: async (input: { taskId: string; commentId: string | null; path: string }) => input.path.endsWith('.mp4')
+    ? Promise.reject(new TowerError('storage-full', 'disk full')) : (await files.attachLocal(input)).file };
+  const partial = await callTodoTool(failing, 'todos_comment', { id: item.id, body: 'Partly', files: [join(dir, 'before.png'), join(dir, 'after.mp4')] }, { now }) as any;
+  assert.deepEqual(partial.attached.map((file: { name: string }) => file.name), ['before.png']);
+  assert.deepEqual(partial.failed, [{ path: join(dir, 'after.mp4'), error: 'disk full' }]);
+  assert.ok(store.detail(item.id).comments.some(comment => comment.id === partial.commented.id));
 });

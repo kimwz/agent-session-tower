@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { UPLOAD_CHUNK_BYTES } from '../../../shared/attachments.js';
 import { TODO_FILE_MAX_BYTES, type TodoChanges, type TodoFile } from '../../../shared/todo/types.js';
-import { fileProblem, isPreviewable, MIN_CHUNK_BYTES, newJob, nextChunk, nextChunkBytes, runUpload, sizeLabel, type AppendResult, type UploadIO, type UploadJob } from '../../../client/src/todo/attachments/upload.js';
+import { fileProblem, isPreviewable, MIN_CHUNK_BYTES, newJob, nextChunk, nextChunkBytes, playable, runUpload, sizeLabel, type AppendResult, type UploadIO, type UploadJob } from '../../../client/src/todo/attachments/upload.js';
 import { visibleFiles } from '../../../client/src/todo/todo-model.js';
 import { TodoUploads } from '../../../client/src/todo/attachments/uploads.js';
 import { AttachmentList, UploadRows } from '../../../client/src/todo/attachments/Attachments.js';
@@ -131,6 +131,8 @@ test('files show while they and their comment are there; images are previewed; s
   assert.equal(isPreviewable({ mimeType: 'image/png' }), true);
   assert.equal(isPreviewable({ mimeType: 'image/svg+xml' }), false);
   assert.equal(isPreviewable({ mimeType: 'image/png', missing: true }), false);
+  assert.deepEqual(['video/mp4', 'video/quicktime', 'audio/mpeg', 'image/png', 'video/x-msvideo'].map(mimeType => playable({ mimeType })), ['video', 'video', 'audio', undefined, undefined]);
+  assert.equal(playable({ mimeType: 'video/mp4', missing: true }), undefined);
   assert.deepEqual([sizeLabel(512), sizeLabel(2048), sizeLabel(5 * 1024 * 1024), sizeLabel(42 * 1024 * 1024)], ['512 B', '2.0 KB', '5.0 MB', '42 MB']);
 });
 
@@ -141,6 +143,15 @@ test('attachments: thumbnails for images, rows with size or the missing note for
   assert.match(markup, /2\.0 KB/);
   assert.match(markup, /lost\.zip<\/span><span class="todo-file-size">백업에서 찾을 수 없음/);
   assert.doesNotMatch(markup, /files\/gone/);
+});
+
+test('attachments: recordings and audio play in place, with their name, size and download', () => {
+  const markup = renderToStaticMarkup(createElement(AttachmentList, { files: [file('rec', { mimeType: 'video/mp4', name: 'after.mp4', size: 4096 }), file('voice', { mimeType: 'audio/mpeg', name: 'note.mp3' }), file('lost', { mimeType: 'video/mp4', name: 'lost.mp4', missing: true })], onDelete() {} }));
+  assert.match(markup, /<video controls="" playsInline="" preload="metadata" src="\/api\/todos\/files\/rec\?inline=1"/i);
+  assert.match(markup, /<audio controls="" preload="metadata" src="\/api\/todos\/files\/voice\?inline=1"/);
+  assert.match(markup, /after\.mp4<\/span><span class="todo-file-size">4\.0 KB/);
+  assert.match(markup, /href="\/api\/todos\/files\/rec" download="after.mp4"/);
+  assert.match(markup, /lost\.mp4<\/span><span class="todo-file-size">백업에서 찾을 수 없음/, 'a missing recording is a row, not a player');
 });
 
 test('an upload shows its progress, and a failed one its reason with retry and cancel', () => {

@@ -2,7 +2,7 @@ import { constants, type Stats } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, rm, statfs, type FileHandle } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, isAbsolute, join } from 'node:path';
-import { UPLOAD_CHUNK_BYTES, normalizeAttachmentMimeType } from '../../shared/attachments.js';
+import { UPLOAD_CHUNK_BYTES, isImageAttachment, normalizeAttachmentMimeType } from '../../shared/attachments.js';
 import { TowerError } from '../../shared/errors.js';
 import { TODO_FILE_MAX_BYTES, type TodoChanges, type TodoFile } from '../../shared/todo/types.js';
 import { isWorkspaceMediaType, workspaceMedia } from '../../shared/workspace-media.js';
@@ -463,9 +463,8 @@ export class TodoFiles {
 
 async function* once(piece: Buffer) { yield piece; }
 
-const RASTER = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 /** The names of the files an agent can attach, as its tools tell it. */
-export const LOCAL_MEDIA = 'png, jpg, gif, webp, mp4, m4v, webm, mov, ogv, mp3, m4a, aac, wav, ogg, oga, opus, flac';
+export const LOCAL_MEDIA = 'png, jpg, jpeg, gif, webp, mp4, m4v, webm, mov, ogv, mp3, m4a, aac, wav, ogg, oga, opus, flac';
 
 /** The first bytes of a file, enough for `rasterMime`. */
 async function head(handle: FileHandle): Promise<Buffer> {
@@ -475,7 +474,7 @@ async function head(handle: FileHandle): Promise<Buffer> {
 }
 
 /**
- * Opens a file on this computer that an agent attaches: an absolute path to a plain file (not through a symlink) of at
+ * Opens a file on this computer that an agent attaches: an absolute path to a plain file (not itself a symlink) of at
  * most 100MB that is a screenshot (PNG, JPEG, GIF or WebP, whose bytes must be one), a recording or audio, by its name
  * as the workspace plays them. Agents run as the owner here; keeping to media keeps this to the evidence of their work.
  */
@@ -483,8 +482,9 @@ async function openLocalMedia(path: string): Promise<{ media: LocalMedia; handle
   if (typeof path !== 'string' || !isAbsolute(path)) throw invalid(`${path}: give an absolute path on this computer.`);
   const media = workspaceMedia(path);
   // Images are the ones a comment previews; the workspace's other image types would only be downloads.
-  if (!media || (media.kind === 'image' && !RASTER.includes(media.type))) throw invalid(`${path}: only screenshots, screen recordings and audio can be attached (${LOCAL_MEDIA}).`);
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(error => {
+  if (!media || (media.kind === 'image' && !isImageAttachment(media.type))) throw invalid(`${path}: only screenshots, screen recordings and audio can be attached (${LOCAL_MEDIA}).`);
+  // Not blocking: a named pipe opens at once and is refused as not a plain file, instead of holding the web's file I/O.
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(error => {
     if (['ENOENT', 'ELOOP', 'ENOTDIR', 'EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) throw invalid(`${path}: no readable file there (a symlink is not followed).`);
     throw error;
   });
