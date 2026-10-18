@@ -2923,6 +2923,7 @@ export const english: Record<string, string> = {
   "다가오는으로 이동": "Go to Upcoming",
   "관리함으로 이동": "Go to Inbox",
   "이슈 마스터": "Issue master",
+  "맡긴 작업 {0}개 진행 중": "{0} handed-out tasks running",
   "할 일의 채팅에 첫 메시지를 보내면 그 할 일 전용 마스터를 이 모델로 시작합니다.": "The first message in a todo's chat starts a master just for that todo with this model.",
   "이슈 채팅": "Issue chat",
   "작업 보기": "Task view",
