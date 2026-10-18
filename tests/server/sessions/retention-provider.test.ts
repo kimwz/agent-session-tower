@@ -35,10 +35,11 @@ test('native parent permits confirmed already-cold descendants but protects acti
  }finally{await f.close();}});
 
 // Codex's rollout compression worker replaces an archived `<name>.jsonl` with `<name>.jsonl.zst` (same mtime) while its
-// database keeps naming `<name>.jsonl`.
+// database keeps naming `<name>.jsonl`. Fixtures use whole seconds: not every platform sets a fractional mtime exactly.
+const ARCHIVED_AT = 1_700_000_000;
 async function compress(path: string, mtimeMs: number): Promise<void> { await writeFile(path+'.zst','compressed'); await utimes(path+'.zst',mtimeMs/1000,mtimeMs/1000); await unlink(path); }
 test('an archived Codex original that Codex compressed stays cold, in inspection and for its parent',async()=>{const f=await fixture();try{
- const home=join(f.base,'codex'),hot=join(home,'sessions'),archive=join(home,'archived_sessions');await mkdir(home);await mkdir(hot);await mkdir(archive);const parentPath=join(hot,'parent.jsonl'),childPath=join(archive,'child.jsonl');await writeFile(parentPath,'parent');await writeFile(childPath,'child');
+ const home=join(f.base,'codex'),hot=join(home,'sessions'),archive=join(home,'archived_sessions');await mkdir(home);await mkdir(hot);await mkdir(archive);const parentPath=join(hot,'parent.jsonl'),childPath=join(archive,'child.jsonl');await writeFile(parentPath,'parent');await writeFile(childPath,'child');await utimes(childPath,ARCHIVED_AT,ARCHIVED_AT);
  const db=new DatabaseSync(join(home,'state_5.sqlite'));db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,archived INTEGER); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT)');db.prepare('INSERT INTO threads VALUES (?,?,?)').run('parent',parentPath,0);db.prepare('INSERT INTO threads VALUES (?,?,?)').run('child',childPath,1);db.prepare('INSERT INTO thread_spawn_edges VALUES (?,?,?)').run('parent','child','closed');db.close();
  const info=await lstat(childPath);const cold:RetentionMember={sessionId:'codex:child',nativeId:'child',provider:'codex',parentId:'codex:parent',originalPath:join(hot,'child.jsonl'),coldPath:childPath,operationId:'old-operation',state:'cold',identity:{dev:Number(info.dev),ino:Number(info.ino),size:Number(info.size),mtimeMs:Number(info.mtimeMs)}};
  const parent=record(parentPath);parent.session.provider='codex';parent.session.id='codex:parent';parent.session.nativeId='parent';parent.session.parentId=undefined;parent.session.isSubagent=false;parent.kind='parent';
@@ -54,7 +55,7 @@ test('an archived Codex original that Codex compressed stays cold, in inspection
  }finally{await f.close();}});
 
 test('a Codex original an older operation archived and Codex compressed is not taken again',async()=>{const f=await fixture();try{
- const home=join(f.base,'codex'),hot=join(home,'sessions'),archive=join(home,'archived_sessions');await mkdir(home);await mkdir(hot);await mkdir(archive);const hotPath=join(hot,'thread.jsonl'),archived=join(archive,'thread.jsonl');await writeFile(hotPath,'hot');await writeFile(archived,'archived');
+ const home=join(f.base,'codex'),hot=join(home,'sessions'),archive=join(home,'archived_sessions');await mkdir(home);await mkdir(hot);await mkdir(archive);const hotPath=join(hot,'thread.jsonl'),archived=join(archive,'thread.jsonl');await writeFile(hotPath,'hot');await writeFile(archived,'archived');await utimes(archived,ARCHIVED_AT,ARCHIVED_AT);
  const db=new DatabaseSync(join(home,'state_5.sqlite'));db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,archived INTEGER); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT)');db.prepare('INSERT INTO threads VALUES (?,?,?)').run('thread',hotPath,0);db.close();
  const info=await lstat(archived);const owner:RetentionMember={sessionId:'codex:thread',nativeId:'thread',provider:'codex',originalPath:hotPath,coldPath:archived,operationId:'old-operation',state:'cold',identity:{dev:Number(info.dev),ino:Number(info.ino),size:Number(info.size),mtimeMs:Number(info.mtimeMs)}};
  const thread=record(hotPath);Object.assign(thread.session,{provider:'codex',id:'codex:thread',nativeId:'thread',parentId:undefined,isSubagent:false});thread.kind='parent';
