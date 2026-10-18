@@ -53,6 +53,17 @@ test('an archived Codex original that Codex compressed stays cold, in inspection
  await unlink(childPath+'.zst');const missing=await adapter.inspectCold([cold]);assert.equal(missing.complete,false);assert.match(missing.issues.join(';'),/ENOENT/);
  }finally{await f.close();}});
 
+test('a Codex original an older operation archived and Codex compressed is not taken again',async()=>{const f=await fixture();try{
+ const home=join(f.base,'codex'),hot=join(home,'sessions'),archive=join(home,'archived_sessions');await mkdir(home);await mkdir(hot);await mkdir(archive);const hotPath=join(hot,'thread.jsonl'),archived=join(archive,'thread.jsonl');await writeFile(hotPath,'hot');await writeFile(archived,'archived');
+ const db=new DatabaseSync(join(home,'state_5.sqlite'));db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,archived INTEGER); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT)');db.prepare('INSERT INTO threads VALUES (?,?,?)').run('thread',hotPath,0);db.close();
+ const info=await lstat(archived);const owner:RetentionMember={sessionId:'codex:thread',nativeId:'thread',provider:'codex',originalPath:hotPath,coldPath:archived,operationId:'old-operation',state:'cold',identity:{dev:Number(info.dev),ino:Number(info.ino),size:Number(info.size),mtimeMs:Number(info.mtimeMs)}};
+ const thread=record(hotPath);Object.assign(thread.session,{provider:'codex',id:'codex:thread',nativeId:'thread',parentId:undefined,isSubagent:false});thread.kind='parent';
+ const ctx:RetentionOperationContext={operationId:'new-operation',journalMembers:()=>[owner],managedCold:()=>[],fresh:async()=>({now:Date.now(),migratedAt:0,complete:true,records:[thread],protectedIds:new Set()}),commitMember:async()=>{}};
+ const adapter=createNativeRetentionAdapter({claude:[f.root],codex:[hot,archive]},{codexHome:home,claudeHome:f.base,coldRoot:join(f.base,'cold'),inspect:async()=>({complete:true,activeIds:new Set(),issues:[]})});const group={rootId:thread.session.id,ids:[thread.session.id],reason:'parent-limit' as const,revisions:{}};
+ await compress(archived,info.mtimeMs);assert.equal(await adapter.reserve(group,[thread],ctx),undefined);
+ await unlink(archived+'.zst');const lease=await adapter.reserve(group,[thread],ctx);assert.ok(lease);await lease.release();
+ }finally{await f.close();}});
+
 test('two thousand cold Codex records reuse one native metadata connection per reconciliation',async t=>{const f=await fixture();const opened=channel('tower.retention.codex-metadata-open');let count=0;const observed=()=>{count++;};try{
  const home=join(f.base,'codex'),hot=join(home,'sessions'),archive=join(home,'archived_sessions');await mkdir(home);await mkdir(hot);await mkdir(archive);const db=new DatabaseSync(join(home,'state_5.sqlite'));db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,archived INTEGER)');const insert=db.prepare('INSERT INTO threads VALUES (?,?,?)');const members:RetentionMember[]=[];db.exec('BEGIN');
  // The cold files are written a hundred at a time; one by one, writing them takes longer than the reconciliations.
