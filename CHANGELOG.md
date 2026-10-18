@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.147.1] - 2026-10-18
+
+- **마스터 턴이 끝나면 왼쪽 아래 마스터 버튼의 로딩 표시가 바로 사라집니다.** 소유자가 직접 보낸 메시지처럼 마스터가 따로 추적하지 않는 턴은 끝나도 마스터 호스트가 화면에 상태를 다시 보내지 않아, 대화는 "완료"인데 버튼은 새로고침하거나 설정을 바꿀 때까지 계속 돌았습니다. 이제 마스터 호스트가 Tower의 실시간 상태가 바뀔 때마다 화면에 보낼 상태를 다시 보고, 달라졌을 때만 보냅니다. 세션 이름과 이슈 마스터가 맡긴 작업 수도 같은 방식으로 바로 반영됩니다. 마스터 호스트는 진행 중인 보고·도구 응답·음성이 없을 때 새 버전으로 바뀝니다.
+
 ## [1.147.0] - 2026-10-18
 
 - **할 일 댓글에서 스크린샷과 영상을 바로 봅니다.** 댓글·설명에 첨부한 영상과 오디오가 그 자리에서 재생되고(탐색 가능), 이미지는 정사각형으로 잘리지 않고 원래 비율로 미리 보여 넓은 화면 스크린샷도 알아볼 수 있습니다. 누르면 원본이 열립니다. 휴대폰에서도 같습니다.
