@@ -12,6 +12,7 @@ import { QuickAdd, type QuickAddPreset } from './QuickAdd';
 import { TaskCard } from './TaskCard';
 import { shareItems, TaskDetail, type DetailTab } from './TaskDetail';
 import { TodoSidebar } from './TodoSidebar';
+import { ViewSwitcher } from './ViewSwitcher';
 import { createActions, type FollowUp } from './todo-actions';
 import { httpUploadIO } from './attachments/upload-io';
 import { TodoUploads } from './attachments/uploads';
@@ -89,6 +90,9 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   // Renaming opens after the menu closes, so the menu's closing never undoes it.
   const [sectionRename, setSectionRename] = useState<string | null>(null);
   const [showArchivedSections, setShowArchivedSections] = useState(false);
+  // The list of lists (`V`), opened under the page's title.
+  const [switcher, setSwitcher] = useState(false);
+  const titleRef = useRef<HTMLHeadingElement>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>(shownTab);
   const chooseTab = useCallback((tab: DetailTab) => { shownTab = tab; setDetailTab(tab); }, []);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -135,13 +139,23 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     if (replace) window.history.replaceState({}, '', url); else window.history.pushState({}, '', url);
     setLocation(next);
   }, []);
+  // Opened without a list or layout (`?view=todo`), the Inbox shows in the layout it was last shown in, as it does when
+  // gone to; once the todos are read, and only if nothing else was chosen meanwhile.
+  const unnamed = useRef((() => { const params = new URLSearchParams(window.location.search); return !params.has('todo') && !params.has('layout'); })());
   useEffect(() => {
-    const onPop = () => { if (!isTodoPage(window.location.search)) return; const next = readTodoLocation(window.location.search); locationRef.current = next; setLocation(next); };
+    const onPop = () => { if (!isTodoPage(window.location.search)) return; unnamed.current = false; const next = readTodoLocation(window.location.search); locationRef.current = next; setLocation(next); };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
   // The address names the list even when it was opened without one.
   useEffect(() => { navigate({}, true); }, [navigate]);
+  useEffect(() => {
+    if (!unnamed.current || state.phase !== 'ready') return;
+    unnamed.current = false;
+    const layout = projectOf(world, { kind: 'inbox' })?.layout;
+    const shown = locationRef.current;
+    if (layout && shown.view.kind === 'inbox' && shown.layout === 'board' && layout !== 'board') navigate({ layout }, true);
+  }, [state.phase, world, navigate]);
   useEffect(() => { client.openDetail(openTaskId); }, [client, openTaskId]);
   useEffect(() => { setStart(today); setSelectedId(null); }, [key, today]);
   useEffect(() => { setShowArchivedSections(false); }, [key]);
@@ -236,7 +250,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const setCalendar = (mode: DisplaySettings['calendar']) => { setLayout('calendar'); if (display.calendar !== mode) setDisplay({ ...display, calendar: mode }); };
   // The columns the arrow keys go through: the board's, and the completed list when it shows.
   const navColumns = completedItems.length ? [...columns, { tasks: completedItems.map(item => ({ ...item.task, id: doneKey(item.completion.id) })) }] : columns;
-  const shortcuts = { target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout, setCalendar, navColumns, selectedId, choose, letGo, world, locked, lockedTask };
+  const shortcuts = { ready: state.phase === 'ready', setSwitcher, target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout, setCalendar, navColumns, selectedId, choose, letGo, world, locked, lockedTask };
   const shortcutState = useRef(shortcuts);
   shortcutState.current = shortcuts;
   useEffect(() => {
@@ -257,6 +271,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       if (['complete', 'complete-next', 'add-next'].includes(shortcut.action) && (current.locked || (task && current.lockedTask(task.id)))) return;
       switch (shortcut.action) {
         case 'add': current.openAdd(); break;
+        // Not over the open help, which keeps the page's keys but is a panel of its own.
+        case 'views': if (!current.ready || document.querySelector('.help-popover')) return; current.setSwitcher(true); break;
         case 'search':
           if (current.drawer) current.onSidebarOpen(true);
           else if (!current.sidebarOpen) current.onSidebarOpen(true);
@@ -418,7 +434,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       closeTask();
     }}>
       <header className="todo-main-head">
-        <div className="todo-title"><h2>{title}</h2>{view.kind === 'today' && <span>{longDate(today)}</span>}</div>
+        <div className="todo-title">{/* The popover leaves presses on its anchor to it: one on the title closes the list too. */}
+          <h2 ref={titleRef} onClick={() => setSwitcher(false)}>{title}</h2>{view.kind === 'today' && <span>{longDate(today)}</span>}</div>
         <div className="todo-tools">
           {state.phase === 'ready' && <div className="todo-segmented todo-layout-switch" role="radiogroup" aria-label={t('레이아웃')}>
             <button type="button" role="radio" aria-checked={layout === 'board'} title={`${t('보드')} (B)`} onClick={() => setLayout('board')}><Columns3 size={13} /><span>{t('보드')}</span></button>
@@ -445,6 +462,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     {openTaskId && state.phase === 'ready' && <TaskDetail taskId={openTaskId} world={world} error={state.detailError} today={today} client={client} actions={actions} readOnly={readOnly || lockedTask(openTaskId)} uploads={uploads}
       onClose={closeTask} onOpen={openTask} onProject={id => goTo(world.projects.find(item => item.id === id)?.inbox ? { kind: 'inbox' } : { kind: 'project', id })} onFollowUp={followUp}
       tab={detailTab} onTab={chooseTab} />}
+    {switcher && state.phase === 'ready' && <ViewSwitcher anchor={titleRef} world={world} current={view} onClose={() => setSwitcher(false)} onChoose={next => { setSwitcher(false); goTo(next); }} />}
     {quick && <QuickAdd world={world} today={today} client={client} preset={quick.preset} follow={quick.follow} attach={attach} onClose={() => setQuick(null)} onAdded={id => setSelectedId(id)} />}
     {cardMenu && <Menu anchor={menuAnchor} label={t('작업 메뉴')} items={cardMenuItems(cardMenu.task)} onClose={() => setCardMenu(null)} align="end" />}
     {sectionMenu && section && <Menu anchor={menuAnchor} label={t('섹션 메뉴')} onClose={() => setSectionMenu(null)} items={[
