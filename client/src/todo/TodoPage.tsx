@@ -146,6 +146,16 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   }, []);
   // The address names the list even when it was opened without one.
   useEffect(() => { navigate({}, true); }, [navigate]);
+  // Opened without a list or layout (`?view=todo`), the Inbox shows in the layout it was last shown in, as it does when
+  // gone to; once the todos are read, and only if nothing else was chosen meanwhile.
+  const unnamed = useRef((() => { const params = new URLSearchParams(window.location.search); return !params.has('todo') && !params.has('layout'); })());
+  useEffect(() => {
+    if (!unnamed.current || state.phase !== 'ready') return;
+    unnamed.current = false;
+    const layout = projectOf(world, { kind: 'inbox' })?.layout;
+    const shown = locationRef.current;
+    if (layout && shown.view.kind === 'inbox' && shown.layout === 'board' && layout !== 'board') navigate({ layout }, true);
+  }, [state.phase, world, navigate]);
   useEffect(() => { client.openDetail(openTaskId); }, [client, openTaskId]);
   useEffect(() => { setStart(today); setSelectedId(null); }, [key, today]);
   useEffect(() => { setShowArchivedSections(false); }, [key]);
@@ -424,7 +434,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       closeTask();
     }}>
       <header className="todo-main-head">
-        <div className="todo-title"><h2 ref={titleRef} onClick={() => setSwitcher(false)}>{title}</h2>{view.kind === 'today' && <span>{longDate(today)}</span>}</div>
+        <div className="todo-title">{/* The popover leaves presses on its anchor to it: one on the title closes the list too. */}
+          <h2 ref={titleRef} onClick={() => setSwitcher(false)}>{title}</h2>{view.kind === 'today' && <span>{longDate(today)}</span>}</div>
         <div className="todo-tools">
           {state.phase === 'ready' && <div className="todo-segmented todo-layout-switch" role="radiogroup" aria-label={t('레이아웃')}>
             <button type="button" role="radio" aria-checked={layout === 'board'} title={`${t('보드')} (B)`} onClick={() => setLayout('board')}><Columns3 size={13} /><span>{t('보드')}</span></button>

@@ -13,7 +13,13 @@ export type TodoShortcut =
 
 const ARROWS: Record<string, Direction> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
 
-export interface ShortcutKey { key: string; code?: string; shiftKey: boolean; metaKey: boolean; ctrlKey: boolean; altKey: boolean; isComposing?: boolean }
+export interface ShortcutKey { key: string; code?: string; shiftKey: boolean; metaKey: boolean; ctrlKey: boolean; altKey: boolean; isComposing?: boolean; repeat?: boolean }
+
+/** The number a key gives by where it sits; a number pad counts only as numbers (with Num Lock off its keys are arrows). */
+export function digitOf(event: Pick<ShortcutKey, 'code' | 'key'>): number | undefined {
+  const digit = event.code?.match(/^Digit([0-9])$/)?.[1] ?? (event.code?.startsWith('Numpad') && /^[0-9]$/.test(event.key) ? event.key : undefined);
+  return digit === undefined ? undefined : Number(digit);
+}
 
 /** Reads one key; `pending` is whether `G` was the key before. Answers what to do and whether `G` now waits. */
 export function readShortcut(event: ShortcutKey, pending: boolean): { shortcut?: TodoShortcut; pending: boolean } {
@@ -49,24 +55,23 @@ export function readShortcut(event: ShortcutKey, pending: boolean): { shortcut?:
   }
 }
 
-export type SwitchKey = { action: 'choose'; index: number } | { action: 'close' };
+export type SwitchKey = { action: 'choose' | 'mark'; index: number } | { action: 'close' };
 
 /**
- * A key while the list of lists (`V`) is open, `count` entries long with entry `index` marked: a number chooses that
- * entry (by where the key sits, as the page keys read numbers; one past the list does nothing), the up and down arrows
- * mark the entry above or below (around at either end), `Enter` chooses the marked one and `V` closes the list. Escape
- * is the popover's own. Answers what to do, a new marked entry, or nothing for a key the list leaves alone.
+ * A key while the list of lists (`V`) is open, `count` entries long with entry `index` marked: a number from 1 chooses
+ * that entry (by where the key sits, as the page keys read numbers), the up and down arrows mark the entry above or
+ * below (around at either end), `Enter` chooses the marked one and `V` closes the list (not when held down, so the
+ * press that opened it does not close it). Escape is the popover's own. Nothing for a key the list leaves alone.
  */
-export function readSwitchKey(event: ShortcutKey, count: number, index: number): SwitchKey | { mark: number } | undefined {
-  if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey || count < 1) return undefined;
-  // A number pad counts only as numbers: with Num Lock off its keys are arrows.
-  const typed = /^[1-9]$/.test(event.key) ? event.key : undefined;
-  const digit = event.code ? event.code.match(/^Digit([1-9])$/)?.[1] ?? (event.code.startsWith('Numpad') ? typed : undefined) : typed;
-  if (digit && !event.shiftKey) { const chosen = Number(digit) - 1; return chosen < count ? { action: 'choose', index: chosen } : { mark: index }; }
-  if (event.key === 'ArrowDown') return { mark: (index + 1) % count };
-  if (event.key === 'ArrowUp') return { mark: (index - 1 + count) % count };
-  if (event.key === 'Enter' && !event.shiftKey) return { action: 'choose', index: Math.min(Math.max(index, 0), count - 1) };
-  if (!event.shiftKey && (event.code === 'KeyV' || event.key.toLowerCase() === 'v')) return { action: 'close' };
+export function readSwitchKey(event: ShortcutKey, count: number, index: number): SwitchKey | undefined {
+  if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return undefined;
+  const digit = event.shiftKey ? undefined : digitOf(event);
+  if (digit !== undefined) return digit >= 1 && digit <= count ? { action: 'choose', index: digit - 1 } : undefined;
+  if (event.key === 'ArrowDown') return { action: 'mark', index: (index + 1) % count };
+  if (event.key === 'ArrowUp') return { action: 'mark', index: (index - 1 + count) % count };
+  // The list can shrink while open (a project archived elsewhere).
+  if (event.key === 'Enter' && !event.shiftKey) return { action: 'choose', index: Math.min(index, count - 1) };
+  if (!event.shiftKey && !event.repeat && (event.code === 'KeyV' || event.key.toLowerCase() === 'v')) return { action: 'close' };
   return undefined;
 }
 

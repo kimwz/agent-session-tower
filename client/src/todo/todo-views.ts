@@ -7,7 +7,7 @@ import type { TodoPriority, TodoProject, TodoSection, TodoTask } from '../../../
 import { translate as t } from '../i18n/i18n';
 import { byOrder, isOpen, type TodoWorld } from './todo-model';
 import { dateLabel, longDate, priorityName } from './todo-format';
-import type { TodoView } from './todo-url';
+import { viewKey, type TodoView } from './todo-url';
 
 /**
  * What a list shows: its title, and its tasks laid out in columns by a grouping. A grouping is one entry of
@@ -262,6 +262,12 @@ export function projectOrder(world: TodoWorld): TodoProject[] {
 export function switchTargets(world: TodoWorld): TodoView[] {
   const projects = projectOrder(world).filter(project => !project.inbox).slice(0, 6);
   return [{ kind: 'inbox' }, { kind: 'today' }, { kind: 'upcoming' }, ...projects.map((project): TodoView => ({ kind: 'project', id: project.id }))];
+}
+
+/** Where `view` is in `switchTargets`, the Inbox opened as its project (`p:<inbox>`) included; -1 when it is not there. */
+export function switchIndex(world: TodoWorld, view: TodoView): number {
+  const key = projectOf(world, view)?.inbox ? 'inbox' : viewKey(view);
+  return switchTargets(world).findIndex(target => viewKey(target) === key);
 }
 
 /** The view's title. */

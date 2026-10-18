@@ -10,7 +10,7 @@ import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
 import { readShortcut, readSwitchKey } from '../../../client/src/todo/todo-shortcuts.js';
 import { moveSelection } from '../../../client/src/todo/todo-views.js';
 import { isTodoPage, pageSearch, readTodoLocation, todoSearch } from '../../../client/src/todo/todo-url.js';
-import { boardColumns, cardContext, defaultDisplay, dropOps, manualOrder, projectOrder, sectionMoveTarget, sidebarCounts, switchTargets, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { boardColumns, cardContext, defaultDisplay, dropOps, manualOrder, projectOrder, sectionMoveTarget, sidebarCounts, switchIndex, switchTargets, type ViewContext } from '../../../client/src/todo/todo-views.js';
 import { nthOf } from '../../../client/src/todo/DatePicker.js';
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { PageSwitch } from '../../../client/src/todo/PageSwitch.js';
@@ -49,6 +49,7 @@ test('the address keeps the list, layout and open task, and the canvas keeps its
   assert.deepEqual(readTodoLocation('?view=todo').view, { kind: 'inbox' });
   assert.deepEqual(readTodoLocation('?view=todo&todo=p:../x').view, { kind: 'inbox' });
   assert.deepEqual(readTodoLocation('?view=todo&todo=today').view, { kind: 'today' });
+  assert.deepEqual(readTodoLocation('?view=todo&todo=inbox').view, { kind: 'inbox' });
   assert.equal(todoSearch('?session=s1&todo=today', { view: { kind: 'search' }, layout: 'board', task: null, query: '보고서' }), '?session=s1&view=todo&todo=search&q=%EB%B3%B4%EA%B3%A0%EC%84%9C');
   const remembered = '?view=todo&todo=l:call&task=a';
   assert.equal(pageSearch(`${remembered}&session=s1`, 'canvas'), '?session=s1');
@@ -199,6 +200,11 @@ test('V offers the Inbox, Today, Upcoming and the first six projects as the side
     'a sub-project follows its parent; an archived one is left out');
   const many = worldFromOverview(overview([], { projects: [project('inbox', { inbox: true }), ...['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'].map(id => project(id, { sortKey: id }))] }));
   assert.deepEqual(switchTargets(many).map(view => view.kind === 'project' ? view.id : view.kind), ['inbox', 'today', 'upcoming', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6']);
+  // The list opens marking the list shown: the Inbox opened as its project too; none for a list it does not hold.
+  assert.equal(switchIndex(world, { kind: 'project', id: 'inbox' }), 0);
+  assert.equal(switchIndex(world, { kind: 'project', id: 'home' }), 4);
+  assert.equal(switchIndex(world, { kind: 'label', id: 'call' }), -1);
+  assert.equal(switchIndex(many, { kind: 'project', id: 'p7' }), -1);
   const key = (value: string, code?: string, mods: Partial<{ shiftKey: boolean; metaKey: boolean; repeat: boolean }> = {}) => ({ key: value, code, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, ...mods });
   assert.deepEqual(readShortcut(key('v'), false), { shortcut: { action: 'views' }, pending: false });
   assert.deepEqual(readShortcut(key('ㅍ', 'KeyV'), false), { shortcut: { action: 'views' }, pending: false }, 'a Korean input mode keeps V');
@@ -209,11 +215,14 @@ test('V offers the Inbox, Today, Upcoming and the first six projects as the side
   assert.deepEqual(readSwitchKey(key('4', 'Numpad4'), 5, 0), { action: 'choose', index: 3 });
   assert.equal(readSwitchKey(key('ArrowLeft', 'Numpad4'), 5, 0), undefined, 'a number pad without Num Lock is not a number');
   assert.deepEqual(readSwitchKey(key('!', 'Digit1', { shiftKey: true }), 5, 0), undefined);
-  assert.deepEqual(readSwitchKey(key('7', 'Digit7'), 5, 2), { mark: 2 });
-  assert.deepEqual(readSwitchKey(key('ArrowDown', 'ArrowDown'), 5, 4), { mark: 0 });
-  assert.deepEqual(readSwitchKey(key('ArrowUp', 'ArrowUp'), 5, 0), { mark: 4 });
+  assert.equal(readSwitchKey(key('7', 'Digit7'), 5, 2), undefined, 'a number past the list does nothing');
+  assert.equal(readSwitchKey(key('0', 'Digit0'), 5, 2), undefined);
+  assert.deepEqual(readSwitchKey(key('ArrowDown', 'ArrowDown'), 5, 4), { action: 'mark', index: 0 });
+  assert.deepEqual(readSwitchKey(key('ArrowUp', 'ArrowUp'), 5, 0), { action: 'mark', index: 4 });
   assert.deepEqual(readSwitchKey(key('Enter', 'Enter'), 5, 3), { action: 'choose', index: 3 });
   assert.deepEqual(readSwitchKey(key('ㅍ', 'KeyV'), 5, 3), { action: 'close' });
+  assert.equal(readSwitchKey(key('v', 'KeyV', { repeat: true }), 5, 3), undefined, 'V held down does not close the list it opened');
+  assert.deepEqual(readSwitchKey(key('Enter', 'Enter'), 4, 6), { action: 'choose', index: 3 }, 'the list shrank while open');
   assert.equal(readSwitchKey(key('1', 'Digit1', { metaKey: true }), 5, 0), undefined);
   assert.equal(readSwitchKey(key('q', 'KeyQ'), 5, 0), undefined);
 });
