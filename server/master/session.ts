@@ -436,8 +436,11 @@ export class MasterSession {
     let changed = this.discover(snapshot, binding);
     for (const item of this.file.followed.filter(entry => entry.state === 'running')) {
       if (this.closed) return;
-      const where = item.node ? this.options.live.node(item.node) ?? await this.nodeSnapshot(item.node) : snapshot;
-      if (item.node && where) this.nodesSeen.set(item.node, Date.now());
+      const mirrored = item.node ? this.options.live.node(item.node) : undefined;
+      const where = item.node ? mirrored ?? await this.nodeSnapshot(item.node) : snapshot;
+      // Seen when it last arrived (or, asked for, as the computer dated it), not when it was read: a computer gone keeps
+      // its last snapshot, which must not keep its work counted as running.
+      if (item.node && where) this.nodesSeen.set(item.node, Math.max(this.nodesSeen.get(item.node) ?? 0, mirrored ? this.options.live.nodeAt(item.node) : Date.parse(where.updatedAt) || 0));
       const current = item.currentRunId;
       if (where && await this.check(item, where)) changed = true;
       // Saved as soon as it moves, so the chain is still found after a restart.
