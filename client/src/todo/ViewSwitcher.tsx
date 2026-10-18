@@ -25,8 +25,12 @@ export function ViewSwitcher({ anchor, world, current, onChoose, onClose }: {
   const state = useRef({ targets, marked, onChoose, onClose });
   state.current = { targets, marked, onChoose, onClose };
   const list = useRef<HTMLDivElement>(null);
-  // The marked entry stays in sight when the list scrolls (a short window, a phone's sheet).
-  useEffect(() => { list.current?.children[marked]?.scrollIntoView({ block: 'nearest' }); }, [marked]);
+  // The marked entry stays in sight when the list scrolls (a short window, a phone's sheet); a frame later, once the
+  // popover has its place and height.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => list.current?.children[marked]?.scrollIntoView({ block: 'nearest' }));
+    return () => cancelAnimationFrame(frame);
+  }, [marked]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
