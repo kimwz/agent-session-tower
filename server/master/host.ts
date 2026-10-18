@@ -96,7 +96,24 @@ export async function startMasterHost(options: MasterHostOptions) {
       ...(voice ? { voice: voice.status() } : {}),
     };
   };
-  const broadcastOverview = () => room.broadcast({ type: 'overview', seq: 0, overview: overview() });
+  /** The overview pages last heard, voice aside (voice has its own events): one that would say the same is not sent. */
+  let heardOverview = '';
+  const withoutVoice = ({ voice: _, ...rest }: MasterOverview) => JSON.stringify(rest);
+  const broadcastOverview = () => {
+    const current = overview();
+    const key = withoutVoice(current);
+    if (key === heardOverview) return;
+    heardOverview = key;
+    room.broadcast({ type: 'overview', seq: 0, overview: current });
+  };
+  // The session's status and title and issue masters' running work come from Tower's live state: a change there alone
+  // (a turn the owner typed ending) reaches pages too, looked at once per change burst.
+  let overviewLook = false;
+  live.subscribe(() => {
+    if (overviewLook) return;
+    overviewLook = true;
+    setImmediate(() => { overviewLook = false; if (!closing && session) broadcastOverview(); });
+  });
   // A host of another build steps aside unless a report is on its way, a tool is being answered, or something is being
   // read aloud (a turn read while it is written, audio being made, or a page's word awaited).
   const working = () => pending > 1 || Boolean(session?.busy()) || Boolean(issues?.busy()) || Boolean(voice?.busy());
