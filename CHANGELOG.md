@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.149.1] - 2026-10-18
+
+- **할 일 화면은 이제 '전체'에서 시작합니다.** 주소에 목록이 없을 때(처음 들어올 때) 관리함 대신 전체 보기를 보드로 보여 줍니다. 주소로 연 목록과, 캔버스에 다녀올 때 보던 목록은 그대로 돌아옵니다.
+
 ## [1.149.0] - 2026-10-18
 
 - **할 일에 '전체' 보기를 더했습니다.** 사이드바 관리함 위의 **전체**(`V` 메뉴 0번, `G A`, 주소 `todo=all`)는 관리함과 모든 프로젝트를 사이드바 순서대로 한 화면에 세로로 보여 줍니다. 프로젝트마다 머리글(누르면 그 프로젝트로 이동)과 그 프로젝트 보드와 같은 섹션 칸이 놓이고, 하위 프로젝트도 각각 따로 나옵니다. 보관된 프로젝트·섹션과 완료·삭제된 작업은 빠지고, 하위 작업은 지금처럼 부모 카드 안에 있습니다. 칸마다 위의 3개만 보이고 **더 보기**로 전부 펼치고 **접기**로 다시 접습니다. 캘린더로 보면 모든 프로젝트의 작업이 나옵니다.

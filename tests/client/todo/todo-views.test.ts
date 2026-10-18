@@ -46,9 +46,9 @@ test('the address keeps the list, layout and open task, and the canvas keeps its
   assert.equal(isTodoPage('?session=x'), false);
   const location = readTodoLocation('?view=todo&todo=p:tower&task=a&layout=calendar');
   assert.deepEqual(location, { view: { kind: 'project', id: 'tower' }, layout: 'calendar', task: 'a', query: '' });
-  // The page opens on the Inbox unless the address names a list.
-  assert.deepEqual(readTodoLocation('?view=todo').view, { kind: 'inbox' });
-  assert.deepEqual(readTodoLocation('?view=todo&todo=p:../x').view, { kind: 'inbox' });
+  // The page opens on everything unless the address names a list.
+  assert.deepEqual(readTodoLocation('?view=todo').view, { kind: 'all' });
+  assert.deepEqual(readTodoLocation('?view=todo&todo=p:../x').view, { kind: 'all' });
   assert.deepEqual(readTodoLocation('?view=todo&todo=today').view, { kind: 'today' });
   assert.deepEqual(readTodoLocation('?view=todo&todo=inbox').view, { kind: 'inbox' });
   assert.equal(todoSearch('?session=s1&todo=today', { view: { kind: 'search' }, layout: 'board', task: null, query: '보고서' }), '?session=s1&view=todo&todo=search&q=%EB%B3%B4%EA%B3%A0%EC%84%9C');
