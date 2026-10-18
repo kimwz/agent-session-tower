@@ -230,8 +230,8 @@ export class TodoFiles {
       return await this.completeUpload(id);
     } finally {
       await handle.close();
-      // Nobody resumes or repeats this upload, so its record goes at once, done or not. best-effort: one left behind is
-      // removed by the cleanup a day later.
+      // Nobody resumes or repeats this upload, so its record goes at once, done or not.
+      // best-effort: a record left behind is removed by the cleanup a day later.
       if (id) await this.cancelUpload(id).catch(() => undefined);
     }
   }

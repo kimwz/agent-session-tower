@@ -108,7 +108,8 @@ test('update changes fields and place in one request; recurrence and labels are 
 test('comments, deletes, and refusals come back as errors with their reason; nothing half-applied', async t => {
   const { call, store } = await fixture(t);
   const item = call('todos_add', { text: 'Call' }).added;
-  call('todos_comment', { id: item.id, body: '**Tomorrow** morning' });
+  await call('todos_comment', { id: item.id, body: '**Tomorrow** morning' });
+  await assert.rejects(call('todos_comment', { id: 'missing', body: 'x' }), (error: unknown) => error instanceof TowerError && error.kind === 'not-found');
   assert.equal(call('todos_get', { id: item.id }).comments[0].body, '**Tomorrow** morning');
   const revision = store.revision();
   assert.throws(() => call('todos_apply', { ops: [{ op: 'task.update', id: item.id, patch: { content: 'x' } }, { op: 'task.update', id: 'missing', patch: { content: 'y' } }] }),
