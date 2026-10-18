@@ -210,6 +210,10 @@ test('a page hears the master session\'s status as Tower\'s live state changes, 
   assert.deepEqual(heard(), ['working 마스터', 'completed 마스터', 'idle 마스터 2', 'working 마스터 2']);
   const said = overviews().map(({ voice: _, ...rest }) => JSON.stringify(rest));
   assert.ok(said.every((item, index) => item !== said[index - 1]), 'an overview repeated the one before it');
+  // A page that starts from a checkpoint holds that overview: the next live change sends again, though it says the same.
+  await client.call('checkpoint');
+  send([{ id: 'claude:master', status: 'working', title: '마스터 2' }]);
+  await until(() => overviews().length === said.length + 1);
 });
 
 test('the host answers a page\'s voice requests, refusing what is not its call, and shows voice use in its overview', async t => {

@@ -124,7 +124,11 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'ping': return { busy: working(), streams: streams.size };
       case 'hello': return true;
       case 'overview': return overview();
-      case 'checkpoint': return { ...room.position(), overview: overview() };
+      case 'checkpoint': {
+        // A page starting from here holds this overview, not the last one sent: the next look sends again, even the same.
+        heardOverview = '';
+        return { ...room.position(), overview: overview() };
+      }
       case 'start': {
         if (args.provider !== 'claude' && args.provider !== 'codex') throw failure('Claude 또는 Codex를 선택하세요.', 'invalid');
         if (typeof args.text !== 'string' || !args.text.trim() || args.text.length > 32_000) throw failure('첫 메시지를 적어 주세요.', 'invalid');
