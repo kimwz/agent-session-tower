@@ -1,5 +1,4 @@
-import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { openTranscript } from '../sessions/transcript-file.js';
 import { createInterface } from 'node:readline';
 import type { Provider } from '../../shared/types.js';
 import { codexShellCalls, worktreeAddPaths } from './commands.js';
@@ -15,12 +14,13 @@ type Json = Record<string, any>;
  * read of what was appended starts.
  */
 async function* rows(file: string, keep: (line: string) => boolean, from = 0, read: { end: number } = { end: 0 }): AsyncGenerator<Json> {
-  const size = (await stat(file)).size;
+  const transcript = await openTranscript(file);
+  const size = transcript.size;
   // A file shorter than where the last read ended was replaced: it is read again from the start.
   if (from > size) from = 0;
   read.end = from;
-  if (from >= size) return;
-  const input = createReadStream(file, { encoding: 'utf8', start: from, end: size - 1 });
+  if (from >= size) return void await transcript.close();
+  const input = transcript.stream(from).on('close', () => void transcript.close());
   const lines = createInterface({ input, crlfDelay: Infinity });
   let offset = from;
   try {

@@ -1,6 +1,6 @@
 import { resolveExecLineage } from './exec-lineage.js';
 import { EventEmitter } from 'node:events';
-import { open, rm, stat } from 'node:fs/promises';
+import { rm, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import type { ChatMessage, Provider, Session, SessionDetail } from '../../shared/types.js';
@@ -9,6 +9,7 @@ import { LaunchProofFile } from './launch-proofs.js';
 import { matchLaunchMarks, readLaunchMarks, type LaunchMark } from './launch-marks.js';
 import { inspectProcesses, type ProcessSnapshot } from './processes.js';
 import { appendFile, applyStatus, initial, ownHistory, parseMessages, walk, CHUNK, MAX_LINE, type RecordState } from './parser.js';
+import { compressedTranscript, openTranscript, type TranscriptFile } from './transcript-file.js';
 
 /**
  * Every term is lowercase; times are milliseconds, `until` excluded. Tool calls and results are searched only with `tools`.
@@ -153,14 +154,16 @@ export class SessionService extends EventEmitter {
       const incomplete = new Set<Provider>();
       const coldIdsAtStart = new Set(this.coldIds);
       const [codex, archived, claude] = await Promise.all([
-        walk(join(this.codexHome, 'sessions'), 6, () => incomplete.add('codex')), walk(join(this.codexHome, 'archived_sessions'), 6, () => incomplete.add('codex')),
+        walk(join(this.codexHome, 'sessions'), 6, () => incomplete.add('codex'), { compressed: true }), walk(join(this.codexHome, 'archived_sessions'), 6, () => incomplete.add('codex'), { compressed: true }),
         walk(join(this.claudeHome, 'projects'), 6, () => incomplete.add('claude')),
       ]);
       const observedProviders = new Set([...this.records.values()].map(state => state.session.provider));
       if (Date.now() - this.lastProcesses > 8000) await this.inspect();
       const files = [...codex.map((path) => ({ path, provider: 'codex' as const, archived: false })),
         ...archived.map((path) => ({ path, provider: 'codex' as const, archived: true })),
-        ...claude.map((path) => ({ path, provider: 'claude' as const, archived: false }))].filter(entry => !this.coldPaths.has(entry.path));
+        ...claude.map((path) => ({ path, provider: 'claude' as const, archived: false }))]
+        // An archived original Codex compressed since is still the one retention keeps.
+        .filter(entry => !this.coldPaths.has(entry.path) && !(compressedTranscript(entry.path) && this.coldPaths.has(entry.path.slice(0, -4))));
       const existing = new Set(files.map(({ path }) => path));
       let changed = false;
       this.diagnostics = [];
@@ -173,12 +176,22 @@ export class SessionService extends EventEmitter {
             const info = await stat(entry.path);
             let state = this.records.get(entry.path);
             const before = state ? JSON.stringify(state.session) : '';
-            if (!state || state.ino !== Number(info.ino) || info.size < state.size || (info.size === state.size && info.mtimeMs !== state.mtimeMs)) {
-              state = initial(entry.path, entry.provider, info, entry.archived);
-              this.records.set(entry.path, state);
+            if (compressedTranscript(entry.path)) {
+              // A compressed transcript does not grow: it is read whole once, and again only once it is replaced.
+              if (!state || state.ino !== Number(info.ino) || state.stored !== info.size || state.mtimeMs !== info.mtimeMs) {
+                state = initial(entry.path, entry.provider, info, entry.archived);
+                this.records.set(entry.path, state);
+                state.size = await appendFile(state);
+                state.stored = info.size; state.mtimeMs = info.mtimeMs;
+              }
+            } else {
+              if (!state || state.ino !== Number(info.ino) || info.size < state.size || (info.size === state.size && info.mtimeMs !== state.mtimeMs)) {
+                state = initial(entry.path, entry.provider, info, entry.archived);
+                this.records.set(entry.path, state);
+              }
+              if (info.size !== state.size || info.mtimeMs !== state.mtimeMs) await appendFile(state, info.size);
+              state.size = info.size; state.mtimeMs = info.mtimeMs;
             }
-            if (info.size !== state.size || info.mtimeMs !== state.mtimeMs) await appendFile(state, info.size);
-            state.size = info.size; state.mtimeMs = info.mtimeMs;
             applyStatus(state, this.processes, Date.now());
             if (before !== JSON.stringify(state.session)) changed = true;
           } catch (error) {
@@ -259,7 +272,7 @@ export class SessionService extends EventEmitter {
       return { session: { ...state.session }, messages: [], hasMore: false };
     }
     const count = Math.max(1, Math.min(200, Number.isFinite(limit) ? Math.floor(limit) : 60));
-    const file = await open(state.session.filePath!, 'r');
+    const file = await openTranscript(state.session.filePath!);
     const collected: ChatMessage[][] = [];
     let messageCount = 0;
     let position = Math.min(state.offset, before !== undefined && Number.isFinite(before) ? Math.max(0, Math.floor(before)) : state.offset);
@@ -338,7 +351,7 @@ export class SessionService extends EventEmitter {
     const escapes = plain !== undefined && /[^\x00-\x7f]/.test(plain) ? Buffer.from('\\u') : undefined;
     // The only letters outside ASCII whose lowercase holds ASCII letters: İ (i̇) and the Kelvin sign (k).
     const folding = plain !== undefined && /[ik]/.test(plain) ? [Buffer.from('\u0130'), Buffer.from('\u212a')] : [];
-    const file = await open(state.session.filePath!, 'r');
+    const file = await openTranscript(state.session.filePath!);
     let lowered = Buffer.alloc(0);
     const test = (line: Buffer, start: number): void => {
       if (needle) {
@@ -414,7 +427,7 @@ export class SessionService extends EventEmitter {
    * Your last message before `from`, which what follows answers: the chat keeps it in view even when a long piece of
    * work pushed it off the page. Looked for within a bounded read, like a page.
    */
-  private async previousUser(file: Awaited<ReturnType<typeof open>>, state: RecordState, from: number, historyStart: number): Promise<ChatMessage | undefined> {
+  private async previousUser(file: TranscriptFile, state: RecordState, from: number, historyStart: number): Promise<ChatMessage | undefined> {
     const userOn = (line: Buffer, start: number): ChatMessage | undefined => {
       try {
         const row = JSON.parse(line.toString('utf8'));
