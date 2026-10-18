@@ -65,6 +65,15 @@ test('a Codex original an older operation archived and Codex compressed is not t
  await unlink(archived+'.zst');const lease=await adapter.reserve(group,[thread],ctx);assert.ok(lease);await lease.release();
  }finally{await f.close();}});
 
+test('a compressed hot rollout Codex archived as it is (its row names the .zst) inspects cold',async()=>{const f=await fixture();try{
+ const home=join(f.base,'codex'),hot=join(home,'sessions'),archive=join(home,'archived_sessions');await mkdir(home);await mkdir(hot);await mkdir(archive);const original=join(hot,'thread.jsonl.zst'),archived=join(archive,'thread.jsonl.zst');await writeFile(original,'zstd bytes');
+ const info=await lstat(original);const member:RetentionMember={sessionId:'codex:thread',nativeId:'thread',provider:'codex',originalPath:original,coldPath:join(archive,'thread.jsonl.zst'),operationId:'operation',state:'intent',identity:{dev:Number(info.dev),ino:Number(info.ino),size:Number(info.size),mtimeMs:Number(info.mtimeMs)}};
+ // Codex's thread/archive renames the compressed file and records its new path.
+ await rename(original,archived);const db=new DatabaseSync(join(home,'state_5.sqlite'));db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,archived INTEGER)');db.prepare('INSERT INTO threads VALUES (?,?,?)').run('thread',archived,1);db.close();
+ const adapter=createNativeRetentionAdapter({claude:[f.root],codex:[hot,archive]},{codexHome:home,claudeHome:f.base,coldRoot:join(f.base,'cold'),inspect:async()=>({complete:true,activeIds:new Set(),issues:[]})});
+ const inspected=await adapter.inspectCold([member]);assert.equal(inspected.complete,true);assert.equal(inspected.members[0].state,'cold');assert.equal(inspected.members[0].coldPath,archived);
+ }finally{await f.close();}});
+
 test('two thousand cold Codex records reuse one native metadata connection per reconciliation',async t=>{const f=await fixture();const opened=channel('tower.retention.codex-metadata-open');let count=0;const observed=()=>{count++;};try{
  const home=join(f.base,'codex'),hot=join(home,'sessions'),archive=join(home,'archived_sessions');await mkdir(home);await mkdir(hot);await mkdir(archive);const db=new DatabaseSync(join(home,'state_5.sqlite'));db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,archived INTEGER)');const insert=db.prepare('INSERT INTO threads VALUES (?,?,?)');const members:RetentionMember[]=[];db.exec('BEGIN');
  // The cold files are written a hundred at a time; one by one, writing them takes longer than the reconciliations.

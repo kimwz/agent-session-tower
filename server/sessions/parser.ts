@@ -1,6 +1,7 @@
 import { parseExecLaunch, promptDigest, type ExecLaunch } from './exec-lineage.js';
 import { isTaskNotification, taskNotice, TASK_NOTICE } from '../../shared/task-notification.js';
-import { open, readdir, stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
+import { compressedTranscript, transcriptChunks } from './transcript-file.js';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { ChatMessage, Provider, Session } from '../../shared/types.js';
 import type { ProcessSnapshot } from './processes.js';
@@ -21,8 +22,11 @@ export interface RecordState {
   /** Started by `claude -p` or an SDK rather than an interactive Claude Code window. */
   programmatic?: boolean;
   firstPrompt?: string;
+  /** Where reading stopped, and how far the content goes: in a compressed transcript, positions in its JSONL. */
   offset: number;
   size: number;
+  /** A compressed transcript's bytes on disk. */
+  stored?: number;
   mtimeMs: number;
   ino: number;
   metadataSeen: boolean;
@@ -181,14 +185,19 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
   return messages;
 }
 
-/** `unreadable` hears of each folder that could not be listed, a missing one included, so a caller knows the list may be incomplete. */
-export async function walk(directory: string, maxDepth = 6, unreadable?: (path: string) => void): Promise<string[]> {
+/**
+ * `unreadable` hears of each folder that could not be listed, a missing one included, so a caller knows the list may be
+ * incomplete. `compressed` lists Codex's compressed transcripts too (transcript-file.ts), except one whose `.jsonl` is
+ * beside it: Codex writes that when the conversation goes on, and it is the live one.
+ */
+export async function walk(directory: string, maxDepth = 6, unreadable?: (path: string) => void, options: { compressed?: boolean } = {}): Promise<string[]> {
   const files: string[] = [];
   async function visit(path: string, depth: number): Promise<void> {
     let entries;
     try { entries = await readdir(path, { withFileTypes: true }); } catch { unreadable?.(path); return; }
+    const plain = new Set(entries.filter(entry => entry.isFile() && entry.name.endsWith('.jsonl')).map(entry => entry.name));
     for (const entry of entries) {
-      if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(join(path, entry.name));
+      if (entry.isFile() && (plain.has(entry.name) || (options.compressed && compressedTranscript(entry.name) && !plain.has(entry.name.slice(0, -4))))) files.push(join(path, entry.name));
       else if (entry.isDirectory() && depth < maxDepth) await visit(join(path, entry.name), depth + 1);
       // Do not follow symlinks out of the explicitly selected session roots.
     }
@@ -200,7 +209,7 @@ export async function walk(directory: string, maxDepth = 6, unreadable?: (path: 
 export function initial(path: string, provider: Provider, info: Awaited<ReturnType<typeof stat>>, archived: boolean): RecordState {
   const subagent = provider === 'claude' && basename(dirname(path)) === 'subagents';
   const nativeId = provider === 'codex'
-    ? basename(path).match(/([\da-f-]{36})\.jsonl$/i)?.[1] || basename(path, '.jsonl')
+    ? basename(path).match(/([\da-f-]{36})\.jsonl(?:\.zst)?$/i)?.[1] || basename(basename(path, '.zst'), '.jsonl')
     : basename(path, '.jsonl').replace(/^agent-/, '');
   const createdAt = new Date(0).toISOString();
   return {
@@ -411,9 +420,11 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
   }
 }
 
-/** Stream each file once, then only appended bytes. Keep summaries, never entire transcripts. */
-export async function appendFile(state: RecordState, end: number): Promise<void> {
-  const file = await open(state.session.filePath!, 'r');
+/**
+ * Stream each file once, then only appended bytes. Keep summaries, never entire transcripts. Without `end`, reads to the
+ * end of the content (a compressed transcript is read whole, as it decompresses). Says where the content read ends.
+ */
+export async function appendFile(state: RecordState, end?: number): Promise<number> {
   let position = state.offset;
   let fragments: Buffer[] = [];
   let pendingBytes = 0;
@@ -424,29 +435,24 @@ export async function appendFile(state: RecordState, end: number): Promise<void>
     if (pendingBytes > MAX_LINE) { fragments = []; droppingOversizedLine = true; }
     else fragments.push(fragment);
   };
-  try {
-    while (position < end) {
-      const buffer = Buffer.allocUnsafe(Math.min(CHUNK, end - position));
-      const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
-      if (!bytesRead) break;
-      const data = buffer.subarray(0, bytesRead);
-      let start = 0;
-      for (let newline = data.indexOf(10); newline !== -1; newline = data.indexOf(10, start)) {
-        append(data.subarray(start, newline));
-        if (!droppingOversizedLine) {
-          try { consume(state, JSON.parse(Buffer.concat(fragments, pendingBytes).toString('utf8')), state.offset, state.ordinal); }
-          catch { /* A malformed complete record cannot prevent later valid records. */ }
-        }
-        fragments = []; pendingBytes = 0; droppingOversizedLine = false;
-        state.ordinal++;
-        start = newline + 1;
-        state.offset = position + start;
+  for await (const data of transcriptChunks(state.session.filePath!, position, end)) {
+    let start = 0;
+    for (let newline = data.indexOf(10); newline !== -1; newline = data.indexOf(10, start)) {
+      append(data.subarray(start, newline));
+      if (!droppingOversizedLine) {
+        try { consume(state, JSON.parse(Buffer.concat(fragments, pendingBytes).toString('utf8')), state.offset, state.ordinal); }
+        catch { /* A malformed complete record cannot prevent later valid records. */ }
       }
-      append(data.subarray(start));
-      position += bytesRead;
+      fragments = []; pendingBytes = 0; droppingOversizedLine = false;
+      state.ordinal++;
+      start = newline + 1;
+      state.offset = position + start;
     }
-    // A final record without a newline may be in the middle of a write. Re-read it on the next append.
-  } finally { await file.close(); }
+    append(data.subarray(start));
+    position += data.length;
+  }
+  // A final record without a newline may be in the middle of a write. Re-read it on the next append.
+  return position;
 }
 
 export function applyStatus(state: RecordState, processes: ProcessSnapshot, now: number): void {
