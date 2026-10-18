@@ -8,10 +8,11 @@
 .page-switch button[aria-pressed="true"] { background:#22334a; color:var(--bright); }
 .sidebar-closed .page-switch { margin-left:0; background:#142030ed; }
 .canvas-only .page-switch { pointer-events:auto; }
-/* Beside an open conversation on a narrow window the header has no room for the words: the full header (drawer open)
-   below 900px, the compact one below 760px. */
+/* A crowded header drops the words: beside an open conversation, the full header (drawer open) below 900px and the compact
+   one below 760px; on a phone, the full header. */
 @media (max-width: 900px) { .has-chat:not(.sidebar-closed) .page-switch span { display:none; } .has-chat:not(.sidebar-closed) .page-switch button { padding:0 8px; } }
 @media (max-width: 760px) { .has-chat .page-switch span { display:none; } .has-chat .page-switch button { padding:0 8px; } }
+@media (max-width: 680px) { .app:not(.sidebar-closed) .page-switch span { display:none; } }
 
 .todo-workspace { overflow:hidden; }
 .workspace[hidden] { display:none; }
@@ -459,7 +460,7 @@ a.todo-file-name:hover { text-decoration:underline; }
 @media (max-width:680px) {
   .page-switch { margin-left:4px; }
   .page-switch button { padding:0 8px; }
-  /* A phone's header keeps the mark and the switch; the name, badge and host would push the switch's words out. */
+  /* A phone's header has no room for the name, the badge or the host. */
   .brand h1, .brand-local, .header-center { display:none; }
   .todo-sidebar { position:absolute; top:0; bottom:0; left:0; z-index:41; width:282px; box-shadow:10px 0 30px #00000060; }
   .todo-main-head { padding:14px 16px 8px; }

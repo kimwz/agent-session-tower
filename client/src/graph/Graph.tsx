@@ -274,21 +274,26 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     return () => window.clearTimeout(timeout);
   }, [manualFitRequest, manual, fitVisibleGraph]);
 
-  // With the sidebar closed the header floats over the canvas; the view tools sit on the settings button's line, just left of it.
+  // With the sidebar closed the header floats over the canvas; the view tools sit on the settings button's line, just left of it,
+  // unless they would run into the page switch on that line: then they drop below the header (`crowded`).
   const quickControls = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const box = canvas.current, controls = quickControls.current, entry = document.querySelector<HTMLElement>('.settings-entry');
+    const pageSwitch = document.querySelector<HTMLElement>('.page-switch');
     if (!box || !controls || !entry) return;
     const place = () => {
       const area = box.getBoundingClientRect(), button = entry.getBoundingClientRect();
       if (!button.width) return;
       controls.style.setProperty('--settings-right', `${area.right - button.left}px`);
       controls.style.setProperty('--settings-middle', `${button.top + button.height / 2 - area.top}px`);
+      const switchRight = pageSwitch?.getBoundingClientRect().right ?? area.left;
+      controls.classList.toggle('crowded', button.left - 8 - controls.offsetWidth < switchRight + 8);
     };
     // The button can also move without resizing (its margin follows the chat panel), so measure again a frame later.
     let frame = 0;
     const observer = new ResizeObserver(() => { place(); cancelAnimationFrame(frame); frame = requestAnimationFrame(place); });
-    observer.observe(box); observer.observe(entry);
+    observer.observe(box); observer.observe(entry); observer.observe(controls);
+    if (pageSwitch) observer.observe(pageSwitch);
     place();
     return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, []);
