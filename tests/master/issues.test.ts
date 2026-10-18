@@ -138,8 +138,11 @@ test('each issue master follows its own work and reports to its own session, apa
   const forB = h.turn('codex:b-work', 'b work', h.from(bTurn));
   await h.follow();
   assert.deepEqual([h.main.activeTasks(), h.issues().get('task-a')!.activeTasks(), h.issues().get('task-b')!.activeTasks()], [1, 1, 1]);
+  // Pages see each todo's running work (the cards show the todo at work).
+  assert.deepEqual(h.issues().runningTasks(), { 'task-a': 1, 'task-b': 1 });
   h.finish(forMain, 'main done'); h.finish(forA, 'a done'); h.finish(forB, 'b done');
   await h.follow();
+  assert.deepEqual(h.issues().runningTasks(), {}, 'ended work leaves the count, its report pending or not');
   assert.equal(h.reports(MAIN).length, 1);
   assert.match(h.reports(MAIN)[0], /main done/);
   assert.equal(h.reports(a.id).length, 1);

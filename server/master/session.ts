@@ -268,6 +268,8 @@ export class MasterSession {
   /** This master's own turns, as far back as they are kept. */
   ownRuns(): readonly string[] { return this.file.masterRuns; }
 
+  /** Work handed out that is still running (its end not seen yet), so the owner sees what is under way. */
+  runningTasks(): number { return this.file.followed.filter(item => item.kind === 'delegated' && item.state === 'running').length; }
   /** Work handed out and not reported yet. */
   activeTasks(): number { return this.file.followed.filter(item => item.kind === 'delegated' && (item.state === 'running' || (item.report !== undefined && item.report !== 'sent' && item.report !== 'failed'))).length; }
   /** Reports Tower kept refusing, which the master never got. */

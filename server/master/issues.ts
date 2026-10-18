@@ -36,6 +36,8 @@ export interface IssueMastersOptions {
   followMs?: number;
   /** Tests shorten the wait before a refused report goes again. */
   reportRetryMs?: number;
+  /** What pages see of the issue masters changed: one was taken up or let go of, or its followed work moved. */
+  onChange?(): void;
 }
 
 /**
@@ -68,6 +70,10 @@ export class IssueMasters {
   }
 
   size(): number { return this.instances.size; }
+  /** Work each issue master handed out that is still running, by todo; todos with none are left out. */
+  runningTasks(): Record<string, number> {
+    return Object.fromEntries([...this.instances.values()].map(entry => [entry.taskId, entry.session.runningTasks()] as const).filter(([, count]) => count > 0));
+  }
   get(taskId: string): MasterSession | undefined { return this.instances.get(taskId)?.session; }
   /** A report is on its way to an issue master: a host of another build waits until it is sent. */
   busy(): boolean { return [...this.instances.values()].some(entry => entry.session.busy()); }
@@ -155,7 +161,8 @@ export class IssueMasters {
     const { tower, live, readDb, screen, followMs, reportRetryMs } = this.options;
     entry.session = new MasterSession({ stateDir: this.options.stateDir, dataDir: issueDataDir(this.options.dataDir, taskId), binding: () => entry.binding,
       folder: join(this.options.stateDir, TODO_MASTERS_FOLDER, taskId), writeGuide: folder => writeTodoMasterGuide(folder, taskId), ...(baselineAt ? { baselineAt } : {}),
-      otherMaster: { session: id => this.masterSession(id), run: id => this.masterRun(id, taskId) }, turns: this.turnsOf(taskId, entry), tower, live, ...(followMs ? { followMs } : {}), ...(reportRetryMs ? { reportRetryMs } : {}) });
+      otherMaster: { session: id => this.masterSession(id), run: id => this.masterRun(id, taskId) }, turns: this.turnsOf(taskId, entry), tower, live, ...(followMs ? { followMs } : {}), ...(reportRetryMs ? { reportRetryMs } : {}),
+      onChange: () => { if (entry.followed) this.options.onChange?.(); } });
     entry.tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), scope: `todo:${taskId}`, screen, started: (target, body, answer) => entry.session.started(target, body, answer), delegated: () => entry.session.delegatedTable() });
     try { await mkdir(issueDataDir(this.options.dataDir, taskId), { recursive: true, mode: 0o700 }); await entry.session.start(); }
     catch (error) {
@@ -168,6 +175,7 @@ export class IssueMasters {
     }
     this.instances.set(taskId, entry);
     this.rebind();
+    this.options.onChange?.();
   }
 
   /**
@@ -179,6 +187,7 @@ export class IssueMasters {
     this.instances.delete(entry.taskId);
     for (const id of entry.session.ownRuns()) this.turnsOf(entry.taskId).delete(id);
     this.rebind();
+    this.options.onChange?.();
   }
   private rebind(): void { this.bound = new Set([...this.instances.values()].map(entry => entry.binding.sessionId)); }
 

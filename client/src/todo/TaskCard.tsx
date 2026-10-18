@@ -69,16 +69,18 @@ export function CheckCircle({ task, onComplete, onCompleteNext, onReopen, size =
 
 /**
  * A todo's issue master as the chat header shows a session: the provider's orb in its context ring, in colour while it
- * works and grey otherwise, with a dot when something waits for the owner.
+ * or the work it handed out runs and grey otherwise, with a dot when something waits for the owner and the count of
+ * that running work.
  */
 export function AgentIcon({ agent }: { agent: TodoAgent }) {
-  const { session } = useContext(TodoAgentContext);
+  const { session, running } = useContext(TodoAgentContext);
   const description = useId();
-  const look = agentLook(agent, agent.sessionId ? session(agent.sessionId) : undefined);
-  const label = `${t('이슈 마스터')} · ${statusLabels[look.status]}`;
+  const look = agentLook(agent, agent.sessionId ? session(agent.sessionId) : undefined, running(agent.taskId));
+  const label = [t('이슈 마스터'), statusLabels[look.status], ...(look.running ? [t('맡긴 작업 {0}개 진행 중', { 0: look.running })] : [])].join(' · ');
   return <span className={`chat-context-icon todo-agent-icon ${look.status}`}>
     <SessionContextIcon provider={look.provider} usage={look.usage} descriptionId={description} compact label={label} />
     {look.flag && <i className={`todo-agent-flag ${look.flag}`} aria-hidden="true" />}
+    {look.running > 0 && <b className="todo-agent-running" aria-hidden="true">{look.running}</b>}
   </span>;
 }
 
@@ -111,12 +113,15 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
   const children = task.completedAt ? [] : (context.children.get(task.id) ?? []).filter(child => isOpen(child) && !context.shown?.has(child.id));
   const chips = CARD_META.filter(chip => chip.visible(task, context));
   const agent = context.world.agents[task.id];
+  // A todo at work (its issue master or the work it handed out) wears the canvas's moving border, as a working agent does.
+  const { session, running } = useContext(TodoAgentContext);
+  const atWork = !!agent && !task.completedAt && agentLook(agent, agent.sessionId ? session(agent.sessionId) : undefined, running(agent.taskId)).status === 'working';
   // A file dragged from the computer is not a card being dragged (dnd-kit follows the pointer, not HTML drag events).
   // A paste is the detail's: a card taking one would attach files to whichever card the keyboard is on.
   const drop = useFileDrop(files => onFiles?.(task, files), !onFiles || readOnly || !!task.completedAt);
   const { onDragOver, onDragLeave, onDrop } = drop.handlers;
   const dropHandlers = { onDragOver, onDragLeave, onDrop };
-  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''} ${drop.over ? 'file-target' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={task.content}
+  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''} ${drop.over ? 'file-target' : ''} ${atWork ? 'working' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={task.content}
     {...dropHandlers}
     onClick={() => onOpen(task.id)} onFocus={() => onSelect?.(selectId)}
     onPointerMove={event => {
@@ -129,6 +134,7 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
       if (active instanceof HTMLElement && !event.currentTarget.contains(active) && active.closest('.todo-card')) event.currentTarget.focus({ preventScroll: true });
     }}
     onKeyDown={event => { if (event.key === 'Enter' && event.target === event.currentTarget) { event.preventDefault(); onOpen(task.id); } }}>
+    {atWork && <span className="agent-activity-border" aria-hidden="true" />}
     <div className="todo-card-main">
       <CheckCircle task={task} disabled={readOnly} onComplete={() => onComplete(task)} onCompleteNext={() => onCompleteNext(task)} onReopen={onReopen && (() => onReopen(task))} />
       <div className="todo-card-body">

@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.146.0] - 2026-10-18
+
+- **진행 중인 할 일이 보드에서 바로 보입니다.** 이슈 마스터가 일하거나, 이슈 마스터가 맡긴 작업(새로 만든 세션, 기존 세션에 보낸 메시지, Auto Prompt)이 아직 돌고 있으면 그 할 일 카드에 캔버스와 같은 움직이는 테두리가 생기고 아이콘이 색으로 바뀝니다. 아이콘 옆 숫자는 아직 돌고 있는 맡긴 작업 수입니다. 마스터 호스트가 이미 추적하던 위임 작업을 그대로 화면에 보내므로 따로 세지 않습니다.
+
 ## [1.145.0] - 2026-10-18
 
 - **할 일마다 이슈 마스터 채팅.** 할 일 상세에 "상세 | 채팅" 탭이 생겼습니다. 채팅에 첫 메시지를 보내면 그 할 일 전용 마스터가 시작됩니다. 메인 마스터와 같은 도구·권한을 가진 별도 대화이며, 할 일의 설명·하위작업·댓글·첨부 파일을 먼저 읽고 일을 시작합니다. 결과는 할 일 댓글로 남기고, 완료 처리는 소유자가 합니다.

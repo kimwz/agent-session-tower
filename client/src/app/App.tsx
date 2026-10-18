@@ -99,6 +99,8 @@ function TowerApp() {
   const [showTodoSidebar, setShowTodoSidebar] = useState(false);
   /** The issue master whose chat the Todo page shows. */
   const [issueChatId, setIssueChatId] = useState<string | null>(null);
+  // Work each todo's issue master handed out that is still running, as the master host follows it (MasterDock's overview).
+  const [issueTasks, setIssueTasks] = useState<Readonly<Record<string, number>>>({});
   /** How that chat is left, for the master's `close`. */
   const issueChatClose = useRef<(() => void) | null>(null);
   const { mentionId: selectedSlackId, chatId: activeChatId } = slackChatSelection(slack?.events || [], requestedSlackId, selectedId);
@@ -481,6 +483,7 @@ function TowerApp() {
     const byId = new Map((localSessions ?? []).map(session => [session.id, session]));
     return {
       session: id => byId.get(id),
+      running: taskId => issueTasks[taskId] ?? 0,
       chat: (sessionId, onClose) => {
         const session = byId.get(sessionId);
         const runs = (view?.runs || []).filter(run => run.sessionId === sessionId).sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
@@ -491,7 +494,7 @@ function TowerApp() {
         </Suspense></ShownChat>;
       },
     };
-  }, [localSessions, view?.runs, sessions, workspaceFolders, snapshot?.providers, snapshot?.compaction, token, connection, onSelect, refresh, onSessionUpdate, acknowledgeOutcomeOf]);
+  }, [localSessions, view?.runs, sessions, workspaceFolders, snapshot?.providers, snapshot?.compaction, token, connection, onSelect, refresh, onSessionUpdate, acknowledgeOutcomeOf, issueTasks]);
   const todoBadges = useTodoSessionBadges(snapshot?.todoRevision);
   const chatHostEntry = activeChatId ? hostOf(hosts, nodeOf(activeChatId)) : undefined;
   const chatHost = chatHostEntry?.node ? { name: chatHostEntry.name, live: chatHostEntry.live, canWork: chatHostEntry.canWork, problem: hostProblem(chatHostEntry), workspace: chatHostEntry.workspace, workspaceNote: workspaceNote(chatHostEntry), ...(chatHostEntry.compaction ? { compaction: true } : {}) }
@@ -542,7 +545,7 @@ function TowerApp() {
     <AutoPromptDialog visible={showAutoPrompt} initialCwd={autoPromptCwd} initialNode={autoPromptNode === '' ? undefined : autoPromptNode ?? (autoPromptCwd ? undefined : selectedSession?.node)} providers={snapshot?.providers || []} hosts={hosts} projects={projects} sessions={sessions} jobs={view?.autoPrompts || []} token={token} connected={connection === 'connected'} onClose={closeAutoPrompt} onNavigate={openAutoPromptSession} onRefresh={refresh} />
     {issueCwd && <IssueDialog key={issueCwd} cwd={issueCwd} providers={snapshot?.providers || []} hosts={hosts} token={token} connected={connection === 'connected'} onClose={closeIssue} onCreated={sessionCreated} />}
     {showNewSession && <NewSessionDialog providers={snapshot?.providers || []} hosts={hosts} projects={projects} initialCwd={newSessionCwd || (selectedSession?.master ? undefined : selectedSession?.cwd) || (project !== 'all' ? project : undefined)} draft={newSessionDraft} token={token} connected={connection === 'connected'} onClose={closeNewSession} onCreated={sessionCreated} />}
-    {token && <ProvidersContext.Provider value={snapshot?.providers || []}><Suspense fallback={null}><MasterDock token={token} controls={masterControls} sessionId={page === 'todo' ? null : activeChatId ?? null} issueChat={page === 'todo' && !!issueChatId} /></Suspense></ProvidersContext.Provider>}
+    {token && <ProvidersContext.Provider value={snapshot?.providers || []}><Suspense fallback={null}><MasterDock token={token} controls={masterControls} sessionId={page === 'todo' ? null : activeChatId ?? null} issueChat={page === 'todo' && !!issueChatId} onIssueTasks={setIssueTasks} /></Suspense></ProvidersContext.Provider>}
   </div>;
 }
 
