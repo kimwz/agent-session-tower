@@ -2,11 +2,11 @@ import type { TodoLayout } from '../../../shared/todo/types';
 
 /**
  * Where the page is, kept in the address so a reload or Back returns to it: `?view=todo` shows the Todo page,
- * `todo=` the list (`today`, `upcoming`, `inbox`, `p:<project>`, `l:<label>`, `search` with `q=`), `layout=` board or
+ * `todo=` the list (`all`, `today`, `upcoming`, `inbox`, `p:<project>`, `l:<label>`, `search` with `q=`), `layout=` board or
  * calendar and `task=` the open task. The canvas keeps its own parameters (`session=`) meanwhile.
  */
 
-export type TodoView = { kind: 'today' } | { kind: 'upcoming' } | { kind: 'inbox' } | { kind: 'project'; id: string } | { kind: 'label'; id: string } | { kind: 'search' };
+export type TodoView = { kind: 'all' } | { kind: 'today' } | { kind: 'upcoming' } | { kind: 'inbox' } | { kind: 'project'; id: string } | { kind: 'label'; id: string } | { kind: 'search' };
 
 export interface TodoLocation {
   view: TodoView;
@@ -30,7 +30,7 @@ export function viewKey(view: TodoView): string {
 
 /** The list a `todo=` value names; the Inbox when it names none (the page opens there). */
 export function parseView(value: string | null): TodoView {
-  if (value === 'inbox' || value === 'today' || value === 'upcoming' || value === 'search') return { kind: value };
+  if (value === 'all' || value === 'inbox' || value === 'today' || value === 'upcoming' || value === 'search') return { kind: value };
   const match = /^([pl]):(.+)$/.exec(value ?? '');
   if (match && ID.test(match[2])) return match[1] === 'p' ? { kind: 'project', id: match[2] } : { kind: 'label', id: match[2] };
   return { kind: 'inbox' };

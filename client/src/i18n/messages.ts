@@ -2922,6 +2922,7 @@ export const english: Record<string, string> = {
   "보드·캘린더 전환": "Switch board and calendar",
   "다가오는으로 이동": "Go to Upcoming",
   "관리함으로 이동": "Go to Inbox",
+  "전체로 이동": "Go to All",
   "목록 이동": "Go to list",
   "목록 이동 (숫자·↑↓ Enter)": "Go to a list (number, ↑↓ Enter)",
   "이슈 마스터": "Issue master",

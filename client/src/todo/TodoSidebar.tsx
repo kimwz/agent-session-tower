@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent, type ReactNode, type RefObject } from 'react';
-import { Archive, ArchiveRestore, ArrowDown, ArrowUp, CalendarDays, CalendarRange, ChevronDown, ChevronRight, FolderTree, Hash, Heart, Inbox, MoreHorizontal, Palette, Pencil, Plus, Search, Tag, Trash2 } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowDown, ArrowUp, CalendarDays, CalendarRange, ChevronDown, ChevronRight, FolderTree, Hash, Heart, Inbox, Layers, MoreHorizontal, Palette, Pencil, Plus, Search, Tag, Trash2 } from 'lucide-react';
 import type { TodoLabel, TodoProject } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { Menu, Popover, type MenuItem } from './Popover';
@@ -11,9 +11,9 @@ import { projectTree, type ProjectNode, type SidebarCounts } from './todo-views'
 import { viewKey, type TodoView } from './todo-url';
 
 /**
- * The Todo page's navigation: add and search, the inbox and date lists with their counts, favorites, the project tree
- * and labels. Projects and labels are made, renamed, colored, put in order and removed from their rows; a project is
- * moved under another from its menu, and an archived one opens to be read.
+ * The Todo page's navigation: add and search, everything at once, the inbox and date lists with their counts,
+ * favorites, the project tree and labels. Projects and labels are made, renamed, colored, put in order and removed from
+ * their rows; a project is moved under another from its menu, and an archived one opens to be read.
  */
 
 const STEPS: { step: Step; label: string; icon: ReactNode }[] = [
@@ -138,6 +138,7 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
       <Search size={14} /><input ref={searchRef} type="search" value={search} placeholder={t('검색')} aria-label={t('작업 검색')} maxLength={200} onChange={event => setSearch(event.target.value)} /><kbd>/</kbd>
     </form>
     <ul className="todo-side-nav">
+      <Row active={current === 'all'} icon={<Layers size={15} />} label={t('전체')} onClick={() => onNavigate({ kind: 'all' })} />
       <Row active={current === 'inbox' || (!!inbox && current === `p:${inbox.id}`)} icon={<Inbox size={15} />} label={t('관리함')} count={counts.inbox} onClick={() => onNavigate({ kind: 'inbox' })} />
       <Row active={current === 'today'} icon={<CalendarDays size={15} />} label={t('오늘')} count={counts.today} tone={counts.overdue ? 'overdue' : undefined} onClick={() => onNavigate({ kind: 'today' })} />
       <Row active={current === 'upcoming'} icon={<CalendarRange size={15} />} label={t('다가오는')} onClick={() => onNavigate({ kind: 'upcoming' })} />

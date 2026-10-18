@@ -1,6 +1,6 @@
 /**
  * The Todo page's keys: `Q` add, `/` search, `B` board, `C` calendar, `W`/`M` calendar by week or month, `Shift+V`
- * board or calendar, `V` the list of lists to go to (`readSwitchKey`), `G` then `T`/`U`/`I` today, upcoming, inbox;
+ * board or calendar, `V` the list of lists to go to (`readSwitchKey`), `G` then `A`/`T`/`U`/`I` everything, today, upcoming, inbox;
  * arrows move the chosen task on the board; on the chosen task `E` complete, `Shift+E` complete and add the next, `N`
  * add the next, `Enter` open; `Esc` close, or let go of the chosen task; `⌘Z`/`Ctrl+Z` undo the last change. `1` and
  * `2` switch pages (app/page-shortcuts.ts).
@@ -8,7 +8,7 @@
 
 export type Direction = 'up' | 'down' | 'left' | 'right';
 export type TodoShortcut =
-  | { action: 'add' | 'search' | 'views' | 'layout' | 'board' | 'calendar' | 'week' | 'month' | 'today' | 'upcoming' | 'inbox' | 'complete' | 'complete-next' | 'add-next' | 'open' | 'close' | 'undo' }
+  | { action: 'add' | 'search' | 'views' | 'layout' | 'board' | 'calendar' | 'week' | 'month' | 'all' | 'today' | 'upcoming' | 'inbox' | 'complete' | 'complete-next' | 'add-next' | 'open' | 'close' | 'undo' }
   | { action: 'move'; direction: Direction };
 
 const ARROWS: Record<string, Direction> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
@@ -30,7 +30,7 @@ export function readShortcut(event: ShortcutKey, pending: boolean): { shortcut?:
   if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && key === 'z') return { shortcut: { action: 'undo' }, pending: false };
   if (event.metaKey || event.ctrlKey || event.altKey) return { pending: false };
   if (pending) {
-    const go = ({ t: 'today', u: 'upcoming', i: 'inbox' } as const)[key as 't' | 'u' | 'i'];
+    const go = ({ a: 'all', t: 'today', u: 'upcoming', i: 'inbox' } as const)[key as 'a' | 't' | 'u' | 'i'];
     return go && !event.shiftKey ? { shortcut: { action: go }, pending: false } : { pending: false };
   }
   if (event.shiftKey) {
@@ -58,15 +58,16 @@ export function readShortcut(event: ShortcutKey, pending: boolean): { shortcut?:
 export type SwitchKey = { action: 'choose' | 'mark'; index: number } | { action: 'close' };
 
 /**
- * A key while the list of lists (`V`) is open, `count` entries long with entry `index` marked: a number from 1 chooses
- * that entry (by where the key sits, as the page keys read numbers), the up and down arrows mark the entry above or
- * below (around at either end), `Enter` chooses the marked one and `V` closes the list (not when held down, so the
- * press that opened it does not close it). Escape is the popover's own. Nothing for a key the list leaves alone.
+ * A key while the list of lists (`V`) is open, `count` entries long with entry `index` marked: a number chooses the
+ * entry it numbers, from 0 (by where the key sits, as the page keys read numbers), the up and down arrows mark the
+ * entry above or below (around at either end), `Enter` chooses the marked one and `V` closes the list (not when held
+ * down, so the press that opened it does not close it). Escape is the popover's own. Nothing for a key the list leaves
+ * alone.
  */
 export function readSwitchKey(event: ShortcutKey, count: number, index: number): SwitchKey | undefined {
   if (event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return undefined;
   const digit = event.shiftKey ? undefined : digitOf(event);
-  if (digit !== undefined) return digit >= 1 && digit <= count ? { action: 'choose', index: digit - 1 } : undefined;
+  if (digit !== undefined) return digit < count ? { action: 'choose', index: digit } : undefined;
   if (event.key === 'ArrowDown') return { action: 'mark', index: (index + 1) % count };
   if (event.key === 'ArrowUp') return { action: 'mark', index: (index - 1 + count) % count };
   // The list can shrink while open (a project archived elsewhere).

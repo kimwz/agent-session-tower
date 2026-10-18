@@ -136,6 +136,19 @@ test('sub-tasks keep to four levels, never nest in themselves, and follow their 
   assert.equal(task('l4')?.parentId, null);
 });
 
+test('a task dragged to the top of another project section takes its sub-tasks into that section', async t => {
+  const { store, apply, task } = await fixture(t);
+  apply({ op: 'project.create', id: 'other', name: 'Other' }, { op: 'section.create', id: 'doing', projectId: 'other', name: 'Doing' },
+    { op: 'task.create', id: 'there', projectId: 'other', sectionId: 'doing', content: 'Already there' },
+    { op: 'task.create', id: 'top', content: 'Top' }, { op: 'task.create', id: 'child', parentId: 'top', content: 'Child' }, { op: 'task.create', id: 'grandchild', parentId: 'child', content: 'Grandchild' });
+  // What the overview's board sends for a drop on an empty space or a folded section (todo-views dropOps, dropPlace).
+  apply({ op: 'task.move', id: 'top', projectId: 'other', sectionId: 'doing', parentId: null, afterId: null });
+  assert.deepEqual(['top', 'child', 'grandchild'].map(id => [task(id)?.projectId, task(id)?.sectionId]), Array(3).fill(['other', 'doing']));
+  assert.deepEqual([task('child')?.parentId, task('grandchild')?.parentId], ['top', 'child']);
+  const order = store.overview().tasks.filter(item => item.sectionId === 'doing' && !item.parentId).sort((a, b) => a.sortKey < b.sortKey ? -1 : 1).map(item => item.id);
+  assert.deepEqual(order, ['top', 'there']);
+});
+
 test('order keys are made by the store, so two pages moving cards to one place never collide', async t => {
   const { store, apply } = await fixture(t);
   apply(...['a', 'b', 'c', 'd'].map(id => ({ op: 'task.create', id, content: id }) as TodoOp));

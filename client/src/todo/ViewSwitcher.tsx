@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type RefObject } from 'react';
-import { CalendarDays, CalendarRange, Inbox } from 'lucide-react';
+import { CalendarDays, CalendarRange, Inbox, Layers } from 'lucide-react';
 import { translate as t } from '../i18n/i18n';
 import { Popover } from './Popover';
 import { colorOf } from './todo-format';
@@ -51,6 +51,7 @@ export function ViewSwitcher({ anchor, world, current, onChoose, onClose }: {
 
   const icon = (view: TodoView) => {
     switch (view.kind) {
+      case 'all': return <Layers size={14} />;
       case 'inbox': return <Inbox size={14} />;
       case 'today': return <CalendarDays size={14} />;
       case 'upcoming': return <CalendarRange size={14} />;
@@ -62,7 +63,7 @@ export function ViewSwitcher({ anchor, world, current, onChoose, onClose }: {
       {targets.map((view, index) => <button key={viewKey(view)} id={`todo-switch-${index}`} type="button" role="option" aria-selected={index === marked}
         className={`${index === marked ? 'marked' : ''} ${index === shown ? 'current' : ''}`}
         onMouseEnter={() => setMarked(index)} onClick={() => onChoose(view)}>
-        <kbd>{index + 1}</kbd>{icon(view)}<span>{viewTitle(view, world, '')}</span>
+        <kbd>{index}</kbd>{icon(view)}<span>{viewTitle(view, world, '')}</span>
       </button>)}
     </div>
   </Popover>;
