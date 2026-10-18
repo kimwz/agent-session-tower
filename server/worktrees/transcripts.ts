@@ -1,4 +1,6 @@
-import { openTranscript } from '../sessions/transcript-file.js';
+import { stat } from 'node:fs/promises';
+import { Readable } from 'node:stream';
+import { compressedTranscript, transcriptChunks } from '../sessions/transcript-file.js';
 import { createInterface } from 'node:readline';
 import type { Provider } from '../../shared/types.js';
 import { codexShellCalls, worktreeAddPaths } from './commands.js';
@@ -14,27 +16,29 @@ type Json = Record<string, any>;
  * read of what was appended starts.
  */
 async function* rows(file: string, keep: (line: string) => boolean, from = 0, read: { end: number } = { end: 0 }): AsyncGenerator<Json> {
-  // A pass reads every open session's transcript: compressed ones are not kept for it.
-  const transcript = await openTranscript(file, { keep: false });
-  const size = transcript.size;
+  // A compressed transcript is never appended to and may be replaced whole when Codex compresses it again: it is read
+  // from its start each time, as it decompresses.
+  const compressed = compressedTranscript(file);
+  if (compressed) from = 0;
+  const size = compressed ? undefined : (await stat(file)).size;
   // A file shorter than where the last read ended was replaced: it is read again from the start.
-  if (from > size) from = 0;
+  if (size !== undefined && from > size) from = 0;
   read.end = from;
-  if (from >= size) return void await transcript.close();
-  const input = transcript.stream(from).on('close', () => void transcript.close());
+  if (size !== undefined && from >= size) return;
+  const input = Readable.from(transcriptChunks(file, from, size), { objectMode: false });
   const lines = createInterface({ input, crlfDelay: Infinity });
   let offset = from;
   try {
     for await (const line of lines) {
       const next = offset + Buffer.byteLength(line) + 1;
       // A last line without its newline is still being written: it is read again next time.
-      if (next <= size) read.end = next;
+      if (size === undefined || next <= size) read.end = next;
       offset = next;
       if (line.length > MAX_LINE || !keep(line)) continue;
       try { const row = JSON.parse(line); if (row && typeof row === 'object') yield row; } catch { /* A partial last line is skipped. */ }
     }
   } finally {
-    // Closing readline leaves its file open; a search that stops early must close it too.
+    // Closing readline leaves its input open; a search that stops early must close it too.
     lines.close();
     input.destroy();
   }

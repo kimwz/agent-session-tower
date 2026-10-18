@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { zstdCompressSync } from 'node:zlib';
 import { SessionService } from '../../../server/sessions/service.js';
 import { walk } from '../../../server/sessions/parser.js';
-import { openTranscript } from '../../../server/sessions/transcript-file.js';
+import { openTranscript, transcriptChunks } from '../../../server/sessions/transcript-file.js';
 import { transcriptMentions } from '../../../server/worktrees/transcripts.js';
 import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
 
@@ -131,7 +131,7 @@ test('an archived original retention keeps stays out of the list after Codex com
   assert.equal(service.retentionRecords().records.length, 0);
 });
 
-test('the worktree scan goes on from where it ended in a compressed transcript, characters of any width included', async t => {
+test('the worktree scan goes on where it ended in a JSONL, and reads a compressed transcript from its start, characters of any width included', async t => {
   const { rollout } = await fixture(t);
   const add = (path: string) => JSON.stringify(message('assistant', `만들었습니다 — git worktree add ${path}`, at(5))) + '\n';
   const text = content + add('/work/wt-한글') + add('/work/wt-two');
@@ -141,7 +141,8 @@ test('the worktree scan goes on from where it ended in a compressed transcript, 
     const first = await transcriptMentions(file, ['wt-한글']);
     assert.deepEqual([...first.found], ['wt-한글']);
     const rest = await transcriptMentions(file, ['wt-한글', 'wt-two'], first.end);
-    assert.deepEqual([...rest.found], ['wt-two']);
+    // A compressed transcript may have been replaced whole since: a place in it is not kept.
+    assert.deepEqual([...rest.found], file === rollout ? ['wt-two'] : ['wt-한글', 'wt-two']);
     assert.equal((await transcriptMentions(file, ['nothing'], rest.end)).end, Buffer.byteLength(text));
   }
   const plain = await transcriptMentions(rollout, ['wt-한글']), zipped = await transcriptMentions(`${rollout}.zst`, ['wt-한글']);
@@ -161,4 +162,18 @@ test('a cold bundle of a compressed transcript previews the JSONL it holds', asy
   assert.deepEqual({ text: whole.text, truncated: whole.truncated }, { text: content, truncated: false });
   const part = await archive.read(manifest.id, manifest.files[0]!.name, 40);
   assert.deepEqual({ text: part.text, truncated: part.truncated }, { text: content.slice(0, 40), truncated: true });
+});
+
+test('one pass over a compressed transcript comes in small chunks, whatever its size', async t => {
+  const { rollout } = await fixture(t);
+  // A pass hands its chunks to readline, which makes each a string: one chunk of a large transcript would not fit.
+  const text = content.repeat(4000);
+  await compress(rollout, text);
+  const sizes: number[] = [];
+  for await (const chunk of transcriptChunks(`${rollout}.zst`)) sizes.push(chunk.length);
+  assert.equal(sizes.reduce((sum, size) => sum + size, 0), Buffer.byteLength(text));
+  assert.ok(sizes.length > 1 && Math.max(...sizes) <= 128 * 1024);
+  const middle: Buffer[] = [];
+  for await (const chunk of transcriptChunks(`${rollout}.zst`, 100, 300_000)) middle.push(chunk);
+  assert.equal(Buffer.concat(middle).toString(), Buffer.from(text).subarray(100, 300_000).toString());
 });

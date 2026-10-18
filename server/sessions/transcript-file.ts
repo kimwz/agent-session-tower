@@ -16,8 +16,6 @@ export interface TranscriptFile {
   /** Bytes of the JSONL content. */
   readonly size: number;
   read(buffer: Buffer, offset: number, length: number, position: number): Promise<{ bytesRead: number }>;
-  /** The content from `start` to the end. */
-  stream(start: number): Readable;
   close(): Promise<void>;
 }
 
@@ -43,8 +41,9 @@ function remember(key: string, content: Buffer): void {
 const CHUNK = 128 * 1024;
 
 /**
- * The content from `from` to `end` (or to the end), in chunks, for one pass from start to end: a compressed transcript
- * is decompressed as it is read and never held whole, so the scan of hundreds of them stays small.
+ * The content from `from` to `end` (or to the end), in chunks of at most 128 KiB, for one pass from start to end: a
+ * compressed transcript is decompressed as it is read and never held whole, so a pass over hundreds of them, or one of
+ * any size, stays small.
  */
 export async function* transcriptChunks(path: string, from = 0, end?: number): AsyncGenerator<Buffer> {
   if (compressedTranscript(path)) {
@@ -57,7 +56,6 @@ export async function* transcriptChunks(path: string, from = 0, end?: number): A
         position += chunk.length;
         if (data.length) yield data;
         if (end !== undefined && position >= end) break;
-        if (position > MAX_CONTENT) throw new Error('Compressed transcript exceeds the content limit.');
       }
     } finally { input.destroy(); output.destroy(); }
     return;
@@ -75,14 +73,13 @@ export async function* transcriptChunks(path: string, from = 0, end?: number): A
   } finally { await file.close(); }
 }
 
-/** `keep: false` reads a compressed transcript without keeping it: a pass over many of them would push out the rest. */
-export async function openTranscript(path: string, options: { keep?: boolean } = {}): Promise<TranscriptFile> {
+/** For reads by position (a page from the end, a search going on): a compressed transcript is held whole, and kept. */
+export async function openTranscript(path: string): Promise<TranscriptFile> {
   const handle = await open(path, 'r');
   if (!compressedTranscript(path)) {
     try {
       const { size } = await handle.stat();
-      return { size, read: (buffer, offset, length, position) => handle.read(buffer, offset, length, position),
-        stream: start => start < size ? createReadStream(path, { start, end: size - 1 }) : Readable.from([]), close: () => handle.close() };
+      return { size, read: (buffer, offset, length, position) => handle.read(buffer, offset, length, position), close: () => handle.close() };
     } catch (error) { await handle.close(); throw error; }
   }
   let content: Buffer;
@@ -100,13 +97,12 @@ export async function openTranscript(path: string, options: { keep?: boolean } =
         void pending.finally(() => decompressing.delete(key)).catch(() => {});
       }
       content = await pending;
-      if (options.keep !== false && !cache.has(key)) remember(key, content);
+      if (!cache.has(key)) remember(key, content);
     }
   } finally { await handle.close(); }
   return {
     size: content.length,
     read: async (buffer, offset, length, position) => ({ bytesRead: position >= content.length ? 0 : content.copy(buffer, offset, position, Math.min(content.length, position + length)) }),
-    stream: start => Readable.from(start < content.length ? [content.subarray(start)] : [], { objectMode: false }),
     close: async () => {},
   };
 }
