@@ -21,6 +21,7 @@ Tower's todo tools (\`todos_list\`, \`todos_add\`, \`todos_complete\` and the ot
 
 - Use them when the owner asks about their tasks or todos (할 일), or asks you to note, schedule, complete or follow up on one.
 - \`todos_add\` takes the task as the owner would type it (\`견적 회신 내일 오후 3시 #프로젝트 p1\`); \`todos_complete\` with \`next\` completes one and adds the task that follows it.
+- When you report work on a todo whose result can be seen, and you have real screenshots or a short recording of it, attach them with \`todos_comment\`'s \`files\` (absolute paths): the owner, usually remote, sees and plays them in the comment, where a local path does not open. Before and after when you have both; never make up a "before". It is optional.
 
 ## Follow the owner's skills
 

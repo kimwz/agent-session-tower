@@ -47,20 +47,21 @@ async function atOffset<T>(json: (res: ServerResponse, status: number, body: unk
 }
 
 /**
- * Sends an attachment, or the byte range asked for. Always as a download that cannot run in Tower's origin, except an
- * image asked for inline whose bytes are a PNG, JPEG, GIF or WebP.
+ * Sends an attachment, or the byte range asked for. Always as a download that cannot run in Tower's origin, except one
+ * asked for inline that can be shown (see TodoFiles.openFile): an image whose bytes are one, or video or audio to play.
  */
 async function sendFile(req: IncomingMessage, res: ServerResponse, files: NonNullable<TodoBackend['files']>, id: string, inline: boolean, json: (res: ServerResponse, status: number, body: unknown) => void): Promise<void> {
-  const { file, handle, image } = await files.openFile(id, inline);
+  const opened = await files.openFile(id, inline);
+  const { file, handle } = opened;
   try {
     const name = encodeURIComponent(file.name).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
     const wanted = byteRange(req.headers.range, file.size);
     if (wanted === null) { res.setHeader('Content-Range', `bytes */${file.size}`); json(res, 416, { error: '요청한 범위가 파일 밖입니다.' }); return; }
     const { start, end } = wanted ?? { start: 0, end: file.size - 1 };
     res.writeHead(wanted ? 206 : 200, {
-      'Content-Type': image ?? 'application/octet-stream', 'Content-Length': end - start + 1, 'Accept-Ranges': 'bytes',
+      'Content-Type': opened.inline ?? 'application/octet-stream', 'Content-Length': end - start + 1, 'Accept-Ranges': 'bytes',
       ...(wanted ? { 'Content-Range': `bytes ${start}-${end}/${file.size}` } : {}),
-      'Content-Disposition': `${image ? 'inline' : 'attachment'}; filename="attachment"; filename*=UTF-8''${name}`,
+      'Content-Disposition': `${opened.inline ? 'inline' : 'attachment'}; filename="attachment"; filename*=UTF-8''${name}`,
       // The owner's browser may keep it; nothing between may.
       'Cache-Control': 'private, max-age=3600', 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "sandbox; default-src 'none'; frame-ancestors 'none'",
     });

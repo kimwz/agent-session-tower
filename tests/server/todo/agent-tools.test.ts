@@ -1,9 +1,10 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TowerError } from '../../../shared/errors.js';
+import { TodoFiles } from '../../../server/todo/files.js';
 import { TodoStore } from '../../../server/todo/store.js';
 import { callTodoTool, TODO_TOOL_NAMES, todoToolList } from '../../../server/todo/agent-tools.js';
 
@@ -107,7 +108,8 @@ test('update changes fields and place in one request; recurrence and labels are 
 test('comments, deletes, and refusals come back as errors with their reason; nothing half-applied', async t => {
   const { call, store } = await fixture(t);
   const item = call('todos_add', { text: 'Call' }).added;
-  call('todos_comment', { id: item.id, body: '**Tomorrow** morning' });
+  await call('todos_comment', { id: item.id, body: '**Tomorrow** morning' });
+  await assert.rejects(call('todos_comment', { id: 'missing', body: 'x' }), (error: unknown) => error instanceof TowerError && error.kind === 'not-found');
   assert.equal(call('todos_get', { id: item.id }).comments[0].body, '**Tomorrow** morning');
   const revision = store.revision();
   assert.throws(() => call('todos_apply', { ops: [{ op: 'task.update', id: item.id, patch: { content: 'x' } }, { op: 'task.update', id: 'missing', patch: { content: 'y' } }] }),
@@ -160,4 +162,41 @@ test('a sub-task goes where its parent is; a long discussion comes back as its l
   assert.equal(detail.subtasks.length, 1);
   assert.equal(call('todos_get', { id: parent.id, comment: 'c54' }).comment.body.length, 3000, 'a cut comment can be read whole');
   assert.throws(() => call('todos_get', { id: parent.id, comment: 'nope' }), /not on this task/);
+});
+
+test('a comment carries screenshots and recordings from this computer, every path checked before the comment is made', async t => {
+  const { store, call } = await fixture(t);
+  const dir = await mkdtemp(join(tmpdir(), 'tower-todo-tool-files-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const files = new TodoFiles(dir, store);
+  await files.start();
+  const calls = { overview: () => store.overview(), detail: (id: string) => store.detail(id), completed: (input: Parameters<TodoStore['completed']>[0]) => store.completed(input),
+    search: (query: string, input: Parameters<TodoStore['search']>[1]) => store.search(query, input), apply: (request: Parameters<TodoStore['apply']>[0]) => store.apply(request),
+    attachFile: async (input: { taskId: string; commentId: string | null; path: string }) => (await files.attachLocal(input)).file };
+  const withFiles = (args: Record<string, unknown>) => callTodoTool(calls, 'todos_comment', args, { now }) as Promise<any>;
+  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]), Buffer.from('IHDR'), Buffer.alloc(16, 1)]);
+  await writeFile(join(dir, 'before.png'), png);
+  await writeFile(join(dir, 'after.mp4'), Buffer.from('\0\0\0\x18ftypmp42 recording'));
+  await writeFile(join(dir, 'notes.txt'), 'notes');
+  const item = call('todos_add', { text: 'Header' }).added;
+
+  await assert.rejects(withFiles({ id: item.id, body: 'Done', files: [join(dir, 'before.png'), join(dir, 'notes.txt')] }), /only screenshots/);
+  await assert.rejects(withFiles({ id: item.id, body: 'Done', files: ['before.png'] }), /absolute path/);
+  await assert.rejects(call('todos_comment', { id: item.id, body: 'Done', files: [join(dir, 'before.png')] }), /cannot be kept/, 'a store without files says so');
+  assert.equal(store.detail(item.id).comments.length, 0, 'no comment while a file is wrong');
+
+  const result = await withFiles({ id: item.id, body: '전/후', files: [join(dir, 'before.png'), join(dir, 'after.mp4')] });
+  assert.deepEqual(result.attached.map((file: { name: string }) => file.name), ['before.png', 'after.mp4']);
+  assert.equal(result.failed, undefined);
+  const detail = call('todos_get', { id: item.id });
+  assert.deepEqual(detail.files.map((file: { name: string; commentId: string }) => [file.name, file.commentId]), [['before.png', result.commented.id], ['after.mp4', result.commented.id]]);
+  assert.deepEqual(store.detail(item.id).files.map(file => file.mimeType), ['image/png', 'video/mp4']);
+  assert.deepEqual(Object.keys(await withFiles({ id: item.id, body: 'No files' })), ['commented'], 'without files the answer is as before');
+  // A file that fails once the comment is made is reported, and the comment and the other files stay.
+  const failing = { ...calls, attachFile: async (input: { taskId: string; commentId: string | null; path: string }) => input.path.endsWith('.mp4')
+    ? Promise.reject(new TowerError('storage-full', 'disk full')) : (await files.attachLocal(input)).file };
+  const partial = await callTodoTool(failing, 'todos_comment', { id: item.id, body: 'Partly', files: [join(dir, 'before.png'), join(dir, 'after.mp4')] }, { now }) as any;
+  assert.deepEqual(partial.attached.map((file: { name: string }) => file.name), ['before.png']);
+  assert.deepEqual(partial.failed, [{ path: join(dir, 'after.mp4'), error: 'disk full' }]);
+  assert.ok(store.detail(item.id).comments.some(comment => comment.id === partial.commented.id));
 });

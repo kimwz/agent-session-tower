@@ -2,7 +2,7 @@ import { useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode }
 import { Download, FileText, Paperclip, RotateCcw, Trash2, TriangleAlert, X } from 'lucide-react';
 import type { TodoFile } from '../../../../shared/todo/types';
 import { translate as t } from '../../i18n/i18n';
-import { isPreviewable, sizeLabel, type UploadJob } from './upload';
+import { isPreviewable, playable, sizeLabel, type UploadJob } from './upload';
 
 /** Attachments of a task's description or of a comment, the uploads going to it, and the ways to add files. */
 
@@ -10,22 +10,30 @@ export const fileUrl = (file: Pick<TodoFile, 'id'>, inline = false) => `/api/tod
 
 export function AttachmentList({ files, onDelete }: { files: readonly TodoFile[]; onDelete?: (file: TodoFile) => void }) {
   if (!files.length) return null;
-  const images = files.filter(isPreviewable), others = files.filter(file => !isPreviewable(file));
+  const images = files.filter(isPreviewable), media = files.filter(file => playable(file)), others = files.filter(file => !isPreviewable(file) && !playable(file));
+  const tools = (file: TodoFile) => <>
+    <a className="icon-button" href={fileUrl(file)} download={file.name} aria-label={t('“{0}” 내려받기', { 0: file.name })}><Download size={13} /></a>
+    {onDelete && <button type="button" className="icon-button" aria-label={t('“{0}” 삭제', { 0: file.name })} onClick={() => onDelete(file)}><Trash2 size={13} /></button>}
+  </>;
   return <div className="todo-files">
     {images.length > 0 && <ul className="todo-file-thumbs">{images.map(file => <li key={file.id}>
       <a href={fileUrl(file, true)} target="_blank" rel="noreferrer noopener" title={file.name}><img src={fileUrl(file, true)} alt={file.name} loading="lazy" /></a>
-      <span className="todo-file-tools">
-        <a className="icon-button" href={fileUrl(file)} download={file.name} aria-label={t('“{0}” 내려받기', { 0: file.name })}><Download size={13} /></a>
-        {onDelete && <button type="button" className="icon-button" aria-label={t('“{0}” 삭제', { 0: file.name })} onClick={() => onDelete(file)}><Trash2 size={13} /></button>}
-      </span>
+      <span className="todo-file-tools">{tools(file)}</span>
+    </li>)}</ul>}
+    {media.length > 0 && <ul className="todo-file-media">{media.map(file => <li key={file.id}>
+      {playable(file) === 'video'
+        ? <video controls playsInline preload="metadata" src={fileUrl(file, true)} aria-label={file.name} />
+        : <audio controls preload="metadata" src={fileUrl(file, true)} aria-label={file.name} />}
+      <div className="todo-file-media-line">
+        <span className="todo-file-name" title={file.name}>{file.name}</span><span className="todo-file-size">{sizeLabel(file.size)}</span>{tools(file)}
+      </div>
     </li>)}</ul>}
     {others.length > 0 && <ul className="todo-file-rows">{others.map(file => <li key={file.id} className={file.missing ? 'missing' : ''}>
       {file.missing ? <TriangleAlert size={14} /> : <FileText size={14} />}
       {file.missing ? <span className="todo-file-name" title={file.name}>{file.name}</span>
         : <a className="todo-file-name" href={fileUrl(file)} download={file.name} title={file.name}>{file.name}</a>}
       <span className="todo-file-size">{file.missing ? t('백업에서 찾을 수 없음') : sizeLabel(file.size)}</span>
-      {!file.missing && <a className="icon-button" href={fileUrl(file)} download={file.name} aria-label={t('“{0}” 내려받기', { 0: file.name })}><Download size={13} /></a>}
-      {onDelete && <button type="button" className="icon-button" aria-label={t('“{0}” 삭제', { 0: file.name })} onClick={() => onDelete(file)}><Trash2 size={13} /></button>}
+      {file.missing ? onDelete && <button type="button" className="icon-button" aria-label={t('“{0}” 삭제', { 0: file.name })} onClick={() => onDelete(file)}><Trash2 size={13} /></button> : tools(file)}
     </li>)}</ul>}
   </div>;
 }

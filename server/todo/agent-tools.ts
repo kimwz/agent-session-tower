@@ -5,8 +5,9 @@ import { completeOp, liveProjectIds, quickAddOps, type QuickAddDraft } from '../
 import { addDays, formatDate } from '../../shared/todo/dates.js';
 import { labelName, MAX_TODO_OPS, TodoOpSchema, TodoRequestSchema, type TodoOp } from '../../shared/todo/ops.js';
 import { parseQuickAdd, type QuickAddResult } from '../../shared/todo/quick-add.js';
-import type { TodoChanges, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import type { TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { TowerError } from '../../shared/errors.js';
+import { checkLocalMedia, LOCAL_MEDIA } from './files.js';
 
 /**
  * The Todo tools every agent Tower runs gets (server `tower_todos`, owner's order of 2026-10-17: reading and changing
@@ -27,6 +28,8 @@ export interface TodoToolStore {
   completed(input: { projectId?: string; labelId?: string; before?: string; limit?: number }): TodoCompletedPage;
   search(query: string, input: { completed?: boolean; limit?: number }): TodoTask[];
   apply(request: z.infer<typeof TodoRequestSchema>): TodoChanges;
+  /** Attaches a file on this computer to a task or comment (TodoFiles.attachLocal); absent where files cannot be kept. */
+  attachFile?(input: { taskId: string; commentId: string | null; path: string }): Promise<TodoFile>;
 }
 
 interface Context { store: TodoToolStore; today: string; newId: () => string }
@@ -62,6 +65,8 @@ const NextInput = AddInput;
 /** Comments a task's detail carries (the latest); together they stay well under what a tool answer may hold. */
 const MAX_COMMENTS = 50;
 const MAX_COMMENT_CHARS = 2000;
+/** Files one comment takes from an agent. */
+const MAX_COMMENT_FILES = 10;
 /** Every op the page can send, with its fields, read from the schema itself so a new op shows here by itself. */
 const OP_SHAPES = TodoOpSchema.options.map(option => option.shape as Record<string, z.ZodType>);
 const OP_NAMES = OP_SHAPES.map(shape => (shape.op as z.ZodLiteral<string>).value) as [string, ...string[]];
@@ -330,11 +335,23 @@ const TOOLS: Tool[] = [
     },
   }),
   tool({
-    name: 'todos_comment', description: 'Adds a comment (Markdown) to a task.', input: z.object({ id, body: z.string().trim().min(1).max(15_000) }).strict(),
-    run: ({ id: taskId, body }, context) => {
+    name: 'todos_comment',
+    description: 'Adds a comment (Markdown) to a task, with files from this computer shown in it: screenshots, screen recordings or audio, which the owner sees and plays in the comment from any device. When you report work on a todo whose result can be seen and you have real captures of it, attach them: before and after screenshots, or a short recording (H.264 mp4 plays everywhere). It is optional; attach only what you actually captured, never a made-up "before", and say so when you only have the "after".',
+    input: z.object({ id, body: z.string().trim().min(1).max(15_000),
+      files: z.array(z.string().min(1).max(4096)).max(MAX_COMMENT_FILES).optional()
+        .describe(`Absolute paths on this computer, at most ${MAX_COMMENT_FILES}, 100MB each: ${LOCAL_MEDIA}. Images show first, then recordings and audio, each kind in this order.`) }).strict(),
+    run: async ({ id: taskId, body, files = [] }, context) => {
+      if (files.length && !context.store.attachFile) throw new TowerError('unavailable', 'Attachments cannot be kept on this computer now; comment without files.');
+      // Every file is checked first, so a wrong path is told before the comment is made.
+      for (const path of files) await checkLocalMedia(path);
       const commentId = context.newId();
       apply(context, [{ op: 'comment.create', id: commentId, taskId, body }]);
-      return { commented: { id: commentId, taskId } };
+      const attached: { id: string; name: string; size: number }[] = [], failed: { path: string; error: string }[] = [];
+      for (const path of files) {
+        try { const file = await context.store.attachFile!({ taskId, commentId, path }); attached.push({ id: file.id, name: file.name, size: file.size }); }
+        catch (error) { failed.push({ path, error: error instanceof Error ? error.message : String(error) }); }
+      }
+      return { commented: { id: commentId, taskId }, ...(files.length ? { attached } : {}), ...(failed.length ? { failed } : {}) };
     },
   }),
   tool({

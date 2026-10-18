@@ -168,6 +168,16 @@ test('attachments upload in pieces apart from the change budget, and come back a
   assert.match(shown.headers.get('content-disposition') ?? '', /^inline;/);
   assert.equal(shown.headers.get('x-content-type-options'), 'nosniff');
   await shown.arrayBuffer();
+  // A recording plays in the page, from any point.
+  const recording = Buffer.from('\0\0\0\x18ftypmp42 a short recording');
+  const video = await upload(recording, 'after.mp4', 'video/mp4');
+  const played = await fetch(`${base}/api/todos/files/${video.id}?inline=1`, { headers: { Range: 'bytes=4-7' } });
+  assert.equal(played.status, 206);
+  assert.equal(played.headers.get('content-type'), 'video/mp4');
+  assert.match(played.headers.get('content-disposition') ?? '', /^inline;/);
+  assert.equal(played.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(played.headers.get('content-security-policy') ?? '', /sandbox/);
+  assert.equal(Buffer.from(await played.arrayBuffer()).toString(), 'ftyp');
 
   store.apply({ requestId: randomUUID(), ops: [{ op: 'file.delete', id: file.id }] });
   assert.equal((await fetch(`${base}/api/todos/files/${file.id}`)).status, 404);
