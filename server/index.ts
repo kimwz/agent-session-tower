@@ -274,6 +274,11 @@ async function main() {
       changed();
       return Object.keys(agents).length ? { ...changes, revision: todos.revision(), agents } : changes;
     },
+    attachFile: async (input: { taskId: string; commentId: string | null; path: string }) => {
+      const attached = await todoFiles.attachLocal(input);
+      changed();
+      return attached.file;
+    },
   };
   // The Todo tools every turn Tower runs gets (todo/agent-mcp.ts) reach the web with this key. Without one (a state
   // folder it cannot write) only those tools are unavailable; Tower starts all the same.
@@ -565,7 +570,7 @@ async function main() {
         appendUpload: (id, offset, chunks) => todoFiles.appendUpload(id, offset, chunks),
         completeUpload: async id => { const attached = await todoFiles.completeUpload(id); changed(); return attached; },
         cancelUpload: id => todoFiles.cancelUpload(id),
-        openFile: (id, image) => todoFiles.openFile(id, image),
+        openFile: (id, inline) => todoFiles.openFile(id, inline),
       },
     },
     enqueue: async (id, prompt, attachments, context) => {

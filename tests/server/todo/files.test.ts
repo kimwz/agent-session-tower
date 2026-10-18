@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { link, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, open, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -235,13 +235,13 @@ test('an attachment opens only while it shows, and as an image only when its byt
   const image = await upload('t', PNG, { name: 'shot.png', mimeType: 'image/png' });
   const fake = await upload('t', Buffer.from('<script>alert(1)</script> padded to look long enough'), { name: 'fake.png', mimeType: 'image/png' });
   const opened = await files.openFile(image.file.id, true);
-  assert.equal(opened.image, 'image/png');
+  assert.equal(opened.inline, 'image/png');
   await opened.handle.close();
   const pretending = await files.openFile(fake.file.id, true);
-  assert.equal(pretending.image, undefined);
+  assert.equal(pretending.inline, undefined);
   await pretending.handle.close();
   const plain = await files.openFile(image.file.id);
-  assert.equal(plain.image, undefined, 'only when asked');
+  assert.equal(plain.inline, undefined, 'only when asked');
   await plain.handle.close();
   apply({ op: 'file.delete', id: image.file.id });
   await assert.rejects(files.openFile(image.file.id), (error: unknown) => kind(error) === 'not-found');
@@ -399,4 +399,54 @@ test('two restores in one millisecond each keep their own copy of the file befor
   const second = store.restoreData(TODO_SCHEMA_STEP, tables);
   assert.notEqual(first, second);
   assert.equal((await readdir(dir)).filter(name => name.startsWith('todo-restore-before-')).length, 2);
+});
+
+test('an agent attaches screenshots and recordings from this computer as uploads, and nothing else', async t => {
+  const { dir, apply, store, files } = await fixture(t);
+  apply({ op: 'task.create', id: 't', content: 'Task' }, { op: 'comment.create', id: 'c', taskId: 't', body: 'Done' });
+  const shots = join(dir, 'shots');
+  await mkdir(shots);
+  const recording = Buffer.concat([Buffer.from('\0\0\0\x18ftypmp42'), Buffer.alloc(UPLOAD_CHUNK_BYTES + 10, 7)]);
+  await writeFile(join(shots, 'after.png'), PNG);
+  await writeFile(join(shots, 'after.mp4'), recording);
+  const image = await files.attachLocal({ taskId: 't', commentId: 'c', path: join(shots, 'after.png') });
+  assert.deepEqual([image.file.name, image.file.mimeType, image.file.commentId, image.file.sha256], ['after.png', 'image/png', 'c', sha(PNG)]);
+  const video = await files.attachLocal({ taskId: 't', commentId: 'c', path: join(shots, 'after.mp4') });
+  assert.deepEqual([video.file.mimeType, video.file.size, video.file.sha256], ['video/mp4', recording.length, sha(recording)], 'read in pieces, whole');
+  assert.deepEqual(store.detail('t').files.map(file => file.id), [image.file.id, video.file.id]);
+
+  const refused = async (path: string, pattern: RegExp, message?: string) =>
+    assert.rejects(files.attachLocal({ taskId: 't', commentId: 'c', path }), pattern, message);
+  await writeFile(join(shots, 'notes.txt'), 'secret');
+  await refused(join(shots, 'notes.txt'), /only screenshots/);
+  await writeFile(join(shots, 'before.bmp'), 'BM');
+  await refused(join(shots, 'before.bmp'), /only screenshots/, 'an image a comment cannot preview');
+  await writeFile(join(shots, 'fake.png'), 'not an image at all, only words');
+  await refused(join(shots, 'fake.png'), /not the image its name says/);
+  await refused('shots/after.png', /absolute path/);
+  await symlink(join(shots, 'after.png'), join(shots, 'linked.png'));
+  await refused(join(shots, 'linked.png'), /symlink is not followed/);
+  await refused(join(shots, 'missing.mp4'), /no readable file/);
+  const huge = await open(join(shots, 'huge.mp4'), 'w');
+  await huge.truncate(TODO_FILE_MAX_BYTES + 1); await huge.close();
+  await assert.rejects(files.attachLocal({ taskId: 't', commentId: 'c', path: join(shots, 'huge.mp4') }), (error: unknown) => kind(error) === 'too-large');
+  apply({ op: 'comment.delete', id: 'c' });
+  await assert.rejects(files.attachLocal({ taskId: 't', commentId: 'c', path: join(shots, 'after.png') }), (error: unknown) => kind(error) === 'not-found');
+  assert.deepEqual(await readdir(join(dir, 'todo-uploads')), [], 'a refused attachment leaves no upload behind');
+});
+
+test('video and audio open inline as their type; anything else stays a download', async t => {
+  const { apply, files, upload } = await fixture(t);
+  apply({ op: 'task.create', id: 't', content: 'Task' });
+  const movie = await upload('t', Buffer.from('\0\0\0\x14ftypqt  '), { name: 'phone.mov', mimeType: 'video/quicktime' });
+  const html = await upload('t', Buffer.from('<html>'), { name: 'page.html', mimeType: 'text/html' });
+  const inline = await files.openFile(movie.file.id, true);
+  assert.equal(inline.inline, 'video/quicktime');
+  await inline.handle.close();
+  const asked = await files.openFile(html.file.id, true);
+  assert.equal(asked.inline, undefined);
+  await asked.handle.close();
+  const plain = await files.openFile(movie.file.id);
+  assert.equal(plain.inline, undefined, 'only when asked');
+  await plain.handle.close();
 });

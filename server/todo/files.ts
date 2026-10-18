@@ -1,10 +1,11 @@
 import { constants, type Stats } from 'node:fs';
 import { lstat, mkdir, open, readdir, rename, rm, statfs, type FileHandle } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
 import { UPLOAD_CHUNK_BYTES, normalizeAttachmentMimeType } from '../../shared/attachments.js';
 import { TowerError } from '../../shared/errors.js';
 import { TODO_FILE_MAX_BYTES, type TodoChanges, type TodoFile } from '../../shared/todo/types.js';
+import { isWorkspaceMediaType, workspaceMedia } from '../../shared/workspace-media.js';
 import { rasterMime } from '../stores/attachments.js';
 import type { TodoStore } from './store.js';
 
@@ -31,8 +32,10 @@ const INCOMING = '.incoming-';
 
 export interface TodoUploadStart { taskId: string; commentId?: string | null; name: string; mimeType: string; size: number }
 export interface TodoAttached { file: TodoFile; changes: TodoChanges }
-/** An attachment opened to send. `image` is its image type when asked for one and its bytes are one. */
-export interface OpenTodoFile { file: TodoFile; handle: FileHandle; image?: string }
+/** An attachment opened to send. `inline` is the type to show it as, when asked for one and it can be shown. */
+export interface OpenTodoFile { file: TodoFile; handle: FileHandle; inline?: string }
+/** A file on this computer an agent attaches (see `checkLocalMedia`). */
+export interface LocalMedia { name: string; mimeType: string; size: number }
 
 interface Manifest {
   id: string; fileId: string; taskId: string; commentId: string | null; name: string; mimeType: string; size: number; touched: number;
@@ -208,6 +211,31 @@ export class TodoFiles {
     });
   }
 
+  /**
+   * Attaches a file on this computer, as an upload of its contents (see `checkLocalMedia` for what it may be): how an
+   * agent puts its screenshots and recordings on a comment.
+   */
+  async attachLocal(input: { taskId: string; commentId: string | null; path: string }): Promise<TodoAttached> {
+    this.usable();
+    const { media, handle } = await openLocalMedia(input.path);
+    let id: string | undefined;
+    try {
+      ({ id } = await this.startUpload({ taskId: input.taskId, commentId: input.commentId, ...media }));
+      for (let offset = 0; offset < media.size;) {
+        const piece = Buffer.alloc(Math.min(UPLOAD_CHUNK_BYTES, media.size - offset));
+        const { bytesRead } = await handle.read(piece, 0, piece.length, offset);
+        if (!bytesRead) throw invalid(`${input.path} changed while it was read.`);
+        offset = (await this.appendUpload(id, offset, once(piece.subarray(0, bytesRead)))).offset;
+      }
+      return await this.completeUpload(id);
+    } finally {
+      await handle.close();
+      // Nobody resumes or repeats this upload, so its record goes at once, done or not. best-effort: one left behind is
+      // removed by the cleanup a day later.
+      if (id) await this.cancelUpload(id).catch(() => undefined);
+    }
+  }
+
   /** Puts arrived contents in place as `sha256`, unless a whole copy is there already. */
   private async place(staged: string, sha256: string, size: number): Promise<void> {
     const target = todoFilePath(this.stateDir, sha256);
@@ -223,19 +251,22 @@ export class TodoFiles {
 
   // ---- Serving ---------------------------------------------------------------------------------------
 
-  /** Opens an attachment that shows. With `image`, its bytes are checked for a PNG, JPEG, GIF or WebP signature. */
-  async openFile(id: string, image = false): Promise<OpenTodoFile> {
+  /**
+   * Opens an attachment that shows. With `inline`, says how it can be shown: a PNG, JPEG, GIF or WebP whose bytes are
+   * one, or video or audio of a type the workspace plays (taken from its type, as the workspace does: it is sent with
+   * `nosniff` and a sandbox policy, so other bytes only fail to play).
+   */
+  async openFile(id: string, inline = false): Promise<OpenTodoFile> {
     this.usable();
     const notFound = () => new TowerError('not-found', '첨부 파일을 찾을 수 없습니다.');
     const file = ID.test(id) ? this.store.visibleFile(id) : undefined;
     if (!file) throw notFound();
     const handle = await this.openContent(file.sha256, file.size);
     try {
-      if (!image) return { file, handle };
-      const head = Buffer.alloc(32);
-      const { bytesRead } = await handle.read(head, 0, head.length, 0);
-      const type = rasterMime(head.subarray(0, bytesRead));
-      return { file, handle, ...(type ? { image: type } : {}) };
+      if (!inline) return { file, handle };
+      if (isWorkspaceMediaType(file.mimeType) && !file.mimeType.startsWith('image/')) return { file, handle, inline: file.mimeType };
+      const type = rasterMime(await head(handle));
+      return { file, handle, ...(type ? { inline: type } : {}) };
     } catch (error) { await handle.close(); throw error; }
   }
 
@@ -428,6 +459,49 @@ export class TodoFiles {
     try { return await result; }
     finally { if (this.locks.get(id) === result) this.locks.delete(id); }
   }
+}
+
+async function* once(piece: Buffer) { yield piece; }
+
+const RASTER = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+/** The names of the files an agent can attach, as its tools tell it. */
+export const LOCAL_MEDIA = 'png, jpg, gif, webp, mp4, m4v, webm, mov, ogv, mp3, m4a, aac, wav, ogg, oga, opus, flac';
+
+/** The first bytes of a file, enough for `rasterMime`. */
+async function head(handle: FileHandle): Promise<Buffer> {
+  const bytes = Buffer.alloc(32);
+  const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+  return bytes.subarray(0, bytesRead);
+}
+
+/**
+ * Opens a file on this computer that an agent attaches: an absolute path to a plain file (not through a symlink) of at
+ * most 100MB that is a screenshot (PNG, JPEG, GIF or WebP, whose bytes must be one), a recording or audio, by its name
+ * as the workspace plays them. Agents run as the owner here; keeping to media keeps this to the evidence of their work.
+ */
+async function openLocalMedia(path: string): Promise<{ media: LocalMedia; handle: FileHandle }> {
+  if (typeof path !== 'string' || !isAbsolute(path)) throw invalid(`${path}: give an absolute path on this computer.`);
+  const media = workspaceMedia(path);
+  // Images are the ones a comment previews; the workspace's other image types would only be downloads.
+  if (!media || (media.kind === 'image' && !RASTER.includes(media.type))) throw invalid(`${path}: only screenshots, screen recordings and audio can be attached (${LOCAL_MEDIA}).`);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(error => {
+    if (['ENOENT', 'ELOOP', 'ENOTDIR', 'EACCES', 'EPERM'].includes((error as NodeJS.ErrnoException).code ?? '')) throw invalid(`${path}: no readable file there (a symlink is not followed).`);
+    throw error;
+  });
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) throw invalid(`${path}: not a plain file.`);
+    if (info.size > TODO_FILE_MAX_BYTES) throw new TowerError('too-large', `${path}: a file is at most 100MB.`);
+    if (media.kind === 'image' && rasterMime(await head(handle)) !== media.type) throw invalid(`${path}: its contents are not the image its name says.`);
+    return { media: { name: fileName(basename(path)), mimeType: media.type, size: info.size }, handle };
+  } catch (error) { await handle.close(); throw error; }
+}
+
+/** Throws unless `path` is a file an agent can attach (see `openLocalMedia`); what it would attach. */
+export async function checkLocalMedia(path: string): Promise<LocalMedia> {
+  const { media, handle } = await openLocalMedia(path);
+  await handle.close();
+  return media;
 }
 
 function storageError(error: unknown): unknown {

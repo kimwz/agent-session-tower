@@ -343,9 +343,17 @@ select.todo-property-value { border:0; background:none; }
 .todo-description-files { display:flex; flex-direction:column; gap:6px; margin:0 0 4px 33px; }
 .todo-description-files > .todo-attach-icon { align-self:flex-start; }
 .todo-files { display:flex; flex-direction:column; gap:8px; }
-.todo-file-thumbs { display:grid; grid-template-columns:repeat(auto-fill, minmax(104px, 1fr)); gap:8px; list-style:none; margin:0; padding:0; }
-.todo-file-thumbs li { position:relative; aspect-ratio:1; overflow:hidden; border:1px solid #243041; border-radius:8px; background:#0e1520; }
-.todo-file-thumbs img { width:100%; height:100%; object-fit:cover; display:block; }
+/* Images keep their shape (a wide screenshot stays readable), each as wide as its height allows. */
+.todo-file-thumbs { display:flex; flex-wrap:wrap; gap:8px; list-style:none; margin:0; padding:0; }
+.todo-file-thumbs li { position:relative; max-width:100%; height:160px; overflow:hidden; border:1px solid #243041; border-radius:8px; background:#0e1520; }
+.todo-file-thumbs a { display:block; height:100%; }
+.todo-file-thumbs img { height:100%; width:auto; max-width:100%; object-fit:contain; display:block; }
+.todo-file-media { display:flex; flex-direction:column; gap:8px; list-style:none; margin:0; padding:0; }
+.todo-file-media li { display:flex; flex-direction:column; overflow:hidden; border:1px solid #243041; border-radius:8px; background:#0e1520; }
+.todo-file-media video { display:block; width:100%; max-height:360px; background:#000; }
+.todo-file-media audio { display:block; width:100%; }
+.todo-file-media-line { display:flex; align-items:center; gap:8px; min-height:32px; padding:0 4px 0 10px; color:#9fb0c5; }
+.todo-file-media-line .icon-button { width:26px; height:26px; }
 .todo-file-tools { position:absolute; right:4px; bottom:4px; display:flex; gap:2px; padding:2px; border-radius:7px; background:#0b1018d9; opacity:0; transition:opacity .12s; }
 .todo-file-thumbs li:hover .todo-file-tools, .todo-file-thumbs li:focus-within .todo-file-tools { opacity:1; }
 .todo-file-tools .icon-button { width:24px; height:24px; }
@@ -522,7 +530,7 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-cal-unscheduled .todo-cal-entry, .todo-cal-unscheduled .todo-cal-item { width:auto; max-width:100%; }
   .todo-layout-switch span { display:none; }
   .todo-description-files { margin-left:0; }
-  .todo-file-thumbs { grid-template-columns:repeat(3, minmax(0, 1fr)); }
+  .todo-file-thumbs li { height:120px; }
   .todo-file-tools { opacity:1; }
 }
 @media (hover:none) {

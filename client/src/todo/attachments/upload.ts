@@ -1,5 +1,6 @@
 import { UPLOAD_CHUNK_BYTES } from '../../../../shared/attachments';
 import { TODO_FILE_MAX_BYTES, type TodoChanges, type TodoFile } from '../../../../shared/todo/types';
+import { isWorkspaceMediaType } from '../../../../shared/workspace-media';
 
 /**
  * Sending one attachment: start an upload, send its bytes in pieces from where the server says it is, then complete
@@ -115,6 +116,9 @@ export async function runUpload(job: UploadJob, io: UploadIO, signal: AbortSigna
 const IMAGE = /^image\/(png|jpeg|gif|webp)$/;
 /** Shown as a thumbnail: an image type the server can send inline (it checks the bytes too). */
 export const isPreviewable = (file: Pick<TodoFile, 'mimeType' | 'missing'>) => !file.missing && IMAGE.test(file.mimeType);
+/** Played in the page: video or audio of a type the server sends inline (as the workspace plays them). */
+export const playable = (file: Pick<TodoFile, 'mimeType' | 'missing'>): 'video' | 'audio' | undefined =>
+  file.missing || !isWorkspaceMediaType(file.mimeType) ? undefined : file.mimeType.startsWith('video/') ? 'video' : file.mimeType.startsWith('audio/') ? 'audio' : undefined;
 
 export function sizeLabel(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
