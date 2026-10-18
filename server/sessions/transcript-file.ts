@@ -75,7 +75,8 @@ export async function* transcriptChunks(path: string, from = 0, end?: number): A
   } finally { await file.close(); }
 }
 
-export async function openTranscript(path: string): Promise<TranscriptFile> {
+/** `keep: false` reads a compressed transcript without keeping it: a pass over many of them would push out the rest. */
+export async function openTranscript(path: string, options: { keep?: boolean } = {}): Promise<TranscriptFile> {
   const handle = await open(path, 'r');
   if (!compressedTranscript(path)) {
     try {
@@ -99,7 +100,7 @@ export async function openTranscript(path: string): Promise<TranscriptFile> {
         void pending.finally(() => decompressing.delete(key)).catch(() => {});
       }
       content = await pending;
-      if (!cache.has(key)) remember(key, content);
+      if (options.keep !== false && !cache.has(key)) remember(key, content);
     }
   } finally { await handle.close(); }
   return {
@@ -108,4 +109,18 @@ export async function openTranscript(path: string): Promise<TranscriptFile> {
     stream: start => Readable.from(start < content.length ? [content.subarray(start)] : [], { objectMode: false }),
     close: async () => {},
   };
+}
+
+/** The first `limit` bytes of compressed content, and whether there is more: for a preview of a stored copy. */
+export async function decompressedPrefix(compressed: Buffer, limit: number): Promise<{ data: Buffer; truncated: boolean }> {
+  const chunks: Buffer[] = []; let bytes = 0;
+  const output = Readable.from([compressed], { objectMode: false }).pipe(createZstdDecompress());
+  try {
+    for await (const chunk of output as AsyncIterable<Buffer>) {
+      chunks.push(chunk); bytes += chunk.length;
+      if (bytes > limit) break;
+    }
+  } finally { output.destroy(); }
+  const data = Buffer.concat(chunks, bytes);
+  return { data: data.subarray(0, limit), truncated: data.length > limit };
 }

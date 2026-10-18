@@ -8,6 +8,7 @@ import { createGzip, createGunzip } from 'node:zlib';
 import { join, relative, resolve, sep } from 'node:path';
 import { readPrivateJson, writePrivateJson } from '../../stores/private-json.js';
 import { privateDirectory, validateOperationId } from './store.js';
+import { compressedTranscript, decompressedPrefix } from '../transcript-file.js';
 import type { RetentionCandidate, RetentionRecord } from './policy.js';
 import type { RetentionManifest, RetentionSourceFile, RetentionJournalEntry } from './types.js';
 
@@ -138,11 +139,14 @@ export class RetentionArchive {
     if (!Number.isSafeInteger(limitBytes) || limitBytes < 1 || limitBytes > 1_048_576) throw new Error('Invalid cold read limit.');
     const manifest = await this.manifest(id); const file = manifest.files.find(file => file.name === name);
     if (!file) throw new Error('Unknown cold payload.');
+    // A transcript Codex compressed is stored as it was: it is read whole and previewed as the JSONL it holds.
+    const compressed = compressedTranscript(file.originalPath);
     const chunks: Buffer[] = []; let captured = 0;
     const actual = await verifiedHash(join(this.directory(id), file.name), file.bytes, chunk => {
-      const count = Math.min(chunk.length, limitBytes - captured); if (count > 0) { chunks.push(Buffer.from(chunk.subarray(0, count))); captured += count; }
+      const count = compressed ? chunk.length : Math.min(chunk.length, limitBytes - captured); if (count > 0) { chunks.push(Buffer.from(chunk.subarray(0, count))); captured += count; }
     });
     if (actual.sha256 !== file.sha256 || actual.bytes !== file.bytes) throw new Error('Cold read verification failed.');
+    if (compressed) { const { data, truncated } = await decompressedPrefix(Buffer.concat(chunks, captured), limitBytes); return { file, text: data.toString('utf8'), truncated }; }
     return { file, text: Buffer.concat(chunks).toString('utf8'), truncated: file.bytes > limitBytes };
   }
   async diskBytes(): Promise<number> {

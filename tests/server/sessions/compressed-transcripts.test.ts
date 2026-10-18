@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { zstdCompressSync } from 'node:zlib';
@@ -8,6 +8,7 @@ import { SessionService } from '../../../server/sessions/service.js';
 import { walk } from '../../../server/sessions/parser.js';
 import { openTranscript } from '../../../server/sessions/transcript-file.js';
 import { transcriptMentions } from '../../../server/worktrees/transcripts.js';
+import { RetentionArchive } from '../../../server/sessions/retention/archive.js';
 
 // Codex's rollout compression worker replaces a rollout it has not touched for a while with `<name>.jsonl.zst` (same
 // mtime) and writes `<name>.jsonl` again when the conversation goes on.
@@ -30,7 +31,7 @@ async function compress(path: string, text = content): Promise<void> {
 }
 
 async function fixture(t: { after: (fn: () => unknown) => void }) {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-compressed-transcripts-'));
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'tower-compressed-transcripts-')));
   const codexHome = join(directory, 'codex'), claudeHome = join(directory, 'claude');
   await Promise.all([mkdir(join(codexHome, 'sessions'), { recursive: true }), mkdir(join(codexHome, 'archived_sessions'), { recursive: true }), mkdir(join(claudeHome, 'projects'), { recursive: true })]);
   const service = new SessionService({ codexHome, claudeHome });
@@ -89,10 +90,10 @@ test('a compressed rollout beside its JSONL is one session, the JSONL; an unchan
   assert.equal(service.list().length, 1);
   assert.equal(service.get(`codex:${id}`)?.filePath, rollout);
   assert.equal(service.get(`codex:${id}`)?.lastMessage, 'And the signup test');
+  assert.deepEqual(await walk(join(rollout, '..'), 6, undefined, { compressed: true }), [rollout]);
   await unlink(`${rollout}.zst`);
   await service.refresh();
   assert.equal(service.list().length, 1);
-  assert.deepEqual(await walk(join(rollout, '..'), 6, undefined, { compressed: true }), [rollout]);
 });
 
 test('compressed transcripts are read from memory, kept while unchanged, and streamed for the worktree scan', async t => {
@@ -145,4 +146,19 @@ test('the worktree scan goes on from where it ended in a compressed transcript, 
   }
   const plain = await transcriptMentions(rollout, ['wt-한글']), zipped = await transcriptMentions(`${rollout}.zst`, ['wt-한글']);
   assert.equal(zipped.end, plain.end);
+});
+
+test('a cold bundle of a compressed transcript previews the JSONL it holds', async t => {
+  const { directory, rollout } = await fixture(t);
+  await compress(rollout);
+  const archive = new RetentionArchive(join(directory, 'bundles'), [join(directory, 'codex', 'sessions')]);
+  await archive.start();
+  const session = { id: `codex:${id}`, nativeId: id, provider: 'codex' as const, title: 'fixture', cwd: '/work/project', project: 'project', status: 'completed' as const, statusReason: '',
+    createdAt: at(0), updatedAt: at(3), lastMessage: '', messageCount: 2, isSubagent: false, resumable: true, filePath: `${rollout}.zst` };
+  const manifest = await archive.create('a'.repeat(64), { rootId: session.id, ids: [session.id], reason: 'explicit-archive', revisions: {} }, [{ session, kind: 'parent' }],
+    [{ path: `${rollout}.zst`, root: join(directory, 'codex', 'sessions'), nativeId: id, provider: 'codex' }]);
+  const whole = await archive.read(manifest.id, manifest.files[0]!.name);
+  assert.deepEqual({ text: whole.text, truncated: whole.truncated }, { text: content, truncated: false });
+  const part = await archive.read(manifest.id, manifest.files[0]!.name, 40);
+  assert.deepEqual({ text: part.text, truncated: part.truncated }, { text: content.slice(0, 40), truncated: true });
 });

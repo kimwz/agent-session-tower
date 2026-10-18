@@ -14,7 +14,8 @@ type Json = Record<string, any>;
  * read of what was appended starts.
  */
 async function* rows(file: string, keep: (line: string) => boolean, from = 0, read: { end: number } = { end: 0 }): AsyncGenerator<Json> {
-  const transcript = await openTranscript(file);
+  // A pass reads every open session's transcript: compressed ones are not kept for it.
+  const transcript = await openTranscript(file, { keep: false });
   const size = transcript.size;
   // A file shorter than where the last read ended was replaced: it is read again from the start.
   if (from > size) from = 0;
