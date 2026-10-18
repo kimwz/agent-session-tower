@@ -15,17 +15,17 @@
 .settings-mark.urgent { background:#f0616d; color:#fff; }
 .settings-dot { flex:none; display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--amber); }
 
-/* When the header gives the canvas its room, the settings button stays where it was. */
-.canvas-only .app-header .header-actions { display:flex; }
-.canvas-only .app-header .header-actions > :not(.settings-entry) { display:none; }
+/* In the compact header (sidebar closed) the settings button stays where it was and is the only action. */
+.sidebar-closed .app-header .header-actions { display:flex; }
+.sidebar-closed .app-header .header-actions > :not(.settings-entry) { display:none; }
 .canvas-only .settings-entry { pointer-events:auto; }
 .canvas-only .settings-button { background:#142030ed; }
 /* The canvas tools line up just left of it, measured, since its width follows the language and its marks; a banner above the canvas keeps them inside it. */
 .canvas-only .canvas-quick-controls { top:max(12px, calc(var(--settings-middle, 28px) - 16px)); right:calc(var(--settings-right, 126px) + 8px); }
 .canvas-only .canvas-zoom-controls { height:32px; padding:2px; }
 .canvas-only .canvas-zoom-controls>button { width:26px; height:26px; }
-/* A canvas too narrow for both drops the tools below the header, as elsewhere. */
-@container canvas-area (max-width:360px) { .canvas-only .canvas-quick-controls { top:60px; right:14px; } }
+/* Tools that would run into the page switch on that line drop below the header (measured in Graph.tsx). */
+.canvas-only .canvas-quick-controls.crowded { top:60px; right:14px; }
 
 .settings-dialog { width:min(980px, calc(100vw - 32px)); height:min(720px, calc(100dvh - 40px)); max-width:none; max-height:none; padding:0; border:1px solid #2c3a4d; border-radius:14px; background:#101722; color:var(--text); overflow:hidden; box-shadow:0 24px 80px #000a; }
 .settings-dialog::backdrop { background:#030812b8; }
