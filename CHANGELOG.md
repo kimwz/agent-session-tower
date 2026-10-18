@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.151.0] - 2026-10-19
+
+- **Codex가 압축한 대화도 목록에 다시 나옵니다.** Codex(0.162 이후)는 한동안 쓰지 않은 대화 기록을 `.jsonl.zst`로 압축합니다. Tower는 `.jsonl`만 읽어서, 압축된 대화가 세션 목록·대화 읽기·검색·worktree 정리와 세션 보관(프로젝트별 최근 20개 유지, 하위 세션 7일)에서 모두 빠졌습니다. 이제 압축된 기록을 풀어 읽어 같은 기준으로 다룹니다. 이어서 대화하면 Codex가 `.jsonl`로 되돌리고, 그 사이 두 파일이 함께 있으면 `.jsonl` 하나만 셉니다.
+- 압축된 기록은 시작할 때 한 번, 바뀌었을 때만 다시 읽습니다. 연 대화는 풀어 둔 내용을 메모리에 최대 256MB까지 두고 다시 씁니다. Tower가 이미 보관한 대화를 Codex가 나중에 압축해도 목록에 다시 나오지 않습니다.
+
 ## [1.150.1] - 2026-10-18
 
 - **세션 보관이 다시 진행됩니다. 완료한 할 일의 이슈 마스터와 그 마스터가 맡긴 세션도 바로 정리됩니다.** Codex(0.162 이후)는 한동안 손대지 않은 보관 대화를 `<이름>.jsonl.zst`로 압축하는데, 자기 기록에는 계속 `<이름>.jsonl`을 적어 둡니다. Tower는 이미 압축 보관한 Codex 대화의 원본이 사라졌다고 보고 보관 점검 전체를 '불완전'으로 멈췄습니다. 그래서 2026-10-14부터 어떤 세션도(Claude 세션 포함) 압축 보관되지 않았습니다. 이제 원본 자리에 수정 시각이 같은 `.zst` 파일이 있으면 Codex가 압축한 같은 원본으로 봅니다. 수정 시각이 다르면 지금처럼 '바뀐 원본'으로 남기고, 두 파일이 모두 없으면 지금처럼 점검을 멈춥니다. 업데이트 후 첫 점검부터 밀려 있던 보관이 이어집니다.
