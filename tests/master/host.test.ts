@@ -182,9 +182,11 @@ test('a page hears the master session\'s status as Tower\'s live state changes, 
   const stream = await fetch(`http://127.0.0.1:${(relay.address() as { port: number }).port}/`);
   const reader = stream.body!.getReader();
   let text = '';
-  const reading = (async () => { for (;;) { const { value, done } = await reader.read(); if (done) return; text += new TextDecoder().decode(value); } })();
+  const decoder = new TextDecoder();
+  const reading = (async () => { for (;;) { const { value, done } = await reader.read(); if (done) return; text += decoder.decode(value, { stream: true }); } })();
   cleanup.push(async () => { await reader.cancel().catch(() => {}); await reading.catch(() => {}); });
-  const overviews = () => text.split('\n').filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)) as MasterStreamEvent)
+  // Whole frames only: the last one may still be arriving.
+  const overviews = () => text.split('\n\n').slice(0, -1).flatMap(frame => frame.split('\n')).filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)) as MasterStreamEvent)
     .flatMap(event => event.type === 'overview' ? [event.overview] : []);
   // Other news (the heartbeat's) may come between; what counts is each change of the session arriving, in order.
   const heard = () => overviews().flatMap(item => item.session?.status ? [`${item.session.status} ${item.session.title}`] : [])
@@ -201,8 +203,11 @@ test('a page hears the master session\'s status as Tower\'s live state changes, 
   send([{ id: 'claude:master', status: 'completed', title: '마스터' }, { id: 'claude:other', status: 'working', title: '다른 일' }]);
   send([{ id: 'claude:master', status: 'idle', title: '마스터 2' }]);
   await until(() => heard().length === 3);
-  assert.deepEqual(heard(), ['working 마스터', 'completed 마스터', 'idle 마스터 2']);
-  // Nor does anything else send an overview that says what the last one said.
+  // Nor does anything else send an overview that says what the last one said: settings saved as they were.
+  await client.call('settings', { body: {} });
+  send([{ id: 'claude:master', status: 'working', title: '마스터 2' }]);
+  await until(() => heard().length === 4);
+  assert.deepEqual(heard(), ['working 마스터', 'completed 마스터', 'idle 마스터 2', 'working 마스터 2']);
   const said = overviews().map(({ voice: _, ...rest }) => JSON.stringify(rest));
   assert.ok(said.every((item, index) => item !== said[index - 1]), 'an overview repeated the one before it');
 });
