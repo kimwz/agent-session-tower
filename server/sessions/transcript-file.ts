@@ -95,6 +95,7 @@ export async function openTranscript(path: string): Promise<TranscriptFile> {
       if (!pending) {
         pending = handle.readFile().then(data => decompress(data, { maxOutputLength: MAX_CONTENT }));
         decompressing.set(key, pending);
+        // best-effort: only forgets the shared decompression; its error reaches every caller awaiting `pending`.
         void pending.finally(() => decompressing.delete(key)).catch(() => {});
       }
       content = await pending;
