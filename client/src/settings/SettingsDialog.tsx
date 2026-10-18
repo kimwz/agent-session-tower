@@ -20,7 +20,7 @@ import { BackupPanel } from '../backup/BackupPanel';
 import { SecretsPanel } from '../secrets/SecretsPanel';
 import type { SecretCanvas } from '../secrets/secrets-client';
 import { ModelsPanel } from '../models/ModelsPanel';
-import { SettingsFrameContext, type SettingsFrame, type SettingsGuard } from './SettingsPane';
+import { SettingsFrameContext, SettingsPane, type SettingsFrame, type SettingsGuard } from './SettingsPane';
 import { markText, sectionMark, type SettingsAttention, type SettingsSection } from './settings-sections';
 
 /** What the sections need from the page. */
@@ -114,7 +114,8 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
     const clearFolder = () => onPlace({ section, cwd: undefined });
     switch (section) {
       case 'general': return <GeneralSettings canvas={canvas} showHidden={context.showHidden} onShowHiddenChange={context.onShowHiddenChange} />;
-      case 'todos': return <Suspense fallback={<LoaderCircle className="spin" aria-label={t('연결 중')} />}><TodoSettings token={context.token} /></Suspense>;
+      // While it loads, the section's frame (title, back and close) is already there.
+      case 'todos': return <Suspense fallback={<SettingsPane title={t('할 일')}><LoaderCircle className="spin" aria-label={t('연결 중')} /></SettingsPane>}><TodoSettings token={context.token} /></Suspense>;
       case 'models': return <ModelsPanel token={context.token} providers={context.providers} computers={context.computers} />;
       case 'triggers': return <TriggerPanel token={context.token} overview={context.triggers} providers={context.providers} projects={context.projects}
         computers={context.computers} targets={context.targets} onOpenSlack={() => setSlack(true)} onOpenPublic={() => setPublicAgents(true)} onSeen={onTriggersSeen} />;
