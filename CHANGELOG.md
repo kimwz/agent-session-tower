@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.147.1] - 2026-10-18
+
+- 할 일 상세를 열었다 닫으면 그 카드의 작업 중 테두리(무지개 테두리)가 사라지던 문제를 고쳤습니다. 닫은 뒤에도 카드가 선택된 채로 남는데, 선택된 카드에서 테두리를 숨기고 있었습니다. 이제 테두리는 그대로 두고 선택은 카드 바깥 윤곽선으로 보입니다.
+
 ## [1.147.0] - 2026-10-18
 
 - **할 일 댓글에서 스크린샷과 영상을 바로 봅니다.** 댓글·설명에 첨부한 영상과 오디오가 그 자리에서 재생되고(탐색 가능), 이미지는 정사각형으로 잘리지 않고 원래 비율로 미리 보여 넓은 화면 스크린샷도 알아볼 수 있습니다. 누르면 원본이 열립니다. 휴대폰에서도 같습니다.
