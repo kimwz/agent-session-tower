@@ -1,7 +1,7 @@
 import { temporaryFixture, removeTemporaryFixture } from '../helpers/temporary.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -11,7 +11,8 @@ import { MasterClient } from '../../server/master/client.js';
 import { MasterVoice } from '../../server/master/voice.js';
 import { masterPaths } from '../../server/master/paths.js';
 import { writePrivateJson } from '../../server/stores/private-json.js';
-import type { MasterCheckpoint, MasterOverview } from '../../shared/master.js';
+import type { MasterCheckpoint, MasterOverview, MasterStreamEvent } from '../../shared/master.js';
+import type { Session, Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
 import '../helpers/skip-fsync.js';
 
@@ -144,6 +145,75 @@ test('a master session keeps the host alive past its idle time, yet another buil
     assert.ok(Date.now() < deadline, 'the host did not step aside');
     await new Promise(resolve => setTimeout(resolve, 20));
   }
+});
+
+test('a page hears the master session\'s status as Tower\'s live state changes, though nothing the master follows moved', async t => {
+  const stateDir = await temporaryFixture('tower-master-host-live-status-');
+  const cleanup: Array<() => unknown> = [];
+  t.after(async () => { for (const step of cleanup.reverse()) await step(); await removeTemporaryFixture(stateDir); });
+  const paths = await masterPaths(stateDir);
+  await mkdir(paths.data, { recursive: true, mode: 0o700 });
+  await writePrivateJson(join(paths.data, 'settings.json'), JSON.stringify({ session: { sessionId: 'claude:master', provider: 'claude', startedAt: new Date().toISOString() } }));
+  // Tower's page stream, as the host follows it: each frame a whole snapshot.
+  let events: ServerResponse | undefined;
+  let frame = 0;
+  const send = (sessions: Array<{ id: string; status: Session['status']; title: string }>) => {
+    const snapshot: Snapshot = { sessions: sessions.map(item => ({ ...item, nativeId: item.id, provider: 'claude', cwd: '/m', project: 'm', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true })),
+      runs: [], autoPrompts: [], providers: [], scanning: false, hostname: 'here', version: 't', updatedAt: '' };
+    events!.write(`id: ${++frame}\nevent: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
+  };
+  const web = createServer(async (req, res) => {
+    for await (const _ of req) { /* drained */ }
+    if (req.url?.startsWith('/api/events')) { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); events = res; return; }
+    res.writeHead(200, { 'Content-Type': 'application/json' }).end('{}');
+  });
+  await new Promise<void>(resolve => web.listen(0, '127.0.0.1', resolve));
+  cleanup.push(() => new Promise<void>(resolve => { web.closeAllConnections(); web.close(() => resolve()); }));
+  const host = await startMasterHost({ stateDir, idleMs: 60_000, followMs: 20 });
+  cleanup.push(() => host.close());
+  const client = new MasterClient({ stateDir, credentials: () => ({ port: (web.address() as { port: number }).port, token: 'a'.repeat(64), callerSecret: 'b'.repeat(64) }) });
+  cleanup.push(() => client.dispose());
+  await client.call('hello');
+
+  const checkpoint = await client.call('checkpoint') as MasterCheckpoint;
+  const relay = createServer((req, res) => { void client.pipe(res, checkpoint.epoch, checkpoint.seq); });
+  await new Promise<void>(resolve => relay.listen(0, '127.0.0.1', resolve));
+  cleanup.push(() => new Promise<void>(resolve => { relay.closeAllConnections(); relay.close(() => resolve()); }));
+  const stream = await fetch(`http://127.0.0.1:${(relay.address() as { port: number }).port}/`);
+  const reader = stream.body!.getReader();
+  let text = '';
+  const decoder = new TextDecoder();
+  const reading = (async () => { for (;;) { const { value, done } = await reader.read(); if (done) return; text += decoder.decode(value, { stream: true }); } })();
+  cleanup.push(async () => { await reader.cancel().catch(() => {}); await reading.catch(() => {}); });
+  // Whole frames only: the last one may still be arriving.
+  const overviews = () => text.split('\n\n').slice(0, -1).flatMap(frame => frame.split('\n')).filter(line => line.startsWith('data:')).map(line => JSON.parse(line.slice(5)) as MasterStreamEvent)
+    .flatMap(event => event.type === 'overview' ? [event.overview] : []);
+  // Other news (the heartbeat's) may come between; what counts is each change of the session arriving, in order.
+  const heard = () => overviews().flatMap(item => item.session?.status ? [`${item.session.status} ${item.session.title}`] : [])
+    .filter((entry, index, all) => entry !== all[index - 1]);
+
+  await until(() => events);
+  send([{ id: 'claude:master', status: 'working', title: '마스터' }]);
+  await until(() => heard().length === 1);
+  // The turn the owner typed ends: only Tower's live state says so.
+  send([{ id: 'claude:master', status: 'completed', title: '마스터' }]);
+  await until(() => heard().length === 2);
+  // A change elsewhere in Tower, or none at all, changes nothing about the master; its next change is heard.
+  send([{ id: 'claude:master', status: 'completed', title: '마스터' }, { id: 'claude:other', status: 'working', title: '다른 일' }]);
+  send([{ id: 'claude:master', status: 'completed', title: '마스터' }, { id: 'claude:other', status: 'working', title: '다른 일' }]);
+  send([{ id: 'claude:master', status: 'idle', title: '마스터 2' }]);
+  await until(() => heard().length === 3);
+  // Nor does anything else send an overview that says what the last one said: settings saved as they were.
+  await client.call('settings', { body: {} });
+  send([{ id: 'claude:master', status: 'working', title: '마스터 2' }]);
+  await until(() => heard().length === 4);
+  assert.deepEqual(heard(), ['working 마스터', 'completed 마스터', 'idle 마스터 2', 'working 마스터 2']);
+  const said = overviews().map(({ voice: _, ...rest }) => JSON.stringify(rest));
+  assert.ok(said.every((item, index) => item !== said[index - 1]), 'an overview repeated the one before it');
+  // A page that starts from a checkpoint holds that overview: the next live change sends again, though it says the same.
+  await client.call('checkpoint');
+  send([{ id: 'claude:master', status: 'working', title: '마스터 2' }]);
+  await until(() => overviews().length === said.length + 1);
 });
 
 test('the host answers a page\'s voice requests, refusing what is not its call, and shows voice use in its overview', async t => {

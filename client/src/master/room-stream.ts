@@ -32,7 +32,7 @@ export function followRoom(onState: (state: RoomState) => void, onDirective: (di
   let asleep = false;
 
   const publish = (error?: string) => onState({ ...(overview ? { overview } : {}), ...(voice ? { voice } : {}), ...(error ? { error } : {}) });
-  const heard = (status: MasterVoiceStatus | undefined) => { if (!status) return; voice = status; voiceListener?.status(status); };
+  const heard = (status: MasterVoiceStatus | undefined) => { if (!status) return; voice = status; if (overview) overview = { ...overview, voice: status }; voiceListener?.status(status); };
   const apply = (event: MasterStreamEvent) => {
     seq = Math.max(seq, event.seq);
     if (event.type === 'overview') { overview = event.overview; heard(event.overview.voice); }

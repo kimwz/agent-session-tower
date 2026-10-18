@@ -96,7 +96,24 @@ export async function startMasterHost(options: MasterHostOptions) {
       ...(voice ? { voice: voice.status() } : {}),
     };
   };
-  const broadcastOverview = () => room.broadcast({ type: 'overview', seq: 0, overview: overview() });
+  /** The overview pages last heard, voice aside (voice has its own events): one that would say the same is not sent. */
+  let heardOverview = '';
+  const withoutVoice = ({ voice: _, ...rest }: MasterOverview) => JSON.stringify(rest);
+  const broadcastOverview = () => {
+    const current = overview();
+    const key = withoutVoice(current);
+    if (key === heardOverview) return;
+    heardOverview = key;
+    room.broadcast({ type: 'overview', seq: 0, overview: current });
+  };
+  // The session's status and title and issue masters' running work come from Tower's live state: a change there alone
+  // (a turn the owner typed ending) reaches pages too, looked at once per change burst.
+  let overviewLook = false;
+  live.subscribe(() => {
+    if (overviewLook) return;
+    overviewLook = true;
+    setImmediate(() => { overviewLook = false; if (!closing && session) broadcastOverview(); });
+  });
   // A host of another build steps aside unless a report is on its way, a tool is being answered, or something is being
   // read aloud (a turn read while it is written, audio being made, or a page's word awaited).
   const working = () => pending > 1 || Boolean(session?.busy()) || Boolean(issues?.busy()) || Boolean(voice?.busy());
@@ -107,7 +124,11 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'ping': return { busy: working(), streams: streams.size };
       case 'hello': return true;
       case 'overview': return overview();
-      case 'checkpoint': return { ...room.position(), overview: overview() };
+      case 'checkpoint': {
+        // A page starting from here holds this overview, not the last one sent: the next look sends again, even the same.
+        heardOverview = '';
+        return { ...room.position(), overview: overview() };
+      }
       case 'start': {
         if (args.provider !== 'claude' && args.provider !== 'codex') throw failure('Claude 또는 Codex를 선택하세요.', 'invalid');
         if (typeof args.text !== 'string' || !args.text.trim() || args.text.length > 32_000) throw failure('첫 메시지를 적어 주세요.', 'invalid');
