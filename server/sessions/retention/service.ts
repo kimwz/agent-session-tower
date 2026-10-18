@@ -17,11 +17,16 @@ export interface RetentionServiceOptions {
   onError?: (error: unknown) => void;
   now?: () => number;
 }
+/** How soon a cycle looks again while a session asked to go once idle is still listed. */
+const WAITING_MS = 2 * 60_000;
+
 export class RetentionService {
   private timer?: ReturnType<typeof setTimeout>;
   private catchUp = false;
   /** An archive request arrived since the last cycle began; the next one comes soon rather than in an hour. */
   private requested = false;
+  /** A session asked to go once idle is still listed: looked at again soon, not an hour later (see `requestArchive`). */
+  private waiting = false;
   /** Subagent parent links (hot and cold) from the latest observation, to tell whether a reopen sits under a request. */
   private parents = new Map<string, string | undefined>();
   private cycleIncomplete = false;
@@ -133,8 +138,12 @@ export class RetentionService {
     if (!this.stopped) return; this.stopped = false;
     this.schedule(3_600_000);
   }
+  /** How long until the next cycle, as last scheduled (diagnostics and tests). */
+  nextCycleIn(): number | undefined { return this.stopped ? undefined : this.delay; }
+  private delay?: number;
   private schedule(delay: number): void {
     if (this.stopped) return;
+    this.delay = delay;
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => { this.timer = undefined; void this.cycle().catch(error => this.report(error)); }, delay);
     this.timer.unref();
@@ -160,7 +169,7 @@ export class RetentionService {
   cycle(): Promise<RetentionOverview> {
     if (this.checking) return this.checking;
     const task = this.serial(() => this.runCycle()); this.checking = task;
-    void task.finally(() => { this.checking = undefined; this.schedule(this.catchUp || this.requested ? 1000 : 3_600_000); }).catch(error => this.report(error));
+    void task.finally(() => { this.checking = undefined; this.schedule(this.catchUp || this.requested ? 1000 : this.waiting ? WAITING_MS : 3_600_000); }).catch(error => this.report(error));
     return task;
   }
   verifyBackups(): Promise<void> { return this.serial(() => this.verifyBackupsNow()); }
@@ -187,6 +196,11 @@ export class RetentionService {
     if (this.verification !== 'complete') return this.overview();
     const observation = await this.observe(); observation.migratedAt = this.options.store.migratedAt;
     const selected = selectRetention(observation);
+    // Sessions handed over to go once their work ends (a closed todo's issue master and its family) leave soon after:
+    // while one waits only for its work to end, cycles come every few minutes. One held back by the owner (a reopened
+    // sub-session) waits for the hourly cycle as everything else does.
+    const requested = new Set(observation.records.filter(record => record.archiveWhenIdle).map(record => record.session.id));
+    this.waiting = selected.deferred.some(item => requested.has(item.id) && (item.reason === 'awaiting-idle' || item.reason === 'protected'));
     this.deferred = 0; this.deferredReasons = {};
     for (const item of selected.deferred) this.addDeferred(item.reason);
     if (observation.complete) {

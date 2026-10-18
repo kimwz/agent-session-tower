@@ -10,7 +10,7 @@ import { TowerError } from '../../../shared/errors.js';
 import { MASTER_FOLDER } from '../../../shared/master.js';
 import { TodoRequestSchema, type TodoOp } from '../../../shared/todo/ops.js';
 import type { TodoTaskDetail } from '../../../shared/todo/types.js';
-import type { CreateSessionRequest, Run } from '../../../shared/types.js';
+import type { AutoPromptJob, CreateSessionRequest, Run } from '../../../shared/types.js';
 import { TODO_AGENT_START_WAIT_MS, TodoAgents, todoAgentPrompt, todoMasterFolder, type AgentSession } from '../../../server/todo/agents.js';
 import { TODO_RETENTION_MS, TodoStore } from '../../../server/todo/store.js';
 import { TODO_DATA_TABLES } from '../../../server/todo/schema.js';
@@ -28,6 +28,7 @@ async function fixture(t: TestContext) {
   /** Sessions moved to compressed storage: not listed, but a reopen brings them back. */
   const cold = new Map<string, AgentSession>();
   const runs = new Map<string, Pick<Run, 'sessionId'>>();
+  const jobs: Pick<AutoPromptJob, 'id' | 'sessionId' | 'decision' | 'delegation'>[] = [];
   const calls: string[] = [];
   const created: CreateSessionRequest[] = [];
   let changes = 0, hosts = 0, sequence = 0;
@@ -44,6 +45,7 @@ async function fixture(t: TestContext) {
     stateDir: dir, store,
     sessions: () => sessions.map(item => ({ ...item })),
     run: id => runs.get(id),
+    jobs: () => jobs,
     reopen: async id => {
       calls.push(`reopen ${id}`);
       if (cold.has(id)) { sessions.push(cold.get(id)!); cold.delete(id); }
@@ -70,7 +72,7 @@ async function fixture(t: TestContext) {
   };
   const tick = (ms: number) => { clock = new Date(clock.getTime() + ms); };
   const folder = (taskId: string) => todoMasterFolder(dir, taskId);
-  return { dir, store, agents, sessions, cold, runs, calls, created, hooks, session, apply, tick, folder, changes: () => changes, hosts: () => hosts };
+  return { dir, store, agents, sessions, cold, runs, jobs, calls, created, hooks, session, apply, tick, folder, changes: () => changes, hosts: () => hosts };
 }
 
 const kind = (error: unknown) => error instanceof TowerError ? error.kind : undefined;
@@ -612,4 +614,32 @@ test('a start that comes to nothing after its todo closed meanwhile still takes 
   assert.ok(calls.includes('archive late-c'));
   assert.ok(!calls.includes('unguide c'));
   assert.equal(folder('c').endsWith('/c'), true);
+});
+
+test('sessions Auto Prompt makes for an issue master join its family, sent with its Tower tools or with the master\'s calls; a job that continued a session leaves it alone', async t => {
+  const { store, agents, runs, jobs, calls, session, apply } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'A' });
+  const { sessionId } = await agents.begin('a', 'go');
+  runs.set('run-master', { sessionId: sessionId! });
+  const made = (id: string, decision: 'create' | 'resume', extra: Partial<AutoPromptJob> = {}) => {
+    session(`s-${id}`, '/work/' + id);
+    jobs.push({ id, sessionId: `s-${id}`, decision: { action: decision, cwd: '/work/' + id, reason: 'r' }, ...extra });
+  };
+  // With its Tower tools: the job names the calling turn.
+  made('j1', 'create', { delegation: { parentRunId: 'run-master', rootRunId: 'run-master' } });
+  // With the master's calls, which name the todo when it is sent.
+  agents.recordIssueJob('a', 'j2');
+  made('j2', 'create');
+  // An existing session continued: used, not made.
+  made('j3', 'resume', { delegation: { parentRunId: 'run-master', rootRunId: 'run-master' } });
+  // Someone else's job.
+  made('j4', 'create');
+  await agents.schedule();
+  assert.deepEqual(store.familyOf('a').map(member => member.sessionId).sort(), ['s-j1', 's-j2']);
+  // Closing the todo hands them over with the master.
+  calls.length = 0;
+  apply(complete('a', 'ca'));
+  await agents.schedule();
+  assert.ok(calls.some(call => /^archive .*s-j1.*s-j2|^archive .*s-j2.*s-j1/.test(call)), calls.join(' | '));
+  assert.ok(!calls.some(call => /s-j3|s-j4/.test(call)), 'the continued and the unrelated sessions stay');
 });
