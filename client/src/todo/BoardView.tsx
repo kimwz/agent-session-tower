@@ -7,7 +7,7 @@ import type { TodoProject, TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { TaskCard, type TaskCardProps } from './TaskCard';
 import { colorOf } from './todo-format';
-import { dayAfterOf, dropPlace, OVERVIEW_SHOWN, type BoardColumn, type BoardGroup, type CardContext } from './todo-views';
+import { dayAfterOf, dropPlace, OVERVIEW_SHOWN, sectionDropAfter, type BoardColumn, type BoardGroup, type CardContext } from './todo-views';
 
 /**
  * Columns of cards. Cards are dragged with a mouse, a held touch or the keyboard: within a column to put them in order
@@ -164,14 +164,8 @@ export function BoardView(board: BoardProps) {
     if (!over) return;
     const data = active.data.current;
     if (data?.type === 'section') {
-      // Never into another project's sections.
-      const sectionIds = sectionLists.find(list => list.includes(String(active.id))) ?? [];
-      const from = sectionIds.indexOf(String(active.id)), to = sectionIds.indexOf(String(over.id));
-      if (from < 0 || to < 0 || from === to) return;
-      const order = sectionIds.filter(id => id !== active.id);
-      order.splice(to, 0, String(active.id));
-      const index = order.indexOf(String(active.id));
-      board.onSectionMove((columnOf(data)!.sectionId)!, index > 0 ? order[index - 1].slice('section:'.length) : null);
+      const afterId = sectionDropAfter(sectionLists, String(active.id), String(over.id));
+      if (afterId !== undefined) board.onSectionMove((columnOf(data)!.sectionId)!, afterId === null ? null : afterId.slice('section:'.length));
       return;
     }
     if (data?.type !== 'task') return;

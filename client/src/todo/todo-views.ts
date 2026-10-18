@@ -404,6 +404,20 @@ export function dropPlace(taskId: string, source: Pick<BoardColumn, 'id' | 'task
 }
 
 /**
+ * Where section `activeId` let go on section `overId` goes (the section before it, null: first), among the list of
+ * `lists` that holds it (one project's sections): undefined when it stays, or when `overId` is another project's.
+ */
+export function sectionDropAfter(lists: readonly (readonly string[])[], activeId: string, overId: string): string | null | undefined {
+  const list = lists.find(ids => ids.includes(activeId)) ?? [];
+  const from = list.indexOf(activeId), to = list.indexOf(overId);
+  if (from < 0 || to < 0 || from === to) return undefined;
+  const order = list.filter(id => id !== activeId);
+  order.splice(to, 0, activeId);
+  const index = order.indexOf(activeId);
+  return index > 0 ? order[index - 1] : null;
+}
+
+/**
  * Where a card dropped on `overId` goes among its own date's tasks in a column of several dates: the task before it
  * there (null: first), or undefined when it was not dropped among its own date (dropping never changes the date here).
  */

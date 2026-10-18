@@ -10,7 +10,7 @@ import { applyOps, inverseOps, worldFromOverview } from '../../../client/src/tod
 import { readShortcut, readSwitchKey } from '../../../client/src/todo/todo-shortcuts.js';
 import { moveSelection } from '../../../client/src/todo/todo-views.js';
 import { isTodoPage, pageSearch, readTodoLocation, todoSearch } from '../../../client/src/todo/todo-url.js';
-import { boardColumns, calendarTasks, cardContext, defaultDisplay, dropOps, dropPlace, groupingsFor, manualOrder, overviewGroups, projectOrder, sectionMoveTarget, shapeSections, sidebarCounts, switchIndex, switchTargets, viewTitle, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { boardColumns, calendarTasks, cardContext, defaultDisplay, dropOps, dropPlace, groupingsFor, sectionDropAfter, manualOrder, overviewGroups, projectOrder, sectionMoveTarget, shapeSections, sidebarCounts, switchIndex, switchTargets, viewTitle, type ViewContext } from '../../../client/src/todo/todo-views.js';
 import { nthOf } from '../../../client/src/todo/DatePicker.js';
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { PageSwitch } from '../../../client/src/todo/PageSwitch.js';
@@ -310,4 +310,14 @@ test('a task moved to another project section takes its sub-tasks along, and und
   const back = applyOps(moved, inverseOps(start, ops, () => 'new')!, { now: 'later', today });
   assert.deepEqual(['p', 'p1', 'p2'].map(id => [back.tasks[id].projectId, back.tasks[id].sectionId]), Array(3).fill(['inbox', null]));
   assert.equal(back.tasks.p.sortKey < back.tasks.q.sortKey, true, 'back in its place');
+});
+
+test('a section moves only among its own project sections', () => {
+  const lists = [['a1', 'a2', 'a3'], ['b1', 'b2']];
+  assert.equal(sectionDropAfter(lists, 'a3', 'a1'), null, 'first');
+  assert.equal(sectionDropAfter(lists, 'a1', 'a3'), 'a3', 'last');
+  assert.equal(sectionDropAfter(lists, 'b2', 'b1'), null, "the next project's first, never after the last of the one before");
+  assert.equal(sectionDropAfter(lists, 'a2', 'a2'), undefined);
+  assert.equal(sectionDropAfter(lists, 'a2', 'b1'), undefined, "another project's section");
+  assert.equal(sectionDropAfter(lists, 'b1', 'task:x'), undefined);
 });
