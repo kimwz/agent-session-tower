@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.150.1] - 2026-10-18
+
+- **세션 보관이 다시 진행됩니다. 완료한 할 일의 이슈 마스터와 그 마스터가 맡긴 세션도 바로 정리됩니다.** Codex(0.162 이후)는 한동안 손대지 않은 보관 대화를 `<이름>.jsonl.zst`로 압축하는데, 자기 기록에는 계속 `<이름>.jsonl`을 적어 둡니다. Tower는 이미 압축 보관한 Codex 대화의 원본이 사라졌다고 보고 보관 점검 전체를 '불완전'으로 멈췄습니다. 그래서 2026-10-14부터 어떤 세션도(Claude 세션 포함) 압축 보관되지 않았습니다. 이제 원본 자리에 수정 시각이 같은 `.zst` 파일이 있으면 Codex가 압축한 같은 원본으로 봅니다. 수정 시각이 다르면 지금처럼 '바뀐 원본'으로 남기고, 두 파일이 모두 없으면 지금처럼 점검을 멈춥니다. 업데이트 후 첫 점검부터 밀려 있던 보관이 이어집니다.
+
 ## [1.150.0] - 2026-10-18
 
 - **할 일 채팅을 처음 열면 프리셋 버튼이 보입니다.** 이슈 마스터가 아직 없는 빈 채팅에 "작업 시작 해줘", "설계 해줘", "조사 해줘" 버튼이 나오고, 누르면 확인 없이 그 문구로 바로 채팅을 시작합니다(입력창에 쓰고 보낸 것과 같음). 입력창에 쓰던 글은 그대로 남습니다.
