@@ -7,10 +7,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { english } from '../../../client/src/i18n/messages.js';
 import { getLanguage, setLanguage } from '../../../client/src/i18n/i18n.js';
 import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
-import { readShortcut } from '../../../client/src/todo/todo-shortcuts.js';
+import { readShortcut, readSwitchKey } from '../../../client/src/todo/todo-shortcuts.js';
 import { moveSelection } from '../../../client/src/todo/todo-views.js';
 import { isTodoPage, pageSearch, readTodoLocation, todoSearch } from '../../../client/src/todo/todo-url.js';
-import { boardColumns, cardContext, defaultDisplay, dropOps, manualOrder, projectOrder, sectionMoveTarget, sidebarCounts, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { boardColumns, cardContext, defaultDisplay, dropOps, manualOrder, projectOrder, sectionMoveTarget, sidebarCounts, switchTargets, type ViewContext } from '../../../client/src/todo/todo-views.js';
 import { nthOf } from '../../../client/src/todo/DatePicker.js';
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { PageSwitch } from '../../../client/src/todo/PageSwitch.js';
@@ -45,7 +45,10 @@ test('the address keeps the list, layout and open task, and the canvas keeps its
   assert.equal(isTodoPage('?session=x'), false);
   const location = readTodoLocation('?view=todo&todo=p:tower&task=a&layout=calendar');
   assert.deepEqual(location, { view: { kind: 'project', id: 'tower' }, layout: 'calendar', task: 'a', query: '' });
-  assert.deepEqual(readTodoLocation('?view=todo&todo=p:../x').view, { kind: 'today' });
+  // The page opens on the Inbox unless the address names a list.
+  assert.deepEqual(readTodoLocation('?view=todo').view, { kind: 'inbox' });
+  assert.deepEqual(readTodoLocation('?view=todo&todo=p:../x').view, { kind: 'inbox' });
+  assert.deepEqual(readTodoLocation('?view=todo&todo=today').view, { kind: 'today' });
   assert.equal(todoSearch('?session=s1&todo=today', { view: { kind: 'search' }, layout: 'board', task: null, query: '보고서' }), '?session=s1&view=todo&todo=search&q=%EB%B3%B4%EA%B3%A0%EC%84%9C');
   const remembered = '?view=todo&todo=l:call&task=a';
   assert.equal(pageSearch(`${remembered}&session=s1`, 'canvas'), '?session=s1');
@@ -189,4 +192,28 @@ test('arrow keys move the chosen card through columns that have cards, from the 
   assert.equal(moveSelection(columns, 'x', 'right'), 'p');
   assert.equal(moveSelection(columns, 'b', 'left'), 'b', 'nothing further left');
   assert.equal(moveSelection([{ tasks: [] }] as never[], null, 'down'), null);
+});
+
+test('V offers the Inbox, Today, Upcoming and the first six projects as the sidebar lists them', () => {
+  assert.deepEqual(switchTargets(world), [{ kind: 'inbox' }, { kind: 'today' }, { kind: 'upcoming' }, { kind: 'project', id: 'tower' }, { kind: 'project', id: 'home' }],
+    'a sub-project follows its parent; an archived one is left out');
+  const many = worldFromOverview(overview([], { projects: [project('inbox', { inbox: true }), ...['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7'].map(id => project(id, { sortKey: id }))] }));
+  assert.deepEqual(switchTargets(many).map(view => view.kind === 'project' ? view.id : view.kind), ['inbox', 'today', 'upcoming', 'p1', 'p2', 'p3', 'p4', 'p5', 'p6']);
+  const key = (value: string, code?: string, mods: Partial<{ shiftKey: boolean; metaKey: boolean; repeat: boolean }> = {}) => ({ key: value, code, shiftKey: false, metaKey: false, ctrlKey: false, altKey: false, ...mods });
+  assert.deepEqual(readShortcut(key('v'), false), { shortcut: { action: 'views' }, pending: false });
+  assert.deepEqual(readShortcut(key('ㅍ', 'KeyV'), false), { shortcut: { action: 'views' }, pending: false }, 'a Korean input mode keeps V');
+  assert.deepEqual(readShortcut(key('V', 'KeyV', { shiftKey: true }), false), { shortcut: { action: 'layout' }, pending: false }, 'Shift+V still switches board and calendar');
+  assert.deepEqual(readShortcut(key('v'), true), { pending: false }, 'after G only T, U and I count');
+  // In the list: numbers choose, one past the list is swallowed, arrows go around, Enter chooses, V closes.
+  assert.deepEqual(readSwitchKey(key('1', 'Digit1'), 5, 2), { action: 'choose', index: 0 });
+  assert.deepEqual(readSwitchKey(key('4', 'Numpad4'), 5, 0), { action: 'choose', index: 3 });
+  assert.equal(readSwitchKey(key('ArrowLeft', 'Numpad4'), 5, 0), undefined, 'a number pad without Num Lock is not a number');
+  assert.deepEqual(readSwitchKey(key('!', 'Digit1', { shiftKey: true }), 5, 0), undefined);
+  assert.deepEqual(readSwitchKey(key('7', 'Digit7'), 5, 2), { mark: 2 });
+  assert.deepEqual(readSwitchKey(key('ArrowDown', 'ArrowDown'), 5, 4), { mark: 0 });
+  assert.deepEqual(readSwitchKey(key('ArrowUp', 'ArrowUp'), 5, 0), { mark: 4 });
+  assert.deepEqual(readSwitchKey(key('Enter', 'Enter'), 5, 3), { action: 'choose', index: 3 });
+  assert.deepEqual(readSwitchKey(key('ㅍ', 'KeyV'), 5, 3), { action: 'close' });
+  assert.equal(readSwitchKey(key('1', 'Digit1', { metaKey: true }), 5, 0), undefined);
+  assert.equal(readSwitchKey(key('q', 'KeyQ'), 5, 0), undefined);
 });

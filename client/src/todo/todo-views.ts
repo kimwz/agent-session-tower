@@ -258,6 +258,12 @@ export function projectOrder(world: TodoWorld): TodoProject[] {
   return [...world.projects.filter(project => project.inbox), ...walk(projectTree(world))];
 }
 
+/** The lists `V` offers, numbered from 1: the Inbox, Today, Upcoming, then the first six projects as the sidebar lists them. */
+export function switchTargets(world: TodoWorld): TodoView[] {
+  const projects = projectOrder(world).filter(project => !project.inbox).slice(0, 6);
+  return [{ kind: 'inbox' }, { kind: 'today' }, { kind: 'upcoming' }, ...projects.map((project): TodoView => ({ kind: 'project', id: project.id }))];
+}
+
 /** The view's title. */
 export function viewTitle(view: TodoView, world: TodoWorld, query: string): string {
   switch (view.kind) {
