@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile, appendFile, access, rename } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile, appendFile, access, rename, utimes, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os'; import { join, dirname } from 'node:path'; import { test } from 'node:test';
 import { createNativeRetentionAdapter } from '../../../server/sessions/retention/provider.js';
 import { DatabaseSync } from 'node:sqlite';
@@ -32,6 +32,25 @@ test('native parent permits confirmed already-cold descendants but protects acti
  const ctx:RetentionOperationContext={operationId:'new-operation',journalMembers:()=>[cold],managedCold:()=>[cold],fresh:async()=>({now:Date.now(),migratedAt:0,complete:true,records:[parent],protectedIds:new Set()}),commitMember:async()=>{}};
  const adapter=createNativeRetentionAdapter({claude:[f.root],codex:[hot,archive]},{codexHome:home,claudeHome:f.base,coldRoot:join(f.base,'cold'),inspect:async()=>({complete:true,activeIds:active,issues:[]})});const group={rootId:parent.session.id,ids:[parent.session.id],reason:'parent-limit' as const,revisions:{}};
  const lease=await adapter.reserve(group,[parent],ctx);assert.ok(lease);await lease.release();active=new Set(['codex:child']);assert.equal(await adapter.reserve(group,[parent],ctx),undefined);active=new Set();cold.state='conflict';assert.equal(await adapter.reserve(group,[parent],ctx),undefined);cold.state='cold';cold.parentId=undefined;assert.equal(await adapter.reserve(group,[parent],ctx),undefined);cold.parentId='codex:parent';await appendFile(childPath,' changed');assert.equal(await adapter.reserve(group,[parent],ctx),undefined);
+ }finally{await f.close();}});
+
+// Codex's rollout compression worker replaces an archived `<name>.jsonl` with `<name>.jsonl.zst` (same mtime) while its
+// database keeps naming `<name>.jsonl`.
+async function compress(path: string, mtimeMs: number): Promise<void> { await writeFile(path+'.zst','compressed'); await utimes(path+'.zst',mtimeMs/1000,mtimeMs/1000); await unlink(path); }
+test('an archived Codex original that Codex compressed stays cold, in inspection and for its parent',async()=>{const f=await fixture();try{
+ const home=join(f.base,'codex'),hot=join(home,'sessions'),archive=join(home,'archived_sessions');await mkdir(home);await mkdir(hot);await mkdir(archive);const parentPath=join(hot,'parent.jsonl'),childPath=join(archive,'child.jsonl');await writeFile(parentPath,'parent');await writeFile(childPath,'child');
+ const db=new DatabaseSync(join(home,'state_5.sqlite'));db.exec('CREATE TABLE threads(id TEXT PRIMARY KEY,rollout_path TEXT,archived INTEGER); CREATE TABLE thread_spawn_edges(parent_thread_id TEXT,child_thread_id TEXT,status TEXT)');db.prepare('INSERT INTO threads VALUES (?,?,?)').run('parent',parentPath,0);db.prepare('INSERT INTO threads VALUES (?,?,?)').run('child',childPath,1);db.prepare('INSERT INTO thread_spawn_edges VALUES (?,?,?)').run('parent','child','closed');db.close();
+ const info=await lstat(childPath);const cold:RetentionMember={sessionId:'codex:child',nativeId:'child',provider:'codex',parentId:'codex:parent',originalPath:join(hot,'child.jsonl'),coldPath:childPath,operationId:'old-operation',state:'cold',identity:{dev:Number(info.dev),ino:Number(info.ino),size:Number(info.size),mtimeMs:Number(info.mtimeMs)}};
+ const parent=record(parentPath);parent.session.provider='codex';parent.session.id='codex:parent';parent.session.nativeId='parent';parent.session.parentId=undefined;parent.session.isSubagent=false;parent.kind='parent';
+ const ctx:RetentionOperationContext={operationId:'new-operation',journalMembers:()=>[cold],managedCold:()=>[cold],fresh:async()=>({now:Date.now(),migratedAt:0,complete:true,records:[parent],protectedIds:new Set()}),commitMember:async()=>{}};
+ const adapter=createNativeRetentionAdapter({claude:[f.root],codex:[hot,archive]},{codexHome:home,claudeHome:f.base,coldRoot:join(f.base,'cold'),inspect:async()=>({complete:true,activeIds:new Set(),issues:[]})});const group={rootId:parent.session.id,ids:[parent.session.id],reason:'parent-limit' as const,revisions:{}};
+ await compress(childPath,info.mtimeMs);
+ const inspected=await adapter.inspectCold([cold]);assert.equal(inspected.complete,true);assert.deepEqual(inspected.issues,[]);assert.equal(inspected.members[0].state,'cold');assert.equal(inspected.members[0].coldPath,childPath);assert.deepEqual(inspected.members[0].identity,cold.identity);
+ const lease=await adapter.reserve(group,[parent],ctx);assert.ok(lease);await lease.release();
+ // A compressed copy changed since (a later modification time) is not the original that was archived.
+ const later=new Date(info.mtimeMs+60_000);await utimes(childPath+'.zst',later,later);assert.equal((await adapter.inspectCold([cold])).members[0].state,'conflict');assert.equal(await adapter.reserve(group,[parent],ctx),undefined);
+ // Neither file: the original is missing, and the observation stays incomplete as before.
+ await unlink(childPath+'.zst');const missing=await adapter.inspectCold([cold]);assert.equal(missing.complete,false);assert.match(missing.issues.join(';'),/ENOENT/);
  }finally{await f.close();}});
 
 test('two thousand cold Codex records reuse one native metadata connection per reconciliation',async t=>{const f=await fixture();const opened=channel('tower.retention.codex-metadata-open');let count=0;const observed=()=>{count++;};try{

@@ -27,6 +27,18 @@ async function safeFile(path: string, roots: readonly string[]): Promise<Retenti
   if (rootReal !== resolve(root) || pathReal !== path || !info.isFile()) throw new Error('Unsafe transcript identity.');
   return identity(info);
 }
+/**
+ * A Codex archived original as it is now. Codex's rollout compression worker replaces a rollout it has not touched for a
+ * while with `<name>.zst`, keeping its modification time, while its state database still names `<name>`: that copy is
+ * the same original when it keeps the recorded device and modification time (size and inode change with compression).
+ */
+async function codexArchived(path: string, roots: readonly string[]): Promise<{ path: string; identity: RetentionMember['identity']; compressed: boolean }> {
+  if (await exists(path) || !await exists(`${path}.zst`)) return { path, identity: await safeFile(path, roots), compressed: false };
+  return { path: `${path}.zst`, identity: await safeFile(`${path}.zst`, roots), compressed: true };
+}
+function sameArchived(observed: Awaited<ReturnType<typeof codexArchived>>, recorded: RetentionMember['identity']): boolean {
+  return observed.compressed ? observed.identity.dev === recorded.dev && observed.identity.mtimeMs === recorded.mtimeMs : same(observed.identity, recorded);
+}
 function codexRows(home: string, ids: readonly string[]): Map<string, { path: string; archived: boolean }> {
   const db = new DatabaseSync(join(home, 'state_5.sqlite'), { readOnly: true });
   channel('tower.retention.codex-metadata-open').publish({ database: 'state_5.sqlite' });
@@ -76,7 +88,7 @@ export function createNativeRetentionAdapter(roots: Record<Provider, readonly st
       try {
         if (member.provider === 'codex') {
           const row = metadata.get(member.nativeId); if (!row) throw new Error('Native archived metadata missing.');
-          if (row.archived && roots.codex.some(root => basename(root) === 'archived_sessions' && within(root, row.path))) { member.coldPath = row.path; const observed = await safeFile(row.path, roots.codex); if ((processes.activeIds.has(member.sessionId) || processes.activeIds.has(`${member.provider}:${member.nativeId}`)) || !same(observed, member.identity)) { member.state = 'conflict'; member.error = 'Archived original changed; latest original preserved.'; } else { member.state = 'cold'; delete member.error; } }
+          if (row.archived && roots.codex.some(root => basename(root) === 'archived_sessions' && within(root, row.path))) { member.coldPath = row.path; const observed = await codexArchived(row.path, roots.codex); if ((processes.activeIds.has(member.sessionId) || processes.activeIds.has(`${member.provider}:${member.nativeId}`)) || !sameArchived(observed, member.identity)) { member.state = 'conflict'; member.error = 'Archived original changed; latest original preserved.'; } else { member.state = 'cold'; delete member.error; } }
           else if (!row.archived && roots.codex.some(root => basename(root) === 'sessions' && within(root, row.path))) { member.state = 'restored'; delete member.error; }
           else throw new Error('Unexpected native archived path.');
         } else {
@@ -121,7 +133,7 @@ export function createNativeRetentionAdapter(roots: Record<Provider, readonly st
             const member = managed.get(id), row = rows.get(id);
             if (!member || !coveredByAdmission(member)) return undefined;
             if (!member || !row?.archived || row.path !== member.coldPath || fresh.protectedIds.has(member.sessionId) || fresh.protectedIds.has(`codex:${id}`) || processes.activeIds.has(member.sessionId) || processes.activeIds.has(`codex:${id}`)) return undefined;
-            if (!roots.codex.some(root => basename(root) === 'archived_sessions' && within(root, row.path)) || !same(member.identity, await safeFile(row.path, roots.codex))) return undefined;
+            if (!roots.codex.some(root => basename(root) === 'archived_sessions' && within(root, row.path)) || !sameArchived(await codexArchived(row.path, roots.codex), member.identity)) return undefined;
           }
         }
       }
@@ -166,7 +178,7 @@ export function createNativeRetentionAdapter(roots: Record<Provider, readonly st
             for (const file of claudeFiles(owner)) if (await exists(file.coldPath)) { await safeFile(file.coldPath, [options!.coldRoot]); return undefined; }
           } else if (owner.coldPath) {
             if (!roots.codex.some(root => basename(root) === 'archived_sessions' && within(root, owner.coldPath!))) throw new Error('Invalid owned native archive path.');
-            if (await exists(owner.coldPath)) { await safeFile(owner.coldPath, roots.codex); return undefined; }
+            if (await exists(owner.coldPath) || await exists(`${owner.coldPath}.zst`)) { await codexArchived(owner.coldPath, roots.codex); return undefined; }
           }
         }
         const owned = owners.find(member => member.operationId === context.operationId);
