@@ -316,9 +316,11 @@ test('a session with an archive request is listed as leaving (not closed) at onc
   let release!: () => void;
   (f.retention!.service as unknown as { operations: Promise<unknown> }).operations = new Promise<void>(resolve => { release = resolve; });
   const pending = client.retention('requestArchive', [f.session.id]);
-  await until(() => client.applyClosed(f.session).archiveRequested === true);
-  assert.equal(f.retentionStore.policy(f.session.id)?.archiveWhenIdle, undefined, 'not written yet');
-  release(); await pending;
+  try {
+    await until(() => client.applyClosed(f.session).archiveRequested === true);
+    assert.equal(f.retentionStore.policy(f.session.id)?.archiveWhenIdle, undefined, 'not written yet');
+  } finally { release(); }
+  await pending;
   assert.equal(f.retentionStore.policy(f.session.id)?.archiveWhenIdle, true);
   await client.setClosed(f.session.id, false);
   await until(() => client.applyClosed(f.session).archiveRequested === undefined);
