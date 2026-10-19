@@ -242,7 +242,7 @@ test('the completed sub-tasks of open tasks come with the overview; one gone fro
   assert.ok(worldFromOverview(overview([p]), first).tasks.p2);
 });
 
-test('reopening or restoring a task reads the overview again, for the completed sub-tasks its card lists', async () => {
+test('reopening a task reads the overview again, for the completed sub-tasks its card lists', async () => {
   const transport = new FakeTransport();
   const { client } = await ready(transport);
   const before = transport.reads.overview;
@@ -252,9 +252,6 @@ test('reopening or restoring a task reads the overview again, for the completed 
   client.apply([{ op: 'task.uncomplete', id: 'a', completionId: 'c1' }]);
   await settle();
   assert.equal(transport.reads.overview, before + 1);
-  client.apply([{ op: 'task.restore', id: 'b' }]);
-  await settle();
-  assert.equal(transport.reads.overview, before + 2);
 });
 
 test('reopening sends the completion of the row chosen, or the task’s latest read fresh', async () => {

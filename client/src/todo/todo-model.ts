@@ -46,9 +46,9 @@ export const inboxOf = (world: Pick<TodoWorld, 'projects'>) => world.projects.fi
  */
 export function worldFromOverview(overview: TodoOverview, previous?: TodoWorld): TodoWorld {
   const tasks: Record<string, TodoTask> = {};
-  const done = overview.doneSubtasks && new Set(overview.doneSubtasks.map(task => task.id));
-  const open = done && new Set(overview.tasks.map(task => task.id));
-  const gone = (task: TodoTask) => !!done && !task.deletedAt && !!task.parentId && open!.has(task.parentId) && !done.has(task.id);
+  // A completed sub-task of an open task is left out here; the overview's own list puts back those still there.
+  const open = overview.doneSubtasks && new Set(overview.tasks.map(task => task.id));
+  const gone = (task: TodoTask) => !!open && !task.deletedAt && !!task.parentId && open.has(task.parentId);
   for (const task of Object.values(previous?.tasks ?? {})) if (!isOpen(task) && !gone(task)) tasks[task.id] = task;
   for (const task of [...overview.tasks, ...(overview.doneSubtasks ?? [])]) tasks[task.id] = task;
   return {
