@@ -60,7 +60,7 @@ test('a card title shows three lines at most, the whole of it in its hover text'
   const css = readFileSync(new URL('../../../client/src/styles/todo.css', import.meta.url), 'utf8');
   const rule = css.match(/^\.todo-card-title \{([^}]*)\}/m);
   assert.ok(rule);
-  for (const part of ['display:-webkit-box', '-webkit-box-orient:vertical', '-webkit-line-clamp:3', 'overflow:hidden']) assert.ok(rule[1].includes(part), part);
+  for (const part of ['display:-webkit-box;', '-webkit-box-orient:vertical;', '-webkit-line-clamp:3;', 'overflow:hidden;']) assert.ok(rule[1].includes(part), part);
 });
 
 test('a folded card lists no sub-tasks, and says so', () => {
