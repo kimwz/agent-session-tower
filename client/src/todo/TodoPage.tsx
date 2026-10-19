@@ -281,7 +281,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
       if (typingIn(event.target instanceof Element ? event.target : null)) { chord.current = false; return; }
       // Keys pressed in the master's conversation over the page (or after a click in it) are the conversation's, not the
       // board's under it; Esc then closes the conversation (App).
-      const inMaster = (target: EventTarget | null) => target instanceof Element && !!target.closest('.todo-master-chat');
+      const inMaster = (target: EventTarget | null) => target instanceof Element && target.isConnected && !!target.closest('.todo-master-chat');
       if (inMaster(event.target) || (event.target === document.body && inMaster(pressed.current.target))) { chord.current = false; return; }
       const read = readShortcut(event, chord.current);
       chord.current = read.pending;
