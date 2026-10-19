@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.158.0] - 2026-10-19
+
+- **할 일 페이지의 `C`와 `B`를 한 번 더 누르면 돌아갑니다.** 보드에서 `C`를 누르면 캘린더로 가고, 캘린더에서 `C`를 다시 누르면 보드로 돌아옵니다. `B`도 같아서 캘린더에서 누르면 보드로 가고, 보드에서 누르면 캘린더로 갑니다(레이아웃이 보드와 캘린더 둘뿐이라 직전 레이아웃은 늘 캘린더입니다). 캘린더의 주간·월간 선택은 그대로 유지됩니다. 키를 누르고 있어도 화면이 보드와 캘린더 사이를 오가지 않습니다(`Shift+V`도 같음). 도움말의 단축키 설명도 맞췄습니다.
+
 ## [1.157.0] - 2026-10-19
 
 - **할 일 "전체" 보드에서 프로젝트 틀이 조금 더 또렷합니다.** 프로젝트마다 둘러싼 틀의 테두리와 배경을 한 단계씩만 밝혀 페이지 바탕과 구분되게 했고, 틀 안의 섹션 칸도 같은 만큼 밝혀 틀보다 한 단계 밝은 관계를 유지합니다.
