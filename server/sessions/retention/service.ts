@@ -38,7 +38,7 @@ export class RetentionService {
   private parents = new Map<string, string | undefined>();
   private cycleIncomplete = false;
   /** What the current cycle moved to cold storage and how many of its candidates ended in conflict, for its record. */
-  private cycleArchived: string[] = [];
+  private cycleArchived = new Set<string>();
   private cycleConflicts = 0;
   private cycleObserved = false;
   private nextCandidateId?: string;
@@ -70,7 +70,9 @@ export class RetentionService {
   coldMembers(): RetentionMember[] {
     return this.options.store.list().flatMap(entry => entry.members || []).filter(member => member.state === 'cold');
   }
-  publishCold(): void { this.options.onColdChanged?.(this.coldMembers()); }
+  publishCold(): void { this.coldIds = undefined; this.options.onColdChanged?.(this.coldMembers()); }
+  /** Sessions now in cold storage; every change of them is published (`publishCold`), which lets this go. */
+  private coldIds?: Set<string>;
   reconcileCold(force = false): Promise<void> {
     if (this.stopped) return Promise.resolve();
     if (this.inspecting) return this.inspecting;
@@ -142,6 +144,8 @@ export class RetentionService {
       // Identity/state and Codex's official archived path can change after fresh provider validation.
       members.set(member.sessionId, member);
       await this.options.store.put({ ...current, members: [...members.values()], updatedAt: new Date().toISOString() });
+      // Recorded as each one lands, so a move that fails halfway still names what it moved.
+      if (member.state === 'cold') this.cycleArchived.add(member.sessionId);
       this.publishCold(); // Intent must protect launcher proofs before the first physical move.
     } };
   }
@@ -152,7 +156,7 @@ export class RetentionService {
   resume(): void {
     if (!this.stopped) return; this.stopped = false;
     const left = this.dueAt === undefined ? HOUR_MS : Math.max(0, this.dueAt - Date.now());
-    if ((this.requested || this.options.store.requestedIds().length > 0) && left > REQUEST_MS) this.schedule(REQUEST_MS, 'resume');
+    if ((this.requested || this.requestedIds().length > 0) && left > REQUEST_MS) this.schedule(REQUEST_MS, 'resume');
     else this.schedule(left, this.dueAt === undefined ? 'hourly' : this.dueReason);
   }
   /** How long until the next cycle, as last scheduled (diagnostics and tests). */
@@ -173,7 +177,9 @@ export class RetentionService {
    * withdrawal still queued behind a running cycle counts already, so pages follow it at once.
    */
   requestedIds(): string[] {
-    const ids = new Set(this.options.store.requestedIds());
+    // A request outlives the move to cold storage (a restored session goes back); only one still listed waits.
+    this.coldIds ??= new Set(this.coldMembers().map(member => member.sessionId));
+    const ids = new Set(this.options.store.requestedIds().filter(id => !this.coldIds!.has(id)));
     for (const [id, intent] of this.intents) if (intent.requested) ids.add(id); else ids.delete(id);
     return [...ids];
   }
@@ -222,7 +228,7 @@ export class RetentionService {
     return task;
   }
   private async recordedCycle(trigger: 'scheduled' | 'check', reason: RetentionCycleReason | undefined): Promise<RetentionOverview> {
-    const started = Date.now(); this.cycleArchived = []; this.cycleConflicts = 0; this.cycleObserved = false;
+    const started = Date.now(); this.cycleArchived = new Set(); this.cycleConflicts = 0; this.cycleObserved = false;
     let failure: unknown, result: RetentionOverview | undefined;
     try { result = await this.runCycle(); }
     catch (error) { failure = error; throw error; }
@@ -434,7 +440,6 @@ export class RetentionService {
       if (!await lease.revalidate()) { await this.put(entry, 'conflict', 'Retention preconditions changed.'); return; }
       await lease.preserveOwnership(); await this.put(entry, 'removing');
       const members = await lease.moveCold();
-      this.cycleArchived.push(...members.filter(member => member.state === 'cold').map(member => member.sessionId));
       this.publishCold();
       const current = this.options.store.get(entry.id) || entry;
       if (!members.length || members.some(member => member.state !== 'cold')) {

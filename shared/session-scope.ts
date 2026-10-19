@@ -21,7 +21,7 @@ export interface SessionScope {
 /** What a page shows about all of this computer's sessions, including those it was not sent. */
 export interface SessionSummary {
   counts: { open: number; closed: number; working: number; completed: number };
-  /** Every folder a main session ran in, with its project label; `open` when an open one did. A session with no folder is listed by project, as the canvas groups it. */
+  /** Every folder a main session ran in, with its project label; `open` when one not closed did (one only waiting to leave counts). A session with no folder is listed by project, as the canvas groups it. */
   projects: Array<{ cwd: string; project: string; open: boolean }>;
   /** Some open main session would be on the canvas with no time filter. */
   canvasHistory: boolean;
@@ -196,7 +196,8 @@ export function sessionSummary(sessions: Session[], runs: Run[]): SessionSummary
   for (const session of sessions) {
     if (roots.get(session.id) !== session.id || session.launchedByAgent || session.master) continue;
     const key = session.cwd || `\0${session.project}`;
-    projects.set(key, { cwd: session.cwd, project: session.project, open: !putAway(session) || projects.get(key)?.open === true });
+    // A folder whose sessions only wait to leave keeps its canvas place: reopening their todo brings them back.
+    projects.set(key, { cwd: session.cwd, project: session.project, open: !session.closed || projects.get(key)?.open === true });
     if (putAway(session)) { counts.closed++; continue; }
     counts.open++;
     if (session.status === 'working') counts.working++;

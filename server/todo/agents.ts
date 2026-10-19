@@ -398,8 +398,7 @@ export class TodoAgents {
       if (await this.options.reopen(agent.sessionId)) {
         this.handed.delete(agent.sessionId);
         this.confirmed.add(agent.taskId);
-        // Its family may have been handed over a moment ago, before pages could tell: asked whatever they show.
-        await this.takeBack(this.family(agent, folder, byId), byId);
+        await this.takeBack(this.family(agent, folder, byId).filter(id => byId.get(id)?.archiveRequested), byId);
         if (bound && !bound.closed) return this.keep(agent, folder, byId);
         return;
       }

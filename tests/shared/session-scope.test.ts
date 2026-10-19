@@ -68,6 +68,9 @@ test('a session waiting to leave for cold storage is listed with the closed ones
   assert.deepEqual(ids(select({ days: 1, closed: true })), ['open', 'leaving', 'leaving-working']);
   const summary = sessionSummary(sessions, []);
   assert.deepEqual(summary.counts, { open: 1, closed: 2, working: 0, completed: 1 });
+  // Its folder keeps its canvas place: reopening the todo brings the session back where it was.
+  const leavingOnly = sessionSummary([session('x', { cwd: '/work/x', project: 'x', archiveRequested: true }), session('y', { cwd: '/work/y', project: 'y', closed: true })], []);
+  assert.deepEqual(leavingOnly.projects.map(project => project.open), [true, false]);
   assert.ok(putAway(sessions[1]) && putAway(session('c', { closed: true })) && !putAway(sessions[0]));
 });
 

@@ -475,6 +475,9 @@ test('after a restart, an open todo\'s master is taken back from retention once,
   store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'A' }] }));
   store.changeAgent('a', null, { state: 'active', sessionId: 'm', provider: 'claude' });
   sessions.push({ id: 'm', cwd: todoMasterFolder(dir, 'a'), provider: 'claude', status: 'idle', createdAt: '2026-10-17T09:00:00.000Z', isSubagent: false });
+  // A family member not marked as leaving is not asked about (an older worker would refuse the question).
+  sessions.push({ id: 'f', cwd: '/work/project', provider: 'claude', status: 'idle', createdAt: '2026-10-17T09:00:00.000Z', isSubagent: false });
+  store.addFamily('f', 'a');
   const again = new TodoAgents({ stateDir: dir, store, sessions: () => sessions.map(item => ({ ...item })), run: () => undefined,
     reopen: async id => { calls.push(`reopen ${id}`); return sessions.find(item => item.id === id); }, requestArchive: async ids => { calls.push(`archive ${ids.join(',')}`); }, withdrawArchive: async ids => { calls.push(`withdraw ${ids.join(',')}`); },
     createSession: async () => { throw new Error('unused'); }, uncertain: () => false, model: async () => ({ provider: 'claude' }), writeGuide: async (_folder, taskId) => { calls.push(`guide ${taskId}`); }, removeGuide: async () => {}, startHost: async () => {}, onChange: () => {} });

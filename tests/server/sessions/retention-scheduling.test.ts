@@ -131,9 +131,37 @@ test('each cycle is recorded: when, automatic or the owner\'s check and why, and
     const saved = new RetentionCycleLog(join(root, 'retention')); await saved.start();
     assert.deepEqual(saved.recent(20), summary.recentCycles);
     assert.equal(JSON.parse(await readFile(join(root, 'retention', 'cycles.json'), 'utf8')).length, 2);
+    // Its request outlives the move (a restored session goes back), but nothing waits any more: pages carry no id for
+    // it, and a pause keeps the hourly plan.
+    assert.equal(store.policy('a')?.archiveWhenIdle, true);
+    assert.deepEqual(service.requestedIds(), []);
+    await service.quiesce(); service.resume();
+    assert.ok(service.nextCycleIn()! > 5_000);
     for (let i = 0; i < 205; i++) await saved.record({ ...scheduled, archived: [`s${i}`] });
     const bounded = JSON.parse(await readFile(join(root, 'retention', 'cycles.json'), 'utf8'));
     assert.equal(bounded.length, 200); assert.deepEqual(bounded.at(-1).archived, ['s204']);
+  } finally { await service.quiesce(); }
+}));
+
+test('a move that fails halfway still records the sessions it moved', async () => fixture(async (path, root, store) => {
+  const native = join(path, 'native'), originals = join(path, 'originals'); await mkdir(native); await mkdir(originals);
+  for (const id of ['a', 'b']) await writeFile(join(native, `${id}.jsonl`), `${id}\n`);
+  const moving = movingAdapter(native, originals);
+  // The second session's file is gone by the time it is moved.
+  const adapter: RetentionAdapter = { ...moving, reserve: async (candidate, records, ctx) => {
+    const lease = await moving.reserve(candidate, records, ctx);
+    return lease && { ...lease, moveCold: async () => { await rm(join(native, 'b.jsonl')); return lease.moveCold(); } };
+  } };
+  const log = new RetentionCycleLog(join(root, 'retention'));
+  const parent = record('a'), child = { ...record('b'), kind: 'subagent' as const }; child.session = { ...child.session, isSubagent: true, parentId: 'a' };
+  const service = new RetentionService({ store, archive: new RetentionArchive(join(path, 'bundles'), [native], [originals]), adapter, onError: () => {}, log,
+    observe: async () => observation([parent, child]) });
+  await service.start();
+  try {
+    await service.requestArchive(['a']);
+    await service.cycle('scheduled');
+    const [entry] = log.recent(1);
+    assert.deepEqual(entry.archived, ['a']); assert.equal(entry.conflicts, 1);
   } finally { await service.quiesce(); }
 }));
 
