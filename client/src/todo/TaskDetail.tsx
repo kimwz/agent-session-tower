@@ -527,10 +527,10 @@ function AgentChat({ task, agent, presets, client, readOnly, onLeave }: { task: 
 }
 
 /** The detail panel's width on a wide screen: 640px until the owner drags its edge. It covers the header's right, so it
- * leaves the header's controls beside it: the list toggle and page switch (249px), the help and settings buttons (116px). */
+ * leaves the header's controls beside it with their gaps: 413px in Korean, 449px in English (wider "Settings"). */
 const DETAIL_WIDTH_KEY = 'agent-session-tower.todo-detail-width';
 const DETAIL_MIN_WIDTH = 480;
-const DETAIL_HEADER_ROOM = 420;
+const DETAIL_HEADER_ROOM = 460;
 
 /** The detail's tabs: the task itself, or its issue chat. The one chosen stays while the page is open. */
 export type DetailTab = 'detail' | 'chat';
