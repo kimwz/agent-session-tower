@@ -1,5 +1,5 @@
 /* The Todo page (client/src/todo): only what is needed shows; the rest waits on hover, selection and menus. */
-.todo-mode, .todo-popover, .todo-modal-scrim { --p1:#ec7b7b; --p2:#e9a35f; --p3:#7fa6f2; --p4:#5f6d82; --todo-card:#131c29; --todo-card-hover:#172231; --todo-column:#0f1621; --todo-group:#0d131c; --todo-group-line:#1c2635; }
+.todo-mode, .todo-popover, .todo-modal-scrim { --p1:#ec7b7b; --p2:#e9a35f; --p3:#7fa6f2; --p4:#5f6d82; --todo-card:#131c29; --todo-card-hover:#172231; --todo-column:#0f1621; --todo-group:#10161f; --todo-group-line:#27354a; --todo-group-column:#121a25; }
 
 /* Header: canvas or todo, with its words. It stays in the compact header beside the sidebar toggle. */
 .page-switch { display:inline-flex; align-items:center; gap:2px; margin-left:10px; padding:2px; border:1px solid #2b3a4e; border-radius:8px; background:#0f1722; }
@@ -96,6 +96,9 @@
 .todo-add-section input { width:100%; height:34px; padding:0 10px; border:1px solid #3a5476; border-radius:8px; background:#0a111b; color:var(--text); }
 .todo-completed-column .todo-card { opacity:.6; }
 .todo-board.dragging, .todo-board.dragging .todo-group-columns { scroll-snap-type:none !important; }
+/* The board's sideways scrollbars only hint that more columns lie to the side; they show plainly when pointed at. */
+.todo-board::-webkit-scrollbar-thumb:horizontal, .todo-group-columns::-webkit-scrollbar-thumb:horizontal { background:#18212e; }
+.todo-board::-webkit-scrollbar-thumb:horizontal:hover, .todo-group-columns::-webkit-scrollbar-thumb:horizontal:hover { background:#3a485c; }
 /* The overview: projects one under another, each a row of its section columns. */
 .todo-board.todo-overview { flex-direction:column; align-items:stretch; gap:18px; overflow-x:hidden; overflow-y:auto; }
 /* Each project framed, so one reads apart from the next; a sub-project's frame is set in under its parent's. */
@@ -106,7 +109,7 @@
 .todo-group-title h3 { font-size:14px; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .todo-group-path { color:#6d7c92; font-size:12px; white-space:nowrap; }
 .todo-group-columns { display:flex; align-items:flex-start; gap:14px; overflow-x:auto; padding-bottom:4px; overscroll-behavior-x:contain; }
-.todo-overview .todo-column { max-height:none; background:var(--todo-column); padding:0 4px; }
+.todo-overview .todo-column { max-height:none; background:var(--todo-group-column); padding:0 4px; }
 .todo-overview .todo-column-cards { overflow-y:visible; min-height:44px; padding-bottom:6px; }
 .todo-fold-cards { display:flex; align-items:center; gap:6px; height:28px; padding:0 8px; border-radius:7px; color:#93a3b8; font-size:12px; }
 .todo-fold-cards:hover { background:#151f2c; color:var(--bright); }
