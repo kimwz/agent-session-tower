@@ -39,6 +39,8 @@ export interface TodoPageProps {
   /** The sidebar covers the page (a phone) instead of standing beside it. */
   drawer: boolean;
   onSidebarOpen: (open: boolean) => void;
+  /** A task is opened (its detail or its chat): the master's conversation over the page, if shown, makes way for it. */
+  onTaskOpen?: () => void;
 }
 
 /**
@@ -69,7 +71,7 @@ function SectionRename({ anchor, name, onSave, onClose }: { anchor: RefObject<HT
   </form></Popover>;
 }
 
-export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }: TodoPageProps) {
+export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, onTaskOpen }: TodoPageProps) {
   useI18n();
   const tokenRef = useRef(token);
   tokenRef.current = token;
@@ -153,8 +155,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   useEffect(() => { setStart(today); setSelectedId(null); }, [key, today]);
   useEffect(() => { setShowArchivedSections(false); setExpanded(new Set()); }, [key]);
 
-  const openTask = useCallback((id: string) => navigate({ task: id }), [navigate]);
-  const openChat = useCallback((id: string) => { chooseTab('chat'); navigate({ task: id }); }, [chooseTab, navigate]);
+  const openTask = useCallback((id: string) => { onTaskOpen?.(); navigate({ task: id }); }, [navigate, onTaskOpen]);
+  const openChat = useCallback((id: string) => { onTaskOpen?.(); chooseTab('chat'); navigate({ task: id }); }, [chooseTab, navigate, onTaskOpen]);
   const closeTask = useCallback(() => navigate({ task: null }), [navigate]);
   const goTo = useCallback((next: TodoView, text?: string) => {
     // A project opens in the layout it was last shown in.
@@ -277,6 +279,10 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
       const current = shortcutState.current;
       if (event.defaultPrevented || current.quick || document.querySelector('.todo-popover, dialog[open], [aria-modal="true"], .workspace-overlay')) { chord.current = false; return; }
       if (typingIn(event.target instanceof Element ? event.target : null)) { chord.current = false; return; }
+      // Keys pressed in the master's conversation over the page (or after a click in it) are the conversation's, not the
+      // board's under it; Esc then closes the conversation (App).
+      const inMaster = (target: EventTarget | null) => target instanceof Element && target.isConnected && !!target.closest('.todo-master-chat');
+      if (inMaster(event.target) || (event.target === document.body && inMaster(pressed.current.target))) { chord.current = false; return; }
       const read = readShortcut(event, chord.current);
       chord.current = read.pending;
       const shortcut = read.shortcut;
@@ -336,6 +342,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
         // Enter on a focused button or link is that control's, not the task under the mouse.
         case 'open': if (task && !current.openTaskId && !(event.target instanceof Element && event.target.closest('button, a, select, summary, [role="button"]'))) current.openTask(task.id); else return; break;
         case 'close':
+          // The master's conversation over the page closes first (App's own Esc).
+          if (document.querySelector('.todo-master-chat')) return;
           if (current.openTaskId) current.closeTask();
           else if (current.drawer && current.sidebarOpen) current.onSidebarOpen(false);
           // Help that is open closes first (the page's own Esc).

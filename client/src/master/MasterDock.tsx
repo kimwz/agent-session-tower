@@ -34,11 +34,12 @@ function tabId(): string {
 
 /**
  * The master agent's floating button (bottom left). The master is a session: the button opens its conversation like
- * any other, or, before it has one, a panel to start it. While its conversation is open, the microphone and the
- * master's settings slide out beside the button; the microphone turns voice on, and then the button (a microphone
- * itself) turns it off, with the live voice bar beside it; with the conversation closed, the bar offers to open it
- * again above the settings icon. Hidden when this Tower has no master. `sessionId` is the
- * open conversation; `issueChat`, a todo's issue master shown on the Todo page, which works the screen the same way.
+ * any other (over the Todo page while that page shows, `openMaster`), or, before it has one, a panel to start it. While
+ * its conversation is open, the microphone and the master's settings slide out beside the button; the microphone turns
+ * voice on, and then the button (a microphone itself) turns it off, with the live voice bar beside it; with the
+ * conversation closed, the bar offers to open it again above the settings icon. Hidden when this Tower has no master.
+ * `sessionId` is the open conversation (on the Todo page, the one shown over it); `issueChat`, a todo's issue master
+ * shown on the Todo page, which works the screen the same way.
  */
 export function MasterDock({ token, controls, sessionId, issueChat = false, onIssueTasks }: { token: string; controls: MasterControls; sessionId: string | null; issueChat?: boolean; onIssueTasks?: (tasks: Readonly<Record<string, number>>) => void }) {
   const words = useWords();
@@ -144,7 +145,7 @@ export function MasterDock({ token, controls, sessionId, issueChat = false, onIs
   const press = useCallback(() => {
     if (!masterId) { setOpen(value => !value); return; }
     setOpen(false);
-    controlsRef.current.selectSession(masterOpenRef.current ? null : masterId);
+    controlsRef.current.openMaster(masterOpenRef.current ? null : masterId);
   }, [masterId]);
   const pressRef = useRef(press);
   pressRef.current = press;
@@ -185,12 +186,12 @@ export function MasterDock({ token, controls, sessionId, issueChat = false, onIs
     {(layout.side === 'voice' || layout.side === 'ended') && <div className="master-bar" style={barStyle(position)}>
       <VoiceBar voice={voice} />
       <div className="master-bar-buttons">
-        {layout.reopen && masterId && <OpenChatButton onOpen={() => controlsRef.current.selectSession(masterId)} />}
+        {layout.reopen && masterId && <OpenChatButton onOpen={() => controlsRef.current.openMaster(masterId)} />}
         {settingsButton}
       </div>
     </div>}
     {open && <Suspense fallback={<div className="master-panel"><LoaderCircle className="spin" size={18} /></div>}>
-      <MasterPanel token={token} overview={overview} voice={voice} top={position.panelTop} onClose={close} onStarted={id => { setOpen(false); controlsRef.current.selectSession(id); }} />
+      <MasterPanel token={token} overview={overview} voice={voice} top={position.panelTop} onClose={close} onStarted={id => { setOpen(false); controlsRef.current.openMaster(id); }} />
     </Suspense>}
   </>;
 }
@@ -205,6 +206,13 @@ function barStyle({ panelTop: _, left, ...style }: React.CSSProperties & { panel
  * Keeps the button clear of what already sits at the bottom left: the expanded sidebar (sessions or todos) on wide screens and a
  * conversation's composer on phones. It measures them instead of changing their styles.
  */
+/** The button, its microphone and settings beside it, and their gaps: the room the dock takes right of its left edge. */
+const DOCK_ROOM = 16 + 52 + 8 + 38 + 6 + 38;
+/** The composer the dock keeps clear of: the master's over the Todo page (in front of an issue chat's), else the page's. */
+function dockComposer(): Element | null {
+  return document.querySelector('.todo-master-chat .composer-section') ?? document.querySelector('.composer-section');
+}
+
 function useDockPosition(): React.CSSProperties & { panelTop?: number } {
   const [style, setStyle] = useState<React.CSSProperties & { panelTop?: number }>({});
   useEffect(() => {
@@ -217,14 +225,18 @@ function useDockPosition(): React.CSSProperties & { panelTop?: number } {
         const sidebar = sessions && !sessions.hidden && sessions.getBoundingClientRect().width > 0 ? sessions : document.querySelector<HTMLElement>('.todo-sidebar');
         const sidebarBox = sidebar && !sidebar.hidden ? sidebar.getBoundingClientRect() : undefined;
         const docked = sidebarBox && sidebarBox.width > 0 && getComputedStyle(sidebar!).position !== 'absolute';
-        const composer = window.innerWidth <= 680 ? document.querySelector('.composer-section') : null;
+        const left = docked ? Math.round(sidebarBox!.right) : 0;
+        // On a phone the button rides above the conversation's composer; so it does wherever the master's conversation
+        // over the Todo page reaches under the button and its tray (a docked list leaves little room beside it).
+        const shown = dockComposer();
+        const composer = window.innerWidth <= 680 || (shown?.closest('.todo-master-chat') && shown.getBoundingClientRect().left < left + DOCK_ROOM) ? shown : null;
         const composerBox = composer?.getBoundingClientRect();
         const keyboard = window.visualViewport ? window.innerHeight - window.visualViewport.height > 120 : false;
         const header = document.querySelector('.app-header')?.getBoundingClientRect();
         setStyle({
           // The panel starts right under the page header, whatever its height at this width.
           ...(header ? { panelTop: Math.max(0, Math.round(header.bottom)) } : {}),
-          left: `calc(${docked ? Math.round(sidebarBox!.right) : 0}px + max(16px, env(safe-area-inset-left)))`,
+          left: `calc(${left}px + max(16px, env(safe-area-inset-left)))`,
           bottom: `calc(${composerBox && composerBox.height ? Math.round(window.innerHeight - composerBox.top) + 8 : 0}px + max(16px, env(safe-area-inset-bottom)))`,
           ...(keyboard ? { display: 'none' } : {}),
         });
@@ -237,7 +249,7 @@ function useDockPosition(): React.CSSProperties & { panelTop?: number } {
     const composers = new ResizeObserver(measure);
     let watched: Element | null = null;
     const watchComposer = () => {
-      const composer = document.querySelector('.composer-section');
+      const composer = dockComposer();
       if (composer === watched) return;
       if (watched) composers.unobserve(watched);
       watched = composer;

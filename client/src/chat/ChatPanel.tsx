@@ -35,7 +35,9 @@ import { RemoteContent } from '../remote/remote-content';
 
 const emptyMessages: readonly ChatMessage[] = [];
 
-export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = [], provider, host, compactionReady = true, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, onAcknowledgeOutcome, sessionClosed = false, changingClosed = false, readRevision = '', onRead, contextBanner }: { contextBanner?: ReactNode; sessionId: string; session?: Session; allSessions: Session[];
+export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = [], provider, host, compactionReady = true, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, onAcknowledgeOutcome, sessionClosed = false, changingClosed = false, readRevision = '', onRead, contextBanner, widthProperty }: { contextBanner?: ReactNode;
+  /** The document root property that holds this panel's width for what makes room beside it (`useChatAppearance`). */
+  widthProperty?: string | null; sessionId: string; session?: Session; allSessions: Session[];
   /** Folders Tower lists on every computer (scoped keys): the files a conversation names are opened from these. */
   workspaceFolders?: readonly string[]; provider?: ProviderHealth;
   /** The joined computer this conversation lives on; absent for this computer. */
@@ -45,7 +47,7 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
   useI18n();
   // Changes to a joined computer's conversation need that computer reachable, not only this Tower.
   const reachable = connected && (!host || host.canWork);
-  const appearance = useChatAppearance();
+  const appearance = useChatAppearance(widthProperty);
   const [detail, setDetail] = useState<ChatHistory | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');

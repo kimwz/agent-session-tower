@@ -49,7 +49,7 @@ import { localPart, nodeOf, nodePath, pathFor, scopedId, splitScopedId } from '.
 import type { MasterFilter } from '../../../shared/master';
 import { PageSwitch, type TowerPage } from '../todo/PageSwitch';
 import { isTodoPage, pageSearch } from '../todo/todo-url';
-import { screenSelect, TodoAgentContext, useTodoSessionBadges, type TodoAgentView } from '../todo/todo-agents';
+import { masterOpener, screenSelect, TodoAgentContext, useTodoSessionBadges, type TodoAgentView } from '../todo/todo-agents';
 
 type StatusFilter = 'all' | SessionStatus;
 const readSelection = () => new URLSearchParams(window.location.search).get('session');
@@ -103,6 +103,11 @@ function TowerApp() {
   const [issueTasks, setIssueTasks] = useState<Readonly<Record<string, number>>>({});
   /** How that chat is left, for the master's `close`. */
   const issueChatClose = useRef<(() => void) | null>(null);
+  /** The master's conversation shown over the Todo page (its button keeps the owner there); kept for coming back. */
+  const [todoChatId, setTodoChatId] = useState<string | null>(null);
+  const todoChatShown = useRef(false);
+  todoChatShown.current = page === 'todo' && !!todoChatId;
+  const closeTodoChat = useCallback(() => setTodoChatId(null), []);
   const { mentionId: selectedSlackId, chatId: activeChatId } = slackChatSelection(slack?.events || [], requestedSlackId, selectedId);
   const [triggerEventId, setTriggerEventId] = useState<string | null>(null);
   /** The trigger monitor panel is open: its overview, a Slack mention, or a trigger run. */
@@ -140,8 +145,9 @@ function TowerApp() {
   const canvasPointerScope = useRef(true);
   const sidebarToggleRef = useRef<HTMLButtonElement>(null);
   // The page holds only the sessions its list shows and the opened session's family (shared/session-scope.ts); the Todo
-  // page also every master session, for its issue masters, and the family of the issue chat it shows.
-  const scopeFocus = page === 'todo' && issueChatId ? issueChatId : activeChatId;
+  // page also every master session, for its issue masters, and the family of the chat it shows (the master's over it first).
+  const todoFocus = page === 'todo' ? todoChatId ?? issueChatId : null;
+  const scopeFocus = todoFocus ?? activeChatId;
   const scope = useMemo(() => pageScope(period, showClosed, scopeFocus, page === 'todo'), [period, showClosed, scopeFocus, page]);
   const scopeRef = useRef(scope);
   const tokenRef = useRef(token);
@@ -266,7 +272,13 @@ function TowerApp() {
       const target = event.target as HTMLElement;
       if (target.closest('.workspace-overlay')) return;
       // The Todo page has keys of its own; only the help closes here.
-      if (page === 'todo') { if (event.key === 'Escape' && showHelp && !event.defaultPrevented) { event.preventDefault(); setShowHelp(false); } return; }
+      if (page === 'todo') {
+        if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+        if (showHelp) { event.preventDefault(); setShowHelp(false); }
+        // The master's conversation over the page, as the canvas closes its own (the page's Esc waits for it).
+        else if (todoChatId && !document.querySelector('dialog[open], [aria-modal="true"], .todo-popover')) { event.preventDefault(); closeTodoChat(); }
+        return;
+      }
       if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) && !target.isContentEditable) { event.preventDefault(); if (sidebarIsDrawer) setShowSidebar(true); else setSidebarCollapsed(false); requestAnimationFrame(() => searchRef.current?.focus()); }
       if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       if (showNewSession || showAutoPrompt || document.querySelector('dialog[open], [aria-modal="true"]')) return;
@@ -280,7 +292,7 @@ function TowerApp() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [closeChat, selectedId, monitorOpen, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar, page]);
+  }, [closeChat, selectedId, monitorOpen, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar, page, todoChatId, closeTodoChat]);
   const onSessionUpdate = useCallback((updated: Session) => {
     if (updated.node) return;
     snapshots.provisional(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === updated.id ? { ...session, customTitle: updated.customTitle } : session) } : previous);
@@ -315,7 +327,8 @@ function TowerApp() {
   const closeAutoPrompt = useCallback(() => setShowAutoPrompt(false), []);
   // The master agent works the page through its own controls and setters, never through state of its own.
   const masterControls = useMemo(() => ({
-    selectSession: screenSelect(selectSession, () => issueChatClose.current),
+    selectSession: screenSelect(selectSession, () => todoChatShown.current ? closeTodoChat : issueChatClose.current),
+    openMaster: masterOpener(() => readPage() === 'todo', setTodoChatId, selectSession),
     openNewSession,
     openAutoPrompt,
     showHelp: () => setShowHelp(true),
@@ -336,7 +349,7 @@ function TowerApp() {
       if (filter.closed !== undefined) setShowClosed(filter.closed);
       if (filter.showHidden !== undefined) setShowHidden(filter.showHidden);
     },
-  }), [selectSession, openNewSession, openAutoPrompt, sidebarIsDrawer, switchPage]);
+  }), [selectSession, closeTodoChat, openNewSession, openAutoPrompt, sidebarIsDrawer, switchPage]);
   const openAutoPromptSession = useCallback((id: string) => {
     selectSession(id);
     refresh();
@@ -479,22 +492,24 @@ function TowerApp() {
   [token, snapshot?.triggers, snapshot?.providers, localProjects, secretCanvas, triggerComputers, triggerTargets, snapshot?.controlledBy, showHidden, selectSession]);
   // The Todo page's issue masters: this computer's sessions, and their chat drawn as the canvas draws its own.
   const localSessions = snapshot?.sessions;
+  // The Todo page's chats (an issue master's, the master's over the page) never hold the canvas's panel width.
+  const todoChat = useCallback((sessionId: string, onClose: () => void, widthProperty: string | null) => {
+    const session = localSessions?.find(item => item.id === sessionId);
+    const runs = (view?.runs || []).filter(run => run.sessionId === sessionId).sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
+    return <Suspense fallback={<div className="chat-loading"><LoaderCircle className="spin" size={20} /></div>}>
+      <ChatPanel key={sessionId} sessionId={sessionId} session={session} allSessions={sessions} workspaceFolders={workspaceFolders} provider={(snapshot?.providers ?? []).find(item => item.provider === (session?.provider ?? (sessionId.startsWith('claude') ? 'claude' : 'codex')))}
+        compactionReady={!!snapshot?.compaction} runs={runs} token={token} connected={connection === 'connected'} onClose={onClose} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate}
+        onAcknowledgeOutcome={() => acknowledgeOutcomeOf(sessionId)} widthProperty={widthProperty} />
+    </Suspense>;
+  }, [localSessions, view?.runs, sessions, workspaceFolders, snapshot?.providers, snapshot?.compaction, token, connection, onSelect, refresh, onSessionUpdate, acknowledgeOutcomeOf]);
   const todoAgentView = useMemo((): TodoAgentView => {
     const byId = new Map((localSessions ?? []).map(session => [session.id, session]));
     return {
       session: id => byId.get(id),
       running: taskId => issueTasks[taskId] ?? 0,
-      chat: (sessionId, onClose) => {
-        const session = byId.get(sessionId);
-        const runs = (view?.runs || []).filter(run => run.sessionId === sessionId).sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt));
-        return <ShownChat sessionId={sessionId} onShown={setIssueChatId} onClose={onClose} closer={issueChatClose}><Suspense fallback={<div className="chat-loading"><LoaderCircle className="spin" size={20} /></div>}>
-          <ChatPanel key={sessionId} sessionId={sessionId} session={session} allSessions={sessions} workspaceFolders={workspaceFolders} provider={(snapshot?.providers ?? []).find(item => item.provider === (session?.provider ?? (sessionId.startsWith('claude') ? 'claude' : 'codex')))}
-            compactionReady={!!snapshot?.compaction} runs={runs} token={token} connected={connection === 'connected'} onClose={onClose} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate}
-            onAcknowledgeOutcome={() => acknowledgeOutcomeOf(sessionId)} />
-        </Suspense></ShownChat>;
-      },
+      chat: (sessionId, onClose) => <ShownChat sessionId={sessionId} onShown={setIssueChatId} onClose={onClose} closer={issueChatClose}>{todoChat(sessionId, onClose, null)}</ShownChat>,
     };
-  }, [localSessions, view?.runs, sessions, workspaceFolders, snapshot?.providers, snapshot?.compaction, token, connection, onSelect, refresh, onSessionUpdate, acknowledgeOutcomeOf, issueTasks]);
+  }, [localSessions, todoChat, issueTasks]);
   const todoBadges = useTodoSessionBadges(snapshot?.todoRevision);
   const chatHostEntry = activeChatId ? hostOf(hosts, nodeOf(activeChatId)) : undefined;
   const chatHost = chatHostEntry?.node ? { name: chatHostEntry.name, live: chatHostEntry.live, canWork: chatHostEntry.canWork, problem: hostProblem(chatHostEntry), workspace: chatHostEntry.workspace, workspaceNote: workspaceNote(chatHostEntry), ...(chatHostEntry.compaction ? { compaction: true } : {}) }
@@ -516,7 +531,8 @@ function TowerApp() {
     <header className="app-header"><div className="brand">{page === 'todo' ? <button className="icon-button sidebar-toggle" onClick={() => onTodoSidebarOpen(!todoSidebarOpen)} aria-label={todoSidebarOpen ? t("할 일 목록 접기") : t("할 일 목록 열기")} title={todoSidebarOpen ? t("할 일 목록 접기") : t("할 일 목록 열기")} aria-expanded={todoSidebarOpen}>{todoSidebarOpen ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}</button> : <button ref={sidebarToggleRef} className="icon-button sidebar-toggle" onClick={() => sidebarIsDrawer ? setShowSidebar(value => !value) : setSidebarCollapsed(value => !value)} aria-label={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} title={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} aria-controls="session-sidebar" aria-expanded={sidebarOpen}>{sidebarOpen ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}</button>}<span className="brand-mark"><BrandMark /></span><h1>Agent Session Tower</h1><span className="brand-local">local</span><PageSwitch page={page} onChange={switchPage} /></div><div className="header-center"><Monitor size={13} /><span>{snapshot?.hostname || t("이 Mac")}</span><span className="header-divider" /><span className="localhost">{window.location.host}</span></div><div className="header-actions"><span className={`connection-state ${connection}`} role="status">{connection === 'offline' ? <WifiOff size={12} /> : <i />}{connection === 'connected' ? t("실시간 연결") : connection === 'offline' ? t("재연결 중") : t("연결 중")}</span><TowerUpdateBadge snapshot={snapshot} /><RunnerUpdateBadge snapshot={snapshot} token={token} /><button className={`icon-button ${showHelp ? 'active' : ''}`} title={t("사용 안내")} aria-label={t("사용 안내")} aria-expanded={showHelp} onClick={() => setShowHelp(!showHelp)}><CircleHelp size={18} /></button><SettingsButton context={settingsContext} joined={snapshot?.controllerJoined} /></div></header>
     {connection === 'offline' && <div className="connection-banner" role="alert"><WifiOff size={14} /><span>{t("Monitor와의 연결이 끊겼습니다. 저장된 화면을 표시하며 자동으로 다시 연결합니다.")}</span><button onClick={refresh}>{t("다시 확인")}</button></div>}
     {showHelp && <div className="help-popover"><div className="help-heading"><h2>{t("내 컴퓨터의 에이전트를 한눈에")}</h2><button className="icon-button" onClick={() => setShowHelp(false)} aria-label={t("안내 닫기")}><X size={15} /></button></div><p>{t("Claude Code와 Codex의 로컬 세션 기록을 자동으로 읽습니다. 그래프의 에이전트를 선택하면 실제 대화를 보고 작업을 이어갈 수 있습니다.")}</p><div className="help-statuses"><span><i className="legend-dot working" /><b>{t("작업 중")}</b>{t("현재 실행 중인 작업")}</span><span><i className="legend-dot idle" /><b>{t("대기 중")}</b>{t("입력이나 다음 작업 대기")}</span><span><i className="legend-dot completed" /><b>{t("완료")}</b>{t("작업 종료가 기록된 세션")}</span></div><p>{t("상태는 프로세스와 세션 기록을 함께 확인합니다. 대화 상단의 프로젝트 이름을 누르면 상태 판단 근거를 볼 수 있습니다.")}</p><div className="help-privacy"><ShieldCheck size={16} /><span>{t("로컬에서 실행됩니다. 새 요청은 해당 CLI와 기존 로그인 계정을 사용합니다.")}</span></div>{page === 'todo' ? <div className="help-shortcuts"><span><kbd>1</kbd> <kbd>2</kbd> {t("캔버스·할 일 전환")}</span><span><kbd>Q</kbd> {t("작업 추가")}</span><span><kbd>/</kbd> {t("할 일 검색")}</span><span><kbd>B</kbd> <kbd>C</kbd> {t("보드·캘린더 (다시 누르면 돌아감)")}</span><span><kbd>Shift V</kbd> {t("보드·캘린더 전환")}</span><span><kbd>W</kbd> <kbd>M</kbd> {t("캘린더 주·월")}</span><span><kbd>↑↓←→</kbd> {t("작업 고르기")}</span><span><kbd>Enter</kbd> {t("고른 작업 열기")}</span><span><kbd>E</kbd> {t("고른 작업 완료")}</span><span><kbd>Shift E</kbd> {t("완료 및 후속작업")}</span><span><kbd>N</kbd> {t("후속 작업 추가")}</span><span><kbd>V</kbd> {t("목록 이동 (숫자·↑↓ Enter)")}</span><span><kbd>G A</kbd> {t("전체로 이동")}</span><span><kbd>G T</kbd> {t("오늘로 이동")}</span><span><kbd>G U</kbd> {t("다가오는으로 이동")}</span><span><kbd>G I</kbd> {t("관리함으로 이동")}</span><span><kbd>Esc</kbd> {t("닫기·선택 해제")}</span><span><kbd>⌘ Z</kbd> {t("마지막 변경 되돌리기")}</span></div> : <div className="help-shortcuts"><span><kbd>1</kbd> <kbd>2</kbd> {t("캔버스·할 일 전환")}</span><span><kbd>/</kbd> {' '}{t("세션 검색")}</span><span><kbd>Shift N</kbd> {t("새 세션")}</span><span><kbd>Shift P</kbd> Auto Prompt</span><span><kbd>Shift A</kbd> {t("숨긴 폴더 표시 전환")}</span><span><kbd>Esc</kbd> {' '}{t("대화 닫기")}</span><span><kbd>⌘ Enter</kbd> {' '}{t("요청 보내기")}</span></div>}</div>}
-    {page === 'todo' && <div className="workspace todo-workspace"><Suspense fallback={<div className="chat-loading"><LoaderCircle className="spin" size={20} /></div>}><TodoAgentContext.Provider value={todoAgentView}><TodoPage token={token} revision={snapshot?.todoRevision} sidebarOpen={todoSidebarOpen} drawer={todoDrawer} onSidebarOpen={onTodoSidebarOpen} /></TodoAgentContext.Provider></Suspense></div>}
+    {page === 'todo' && <div className="workspace todo-workspace"><Suspense fallback={<div className="chat-loading"><LoaderCircle className="spin" size={20} /></div>}><TodoAgentContext.Provider value={todoAgentView}><TodoPage token={token} revision={snapshot?.todoRevision} sidebarOpen={todoSidebarOpen} drawer={todoDrawer} onSidebarOpen={onTodoSidebarOpen} onTaskOpen={closeTodoChat} /></TodoAgentContext.Provider></Suspense>
+      {todoChatId && <div className="todo-master-chat">{todoChat(todoChatId, closeTodoChat, '--todo-chat-panel-width')}</div>}</div>}
     {/* The canvas stays mounted, hidden, while Todo is shown, so its view, zoom and open conversation are as left. */}
     <div className="workspace" hidden={page === 'todo'}>
       {sidebarIsDrawer && sidebarOpen && <button className="sidebar-scrim" aria-label={t("세션 목록 닫기")} onClick={() => setShowSidebar(false)} />}
@@ -545,7 +561,7 @@ function TowerApp() {
     <AutoPromptDialog visible={showAutoPrompt} initialCwd={autoPromptCwd} initialNode={autoPromptNode === '' ? undefined : autoPromptNode ?? (autoPromptCwd ? undefined : selectedSession?.node)} providers={snapshot?.providers || []} hosts={hosts} projects={projects} sessions={sessions} jobs={view?.autoPrompts || []} token={token} connected={connection === 'connected'} onClose={closeAutoPrompt} onNavigate={openAutoPromptSession} onRefresh={refresh} />
     {issueCwd && <IssueDialog key={issueCwd} cwd={issueCwd} providers={snapshot?.providers || []} hosts={hosts} token={token} connected={connection === 'connected'} onClose={closeIssue} onCreated={sessionCreated} />}
     {showNewSession && <NewSessionDialog providers={snapshot?.providers || []} hosts={hosts} projects={projects} initialCwd={newSessionCwd || (selectedSession?.master ? undefined : selectedSession?.cwd) || (project !== 'all' ? project : undefined)} draft={newSessionDraft} token={token} connected={connection === 'connected'} onClose={closeNewSession} onCreated={sessionCreated} />}
-    {token && <ProvidersContext.Provider value={snapshot?.providers || []}><Suspense fallback={null}><MasterDock token={token} controls={masterControls} sessionId={page === 'todo' ? null : activeChatId ?? null} issueChat={page === 'todo' && !!issueChatId} onIssueTasks={setIssueTasks} /></Suspense></ProvidersContext.Provider>}
+    {token && <ProvidersContext.Provider value={snapshot?.providers || []}><Suspense fallback={null}><MasterDock token={token} controls={masterControls} sessionId={page === 'todo' ? todoChatId : activeChatId ?? null} issueChat={page === 'todo' && !!issueChatId} onIssueTasks={setIssueTasks} /></Suspense></ProvidersContext.Provider>}
   </div>;
 }
 
