@@ -165,7 +165,7 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
         <CheckCircle task={child} size="small" disabled={readOnly} onComplete={() => onComplete(child)} onReopen={onReopen && (() => onReopen(child))} />
         <button type="button" className="todo-subtask-title" onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{child.content}</button>
       </li>)}</ul>}
-      {!folded && more > 0 && <button type="button" className="todo-subtask-more" onClick={event => { event.stopPropagation(); onOpen(task.id); }}>{t('{0}건 더 있음', { 0: more })}</button>}
+      {!folded && more > 0 && <button type="button" className="todo-subtask-more" {...OWN_PRESS} onClick={event => { event.stopPropagation(); onOpen(task.id); }}>{t('{0}건 더 있음', { 0: more })}</button>}
     </div>}
   </div>;
 }
