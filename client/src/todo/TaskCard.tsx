@@ -146,7 +146,7 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
     <div className="todo-card-main">
       <CheckCircle task={task} disabled={readOnly} onComplete={() => onComplete(task)} onCompleteNext={() => onCompleteNext(task)} onReopen={onReopen && (() => onReopen(task))} />
       <div className="todo-card-body">
-        <span className="todo-card-title">{task.content}</span>
+        <span className="todo-card-title" title={task.content}>{task.content}</span>
         {task.description && <span className="todo-card-description">{plain(task.description)}</span>}
         {chips.length > 0 && <div className="todo-meta">{chips.map(chip => <span key={chip.key} className="todo-meta-item">{chip.render(task, context)}</span>)}</div>}
       </div>
