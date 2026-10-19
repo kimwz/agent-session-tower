@@ -37,7 +37,7 @@ export function setChatFontSize(next: number): void {
 
 export function useChatAppearance() {
   const { fontSize } = useChatFontSize();
-  const panel = usePanelWidth({ storageKey: widthKey, fallback: () => window.innerWidth >= 1600 ? 510 : 440, min: 320, maximum: maximumWidth });
+  const panel = usePanelWidth({ storageKey: widthKey, fallback: window.innerWidth >= 1600 ? 510 : 440, min: 320, maximum: maximumWidth });
   const { width } = panel;
   // While a conversation covers the right of the page, the header's settings button moves to its left edge,
   // in the same frame as the panel, so the canvas tools measured against the button follow it.

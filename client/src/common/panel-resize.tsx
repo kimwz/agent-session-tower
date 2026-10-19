@@ -34,16 +34,16 @@ export const draggedWidth = (start: { x: number; width: number }, x: number, min
 
 export function usePanelWidth({ storageKey, fallback, min, maximum }: {
   storageKey: string;
-  fallback: number | (() => number);
+  fallback: number;
   min: number;
-  /** The widest it may be now; measured on mount, when the window resizes and when a drag starts. */
+  /** The widest it may be now; measured on mount and when the window resizes. */
   maximum: () => number;
 }): PanelWidth {
-  const [preferred, setPreferred] = useState(() => Math.max(min, readStoredNumber(storageKey, typeof fallback === 'function' ? fallback() : fallback)));
+  const [preferred, setPreferred] = useState(() => Math.max(min, readStoredNumber(storageKey, fallback)));
   const [max, setMax] = useState(() => Math.max(min, maximum()));
   const measure = useRef(maximum);
   measure.current = maximum;
-  const drag = useRef<{ pointerId: number; x: number; width: number; max: number } | null>(null);
+  const drag = useRef<{ pointerId: number; x: number; width: number } | null>(null);
   const width = clampWidth(preferred, min, max);
   useLayoutEffect(() => {
     const update = () => setMax(Math.max(min, measure.current()));
@@ -51,25 +51,22 @@ export function usePanelWidth({ storageKey, fallback, min, maximum }: {
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
   }, [min]);
-  const change = (next: number, limit = max) => {
-    const value = clampWidth(next, min, limit);
+  const change = (next: number) => {
+    const value = clampWidth(next, min, max);
     setPreferred(value); storeNumber(storageKey, value);
   };
   return {
     width, min, max,
-    changeWidth: next => change(next),
+    changeWidth: change,
     startResize(event) {
       if (event.button !== 0) return;
       event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
-      // The room may have changed without a window resize (a sidebar opened); the drag starts from the width shown.
-      const limit = Math.max(min, measure.current());
-      setMax(limit);
-      drag.current = { pointerId: event.pointerId, x: event.clientX, width: clampWidth(preferred, min, limit), max: limit };
+      drag.current = { pointerId: event.pointerId, x: event.clientX, width };
     },
     resize(event) {
       const start = drag.current;
-      if (start?.pointerId === event.pointerId) change(draggedWidth(start, event.clientX, min, start.max), start.max);
+      if (start?.pointerId === event.pointerId) change(draggedWidth(start, event.clientX, min, max));
     },
     stopResize(event) {
       if (drag.current?.pointerId !== event.pointerId) return;
