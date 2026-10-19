@@ -85,6 +85,7 @@ import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNE
 import { TowerError, statusOf } from '../../shared/errors.js';
 import { sseSink } from '../http/sinks.js';
 import { RetentionService } from '../sessions/retention/service.js';
+import { RetentionCycleLog } from '../sessions/retention/cycle-log.js';
 import { RetentionArchive } from '../sessions/retention/archive.js';
 import { RetentionStore } from '../sessions/retention/store.js';
 import { permissionRetentionPending, RetentionObserver } from '../sessions/retention/observer.js';
@@ -234,6 +235,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       capabilities: RUNNER_CAPABILITIES.filter(capability => capability !== 'workerClosed' || !!options.closedSessions).filter(capability => capability !== 'retention' || !!options.retention),
       ...(options.storage ? { storage: options.storage() } : {}),
       ...(options.closedSessions ? { closedIds: [...options.closedSessions.closedIds()] } : {}),
+      ...(options.retention ? { archiveRequestedIds: options.retention.service.requestedIds() } : {}),
       ...(options.handoffNonce ? { handoff: options.handoffNonce } : {}),
       ...(options.triggers ? { triggers: options.triggers.overview() } : {}),
       coordinators: [...new Set([...(options.slack?.coordinatorSessionIds() ?? []), ...(options.github?.coordinatorSessionIds() ?? [])])],
@@ -330,11 +332,15 @@ export async function startRunnerHost(options: RunnerHostOptions) {
             const code = (error as NodeJS.ErrnoException)?.code;
             temporaryFailure = `Temporary cleanup failed: ${typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,31}$/.test(code) ? code : 'unknown error'}`;
           }
-          return { ...await service.cycle(), temporary: temporaryOverview() };
+          return { ...await service.cycle('check'), temporary: temporaryOverview() };
         }
-        if (action === 'requestArchive') {
+        if (action === 'requestArchive' || action === 'withdrawRequest') {
           if (!Array.isArray(value) || !value.length || value.length > 500 || value.some(id => typeof id !== 'string' || !id || id.length > 4096)) throw new TowerError('invalid', 'Invalid retention archive request.');
-          return service.requestArchive((value as string[]).map(id => options.runs.getSession(id)?.id ?? id));
+          const ids = (value as string[]).map(id => options.runs.getSession(id)?.id ?? id);
+          // Pages hide requested sessions (archiveRequestedIds): the next snapshot shows the change.
+          const result = await (action === 'requestArchive' ? service.requestArchive(ids) : service.withdrawArchiveRequests(ids));
+          changed();
+          return result;
         }
         if (typeof value !== 'string' || !value || value.length > 4096) throw new TowerError('invalid', 'Invalid retention target.');
         if (action === 'archive') return service.archiveSession(value);
@@ -1560,7 +1566,7 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
     };
     const retentionService = new RetentionService({ store: retentionStore, archive: retentionArchive,
       adapter: nativeRetention, observe: () => observer.observe(), reserveAdmission: ids => runs.reserveRetention(ids),
-      onColdChanged: () => publishCold(), refresh: () => sessions.refresh(true),
+      onColdChanged: () => publishCold(), refresh: () => sessions.refresh(true), log: new RetentionCycleLog(join(stateDir, 'retention')),
       onError: error => console.error(`Session retention: ${error instanceof Error ? error.message : String(error)}`) });
     let retention: RunnerHostOptions['retention'];
     let retentionUnavailable: string | undefined;

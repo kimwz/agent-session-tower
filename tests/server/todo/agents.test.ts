@@ -50,10 +50,18 @@ async function fixture(t: TestContext) {
       calls.push(`reopen ${id}`);
       if (cold.has(id)) { sessions.push(cold.get(id)!); cold.delete(id); }
       const found = sessions.find(item => item.id === id);
-      if (found) found.closed = false;
+      if (found) { found.closed = false; delete found.archiveRequested; }
       return found && { ...found };
     },
-    requestArchive: async ids => { calls.push(`archive ${ids.join(',')}`); await hooks.requestArchive(ids); },
+    // As the worker does: a handed-over session is listed as waiting to leave until taken back.
+    requestArchive: async ids => {
+      calls.push(`archive ${ids.join(',')}`); await hooks.requestArchive(ids);
+      for (const item of sessions) if (ids.includes(item.id)) item.archiveRequested = true;
+    },
+    withdrawArchive: async ids => {
+      calls.push(`withdraw ${ids.join(',')}`);
+      for (const item of sessions) if (ids.includes(item.id)) delete item.archiveRequested;
+    },
     createSession: async input => { created.push(input); return hooks.create(input); },
     uncertain: error => (error as { disposition?: string }).disposition === 'uncertain',
     model: async () => ({ provider: 'claude', model: 'opus', effort: 'high' }),
@@ -131,7 +139,7 @@ test('a start is refused for a closed or gone todo and for one that has a master
   assert.equal(folder('c').endsWith('/todo-masters/c'), true);
 });
 
-test('completing a todo hands its master, its folder and its family to retention without hiding or stopping them; reopening takes back only the master, from compressed storage too', async t => {
+test('completing a todo hands its master, its folder and its family to retention, listed as leaving but not stopped; reopening takes back the master, from compressed storage too, and its family still listed', async t => {
   const { store, agents, sessions, cold, calls, session, apply, folder } = await fixture(t);
   apply({ op: 'task.create', id: 'a', content: 'A' });
   const { sessionId } = await agents.begin('a', 'go');
@@ -148,9 +156,11 @@ test('completing a todo hands its master, its folder and its family to retention
   assert.deepEqual(calls, [`archive ${sessionId},extra,child`], 'its own sub-agents go with it in retention, not one by one');
   assert.equal(store.agent('a')!.state, 'closed');
   assert.equal(store.overview().agents?.a, undefined);
+  // Pages list them with the closed ones at once (Session.archiveRequested), but none is closed: their work goes on.
   assert.equal(sub.closed, undefined);
   assert.equal(extra.closed, undefined);
   assert.equal(child.closed, undefined);
+  assert.equal(child.archiveRequested, true);
 
   // Moved to compressed storage meanwhile: reopening asks for it by id, which brings it back.
   const master = sessions.splice(sessions.findIndex(item => item.id === sessionId), 1)[0];
@@ -160,16 +170,52 @@ test('completing a todo hands its master, its folder and its family to retention
   assert.equal(reopened.agents.a?.state, 'active');
   await agents.schedule();
   // Its folder is written first: the master host removes a closed issue's files after a while, and a turn needs it.
-  assert.deepEqual(calls, ['guide a true', `reopen ${sessionId}`]);
+  // Its family still listed shows again; an older session of its folder stays handed over.
+  assert.deepEqual(calls, ['guide a true', `reopen ${sessionId}`, 'withdraw child']);
   assert.ok(sessions.some(item => item.id === sessionId));
+  assert.equal(child.archiveRequested, undefined);
+  assert.equal(extra.archiveRequested, true);
   // Reopened while it was still listed (its hand-over not yet carried out), it is taken back all the same.
   calls.length = 0;
   apply(complete('a', 'ca2'));
   await agents.schedule();
-  assert.deepEqual(calls, [`archive ${sessionId}`]);
+  assert.deepEqual(calls, [`archive ${sessionId},child`]);
   apply({ op: 'task.uncomplete', id: 'a', completionId: 'ca2' });
   await agents.schedule();
-  assert.deepEqual(calls, [`archive ${sessionId}`, 'guide a true', `reopen ${sessionId}`]);
+  assert.deepEqual(calls, [`archive ${sessionId},child`, 'guide a true', `reopen ${sessionId}`, 'withdraw child']);
+  // A family member still marked as leaving while its todo is open (a take-back that failed) is taken back by a pass.
+  calls.length = 0;
+  child.archiveRequested = true;
+  await agents.schedule();
+  assert.deepEqual(calls, ['withdraw child']);
+  await agents.schedule();
+  assert.deepEqual(calls, ['withdraw child'], 'once taken back, nothing more');
+});
+
+test('a closed todo keeps its family record while a member still waits to leave, so reopening it brings that member back', async t => {
+  const { store, agents, sessions, calls, session, apply, tick } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'A' });
+  await agents.begin('a', 'go');
+  const child = session('child', '/work/project');
+  store.addFamily('child', 'a');
+  apply(complete('a', 'ca'));
+  await agents.schedule();
+  await agents.schedule();
+  // Idle and handed over, but retention has not moved it yet (no recorded end, say): its record stays.
+  assert.equal(child.archiveRequested, true);
+  assert.deepEqual(store.familyOf('a').map(member => member.sessionId), ['child']);
+  calls.length = 0;
+  apply({ op: 'task.uncomplete', id: 'a', completionId: 'ca' });
+  await agents.schedule();
+  assert.ok(calls.includes('withdraw child'));
+  assert.equal(child.archiveRequested, undefined);
+  // Moved to compressed storage with its master (no longer listed), the record goes.
+  apply(complete('a', 'ca2'));
+  await agents.schedule();
+  sessions.splice(0, sessions.length);
+  tick(TODO_AGENT_START_WAIT_MS + 1000);
+  await agents.schedule();
+  assert.deepEqual(store.familyOf('a'), []);
 });
 
 test('a repeating todo closes its master only with its last occurrence; deleting closes it and restoring reopens it', async t => {
@@ -310,9 +356,9 @@ test('sessions an issue master starts, directly or through them, join its family
 });
 
 test('a closed master\'s family record goes once none of its sessions can lose work; its row goes with its task, once closed', async t => {
-  const { store, agents, session, apply, tick } = await fixture(t);
+  const { store, agents, sessions, session, apply, tick } = await fixture(t);
   apply({ op: 'task.create', id: 'a', content: 'A' }, { op: 'task.create', id: 'b', content: 'B' });
-  await agents.begin('a', 'go');
+  const { sessionId } = await agents.begin('a', 'go');
   await agents.begin('b', 'go');
   const working = session('working', '/work/one', { status: 'working' });
   store.addFamily('working', 'a');
@@ -322,6 +368,12 @@ test('a closed master\'s family record goes once none of its sessions can lose w
   await agents.schedule();
   assert.deepEqual(store.familyOf('a').map(member => member.sessionId), ['working']);
   working.status = 'idle';
+  await agents.schedule();
+  assert.deepEqual(store.familyOf('a').map(member => member.sessionId), ['working'], 'idle, but still waiting to leave');
+  // Taken back by the owner by hand, its master gone to compressed storage: the record goes, and the rest is left to
+  // ordinary retention.
+  delete working.archiveRequested;
+  sessions.splice(sessions.findIndex(item => item.id === sessionId), 1);
   await agents.schedule();
   assert.deepEqual(store.familyOf('a').map(member => member.sessionId), []);
 
@@ -341,7 +393,7 @@ test('nothing is decided while the sessions cannot be known', async t => {
   const { dir, store } = await fixture(t);
   let asked = 0;
   const agents = new TodoAgents({ stateDir: dir, store, sessions: () => undefined, run: () => undefined,
-    reopen: async () => { asked++; }, requestArchive: async () => { asked++; }, createSession: async () => { throw new Error('unused'); }, uncertain: () => false,
+    reopen: async () => { asked++; }, requestArchive: async () => { asked++; }, withdrawArchive: async () => { asked++; }, createSession: async () => { throw new Error('unused'); }, uncertain: () => false,
     model: async () => ({ provider: 'codex' }), writeGuide: async () => {}, removeGuide: async () => {}, startHost: async () => {}, onChange: () => {} });
   store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'A' }] }));
   store.changeAgent('a', null, { state: 'active', sessionId: 's', provider: 'codex' });
@@ -424,7 +476,7 @@ test('after a restart, an open todo\'s master is taken back from retention once,
   store.changeAgent('a', null, { state: 'active', sessionId: 'm', provider: 'claude' });
   sessions.push({ id: 'm', cwd: todoMasterFolder(dir, 'a'), provider: 'claude', status: 'idle', createdAt: '2026-10-17T09:00:00.000Z', isSubagent: false });
   const again = new TodoAgents({ stateDir: dir, store, sessions: () => sessions.map(item => ({ ...item })), run: () => undefined,
-    reopen: async id => { calls.push(`reopen ${id}`); return sessions.find(item => item.id === id); }, requestArchive: async ids => { calls.push(`archive ${ids.join(',')}`); },
+    reopen: async id => { calls.push(`reopen ${id}`); return sessions.find(item => item.id === id); }, requestArchive: async ids => { calls.push(`archive ${ids.join(',')}`); }, withdrawArchive: async ids => { calls.push(`withdraw ${ids.join(',')}`); },
     createSession: async () => { throw new Error('unused'); }, uncertain: () => false, model: async () => ({ provider: 'claude' }), writeGuide: async (_folder, taskId) => { calls.push(`guide ${taskId}`); }, removeGuide: async () => {}, startHost: async () => {}, onChange: () => {} });
   t.after(() => again.close());
   await again.schedule();
@@ -447,6 +499,9 @@ test('a closed master\'s family record waits for a session recorded but not list
   await agents.schedule();
   assert.deepEqual(store.familyOf('a').map(member => member.sessionId), ['unlisted'], 'the master still works');
   master.status = 'idle';
+  await agents.schedule();
+  assert.deepEqual(store.familyOf('a').map(member => member.sessionId), ['unlisted'], 'the master still waits to leave');
+  sessions.splice(sessions.indexOf(master), 1);
   await agents.schedule();
   assert.deepEqual(store.familyOf('a'), []);
 });
@@ -664,7 +719,7 @@ test('a job an issue master sent is still its todo\'s after a restart, while the
   agents.close();
   // A new process (a web restart) finds the claim in the store.
   const again = new TodoAgents({ stateDir: dir, store, sessions: () => [{ id: 's-routing', cwd: '/work', provider: 'claude', status: 'idle', createdAt: new Date().toISOString(), isSubagent: false }],
-    run: () => undefined, jobs: () => jobs, reopen: async () => undefined, requestArchive: async () => {}, createSession: async () => { throw new Error('unused'); },
+    run: () => undefined, jobs: () => jobs, reopen: async () => undefined, requestArchive: async () => {}, withdrawArchive: async () => {}, createSession: async () => { throw new Error('unused'); },
     uncertain: () => false, model: async () => ({ provider: 'claude' }), writeGuide: async () => {}, removeGuide: async () => {}, startHost: async () => {}, onChange: () => {} });
   t.after(() => again.close());
   session('s-routing', '/work');

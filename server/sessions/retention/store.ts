@@ -46,6 +46,8 @@ export class RetentionStore {
   }
   policy(id: string): RetentionPolicyState | undefined { const policy = this.policies.get(id); return policy ? structuredClone(policy) : undefined; }
   policyList(): RetentionPolicyState[] { return structuredClone([...this.policies.values()]); }
+  /** Sessions with an archive request of their own (`archiveWhenIdle`). */
+  requestedIds(): string[] { return [...this.policies.values()].filter(policy => policy.archiveWhenIdle).map(policy => policy.id); }
   async removePolicies(ids: string[]): Promise<void> {
     const inputs = [...new Set(ids)];
     return this.enqueue(async () => {

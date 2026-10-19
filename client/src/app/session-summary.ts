@@ -1,5 +1,5 @@
 import type { Session } from '../../../shared/types';
-import type { SessionSummary } from '../../../shared/session-scope';
+import { putAway, type SessionSummary } from '../../../shared/session-scope';
 import type { ProjectFolder } from '../project-groups/project-groups';
 
 type CanvasFolder = Pick<Session, 'cwd' | 'node' | 'project'>;
@@ -22,7 +22,7 @@ export interface PageSummary {
  */
 export function pageSummary(local: SessionSummary | undefined, mains: readonly Session[]): PageSummary {
   const counted = local ? mains.filter(session => session.node) : [...mains];
-  const open = counted.filter(session => !session.closed);
+  const open = counted.filter(session => !putAway(session));
   const counts = { ...(local?.counts ?? { open: 0, closed: 0, working: 0, completed: 0 }) };
   counts.open += open.length;
   counts.closed += counted.length - open.length;
