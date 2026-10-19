@@ -526,10 +526,11 @@ function AgentChat({ task, agent, presets, client, readOnly, onLeave }: { task: 
   return <AgentStart key={task.id} task={task} presets={shownChatPresets(presets)} client={client} readOnly={readOnly} />;
 }
 
-/** The detail panel's width on a wide screen: 640px until the owner drags its edge; it leaves 40px of the page beside it. */
+/** The detail panel's width on a wide screen: 640px until the owner drags its edge. It covers the header's right, so it
+ * leaves the header's controls beside it: the list toggle and page switch (249px), the help and settings buttons (116px). */
 const DETAIL_WIDTH_KEY = 'agent-session-tower.todo-detail-width';
 const DETAIL_MIN_WIDTH = 480;
-const DETAIL_PAGE_GAP = 40;
+const DETAIL_HEADER_ROOM = 420;
 
 /** The detail's tabs: the task itself, or its issue chat. The one chosen stays while the page is open. */
 export type DetailTab = 'detail' | 'chat';
@@ -559,9 +560,10 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
   useEffect(() => { setMoving(false); }, [taskId]);
   const panel = useRef<HTMLElement>(null);
   useEffect(() => { panel.current?.focus({ preventScroll: true }); }, [taskId]);
-  // One width for both tabs, so switching between them does not move the edge. The property card needs 480px.
-  const size = usePanelWidth({ storageKey: DETAIL_WIDTH_KEY, fallback: 640, min: DETAIL_MIN_WIDTH,
-    maximum: () => (panel.current?.parentElement?.clientWidth ?? (typeof window === 'undefined' ? Infinity : window.innerWidth)) - DETAIL_PAGE_GAP });
+  // One width for both tabs, so switching between them does not move the edge. The property card needs 480px. On a wide
+  // screen the panel covers the right of the window, header included, and the header's controls move beside it (todo.css).
+  const size = usePanelWidth({ storageKey: DETAIL_WIDTH_KEY, fallback: 640, min: DETAIL_MIN_WIDTH, rootProperty: '--todo-detail-panel-width',
+    maximum: () => (typeof window === 'undefined' ? Infinity : window.innerWidth) - DETAIL_HEADER_ROOM });
   const project = task && world.projects.find(item => item.id === task.projectId);
   const parent = task?.parentId ? world.tasks[task.parentId] : undefined;
   const context: DetailContext | undefined = task && { task, world, today, client, actions, readOnly, uploads };

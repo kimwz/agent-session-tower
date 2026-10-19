@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { readStoredNumber, storeNumber, usePanelWidth } from '../common/panel-resize';
 
 const fontKey = 'agent-session-tower.chat-font-size';
@@ -37,14 +37,8 @@ export function setChatFontSize(next: number): void {
 
 export function useChatAppearance() {
   const { fontSize } = useChatFontSize();
-  const panel = usePanelWidth({ storageKey: widthKey, fallback: window.innerWidth >= 1600 ? 510 : 440, min: 320, maximum: maximumWidth });
-  const { width } = panel;
-  // While a conversation covers the right of the page, the header's settings button moves to its left edge,
-  // in the same frame as the panel, so the canvas tools measured against the button follow it.
-  useLayoutEffect(() => {
-    const root = document.documentElement.style;
-    root.setProperty('--chat-panel-width', `${width}px`);
-    return () => { root.removeProperty('--chat-panel-width'); };
-  }, [width]);
-  return { fontSize, panel, width };
+  // While a conversation covers the right of the page, the header's settings button moves to its left edge (settings.css),
+  // so the canvas tools measured against the button follow it.
+  const panel = usePanelWidth({ storageKey: widthKey, fallback: window.innerWidth >= 1600 ? 510 : 440, min: 320, maximum: maximumWidth, rootProperty: '--chat-panel-width' });
+  return { fontSize, panel, width: panel.width };
 }

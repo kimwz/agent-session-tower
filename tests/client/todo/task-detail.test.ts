@@ -102,7 +102,7 @@ test('both tabs of the detail have a left edge to drag; it starts at 640px and c
   values.set('agent-session-tower.todo-detail-width', '900');
   assert.equal(handle(render(task('a'))), '900');
   values.set('agent-session-tower.todo-detail-width', '5000');
-  assert.equal(handle(render(task('a'))), '1400', 'no wider than the page leaves room for');
+  assert.equal(handle(render(task('a'))), '1020', "no wider than leaves the header's controls beside it");
   values.set('agent-session-tower.todo-detail-width', '100');
   assert.equal(handle(render(task('a'))), '480', 'no narrower than the property card needs');
 });

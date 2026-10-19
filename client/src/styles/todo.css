@@ -484,6 +484,15 @@ a.todo-file-name:hover { text-decoration:underline; }
 .todo-cal-unscheduled .todo-cal-entry { min-height:28px; }
 .todo-cal-hint { font-size:11px; }
 
+/* Wide: the detail covers the right of the window from top to bottom, header included, as a conversation does on the
+   canvas. The header then keeps only its controls, beside the panel (TaskDetail leaves them room). */
+@media (min-width:901px) {
+  .todo-detail { position:fixed; z-index:40; width:min(var(--todo-detail-width, 640px), calc(100vw - 40px)); }
+  .todo-mode:has(.todo-detail) .app-header .brand h1, .todo-mode:has(.todo-detail) .app-header .brand-local,
+  .todo-mode:has(.todo-detail) .app-header .header-center, .todo-mode:has(.todo-detail) .app-header .connection-state { display:none; }
+  .todo-mode:has(.todo-detail) .app-header .header-actions { flex:none; margin-left:auto; margin-right:var(--todo-detail-panel-width, 0px); }
+}
+
 /* Narrow and phone */
 @media (max-width:900px) {
   .todo-detail { width:100%; }

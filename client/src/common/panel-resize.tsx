@@ -32,12 +32,14 @@ export function storeNumber(storageKey: string, value: number): void {
 /** The width after dragging a left-edge handle from `startX` to `x`: moving left widens the panel. */
 export const draggedWidth = (start: { x: number; width: number }, x: number, min: number, max: number) => clampWidth(start.width + start.x - x, min, max);
 
-export function usePanelWidth({ storageKey, fallback, min, maximum }: {
+export function usePanelWidth({ storageKey, fallback, min, maximum, rootProperty }: {
   storageKey: string;
   fallback: number;
   min: number;
   /** The widest it may be now; measured on mount and when the window resizes. */
   maximum: () => number;
+  /** A property of the document root that holds the width while the panel is shown, for what makes room beside it. */
+  rootProperty?: string;
 }): PanelWidth {
   const [preferred, setPreferred] = useState(() => Math.max(min, readStoredNumber(storageKey, fallback)));
   const [max, setMax] = useState(() => Math.max(min, maximum()));
@@ -51,6 +53,13 @@ export function usePanelWidth({ storageKey, fallback, min, maximum }: {
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
   }, [min]);
+  // Set in the same frame as the panel, so what is measured against the room left follows it.
+  useLayoutEffect(() => {
+    if (!rootProperty) return;
+    const root = document.documentElement.style;
+    root.setProperty(rootProperty, `${width}px`);
+    return () => { root.removeProperty(rootProperty); };
+  }, [rootProperty, width]);
   const change = (next: number) => {
     const value = clampWidth(next, min, max);
     setPreferred(value); storeNumber(storageKey, value);
