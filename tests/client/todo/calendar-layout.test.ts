@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cellEntries, dotRows, dayEntries, dayStart, doneDays, doneRange, occurrencesIn, resizeCommit, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, visibleRange, yToMinutes } from '../../../client/src/todo/calendar/calendar-layout.js';
+import { cellEntries, dotRows, dotsPerLine, moreSlots, dayEntries, dayStart, doneDays, doneRange, occurrencesIn, resizeCommit, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, visibleRange, yToMinutes } from '../../../client/src/todo/calendar/calendar-layout.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { CalendarView, doneDotColor, dropPatch, moreSlots, periodTitle } from '../../../client/src/todo/calendar/CalendarView.js';
+import { CalendarView, doneDotColor, dropPatch, periodTitle } from '../../../client/src/todo/calendar/CalendarView.js';
 import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
 import { overview, project, task } from './fixtures.js';
 import { colorOf } from '../../../client/src/todo/todo-format.js';
@@ -204,16 +204,24 @@ test('completions show as dots beside a month day’s number that open their tas
 });
 
 test('completion dots fill two lines, and the rest give way to +n in the last places', () => {
-  assert.deepEqual(dotRows(12, 6), { shown: 12, more: 0 });
-  assert.deepEqual(dotRows(13, 6), { shown: 10, more: 3 });
-  assert.deepEqual(dotRows(5, 2), { shown: 2, more: 3 });
-  assert.deepEqual(dotRows(1, 0), { shown: 1, more: 0 });
+  assert.deepEqual(dotRows(12, 6, 'desktop'), { shown: 12, more: 0 });
+  assert.deepEqual(dotRows(13, 6, 'desktop'), { shown: 10, more: 3 });
   // The +n keeps as many places as its longest label needs: two on a desktop, three for a phone's +10 and up.
   assert.equal(moreSlots(25, 'desktop'), 2);
   assert.equal(moreSlots(150, 'desktop'), 3);
   assert.equal(moreSlots(8, 'mobile'), 2);
   assert.equal(moreSlots(25, 'mobile'), 3);
-  assert.deepEqual(dotRows(25, 3, 2, moreSlots(25, 'mobile')), { shown: 3, more: 22 });
+  assert.deepEqual(dotRows(25, 3, 'mobile'), { shown: 3, more: 22 });
+  // A line shorter than the label: the +n takes the whole last line, never a third.
+  assert.deepEqual(dotRows(3, 1, 'desktop'), { shown: 1, more: 2 });
+  assert.deepEqual(dotRows(30, 2, 'mobile'), { shown: 2, more: 28 });
+  // A line holds a dot only when it fits whole: a fraction of a pixel short is one fewer (11px dots, 1px apart).
+  assert.equal(dotsPerLine(46.6, 'desktop'), 3);
+  assert.equal(dotsPerLine(47, 'desktop'), 4);
+  assert.equal(dotsPerLine(94.6, 'desktop'), 7);
+  assert.equal(dotsPerLine(5, 'desktop'), 1);
+  assert.equal(dotsPerLine(19, 'mobile'), 3);
+  assert.equal(dotsPerLine(18.9, 'mobile'), 2);
 });
 
 test('a completion dot takes its project’s color, and an Inbox task’s is grey', () => {

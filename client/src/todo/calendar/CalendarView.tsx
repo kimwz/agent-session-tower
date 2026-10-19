@@ -10,7 +10,7 @@ import type { QuickAddPreset } from '../QuickAdd';
 import { colorOf, dateLabel, longDate, monthDay, weekdayName } from '../todo-format';
 import { pointerOrNearest, useTodoSensors } from '../todo-dnd';
 import type { TodoWorld } from '../todo-model';
-import { cellEntries, dotRows, doneDays, resizeCommit, DAY_MINUTES, DEFAULT_DURATION, dayEntries, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, timeOf, visibleRange, yToMinutes, type CalendarEntry, type CalendarMode, type DayEntries, type DoneEntry } from './calendar-layout';
+import { cellEntries, DOTS_PER_LINE, dotRows, dotsPerLine, doneDays, resizeCommit, DAY_MINUTES, DEFAULT_DURATION, dayEntries, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, timeOf, visibleRange, yToMinutes, type CalendarEntry, type CalendarMode, type DayEntries, type DoneEntry, type DotSize } from './calendar-layout';
 
 /**
  * The calendar layout of a list: a month of days, or a week (three days on a phone) with an all-day row over a time
@@ -45,20 +45,7 @@ export interface CalendarProps {
 
 const PRIORITY_COLORS = { 1: 'var(--p1)', 2: 'var(--p2)', 3: 'var(--p3)', 4: '#7d8aa0' } as const;
 const MONTH_FIT = 4;
-/** A completion dot's place beside a month day's number, with the gap after it (px); a phone's are smaller. */
-const DOT_SLOT = { desktop: 12, mobile: 7 } as const;
-/** Dots a line before the cell is measured (and on the server): what a usual cell holds. */
-const DOTS_PER_ROW = { desktop: 6, mobile: 3 } as const;
-/** The `+n` label's width a character and its padding (px), to keep the places it needs on its line. */
-const MORE_LABEL = { desktop: { char: 5.6, pad: 4 }, mobile: { char: 4.8, pad: 0 } } as const;
 
-/** Dot places the `+n` of a day with `count` completions takes: enough for its longest label, at least two. */
-export function moreSlots(count: number, size: 'desktop' | 'mobile'): number {
-  const label = MORE_LABEL[size], chars = 1 + String(count).length;
-  return Math.max(2, Math.ceil((chars * label.char + label.pad + 1) / DOT_SLOT[size]));
-}
-/** An Inbox task's dot: grey, as the Inbox has no color of its own. */
-const INBOX_DOT = '#7d8aa0';
 
 type Drop = { kind: 'day' | 'allday' | 'time'; date: string };
 
@@ -121,22 +108,23 @@ const doneTitle = (entry: DoneEntry) => t('{0} 완료 · {1}', { 0: timeOf(entry
 /** A completion dot's color: its project's, or grey for the Inbox's (whatever the calendar colors its entries by). */
 export function doneDotColor(world: TodoWorld, task: TodoTask): string {
   const project = world.projects.find(item => item.id === task.projectId);
-  return !project || project.inbox ? INBOX_DOT : colorOf(project.color);
+  // The Inbox has no color of its own: its dots are the grey of a task without priority.
+  return !project || project.inbox ? PRIORITY_COLORS[4] : colorOf(project.color);
 }
 
-/** How many dots a line of `element` holds, measured as it resizes; null until measured. */
-function useDotsPerRow(element: RefObject<HTMLElement | null>, slot: number): number | null {
-  const [perRow, setPerRow] = useState<number | null>(null);
+/** How many dots a line of `element` holds, measured (to the fraction of a pixel) as it resizes; null until measured. */
+function useDotsPerLine(element: RefObject<HTMLElement | null>, size: DotSize): number | null {
+  const [perLine, setPerLine] = useState<number | null>(null);
   useLayoutEffect(() => {
     const node = element.current;
     if (!node || typeof ResizeObserver === 'undefined') return;
-    const measure = () => setPerRow(Math.max(1, Math.floor((node.clientWidth + 1) / slot)));
+    const measure = () => setPerLine(dotsPerLine(node.getBoundingClientRect().width, size));
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     return () => observer.disconnect();
-  }, [element, slot]);
-  return perRow;
+  }, [element, size]);
+  return perLine;
 }
 
 /**
@@ -145,9 +133,8 @@ function useDotsPerRow(element: RefObject<HTMLElement | null>, slot: number): nu
  */
 function DoneDots({ entries, world, onOpen, onMore, mobile }: { entries: DoneEntry[]; world: TodoWorld; onOpen: (id: string) => void; onMore: (anchor: HTMLElement) => void; mobile: boolean }) {
   const box = useRef<HTMLSpanElement>(null);
-  const size = mobile ? 'mobile' : 'desktop';
-  const perRow = useDotsPerRow(box, DOT_SLOT[size]) ?? DOTS_PER_ROW[size];
-  const { shown, more } = dotRows(entries.length, perRow, 2, moreSlots(entries.length, size));
+  const size: DotSize = mobile ? 'mobile' : 'desktop';
+  const { shown, more } = dotRows(entries.length, useDotsPerLine(box, size) ?? DOTS_PER_LINE[size], size);
   const dot = (entry: DoneEntry) => ({ '--entry-color': doneDotColor(world, entry.task) }) as CSSProperties;
   return <span ref={box} className="todo-cal-done-dots" aria-hidden={mobile || undefined}>
     {entries.slice(0, shown).map(entry => mobile ? <i key={entry.completion.id} style={dot(entry)} />
