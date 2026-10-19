@@ -215,6 +215,8 @@ export class TodoStore {
   overview(): TodoOverview {
     if (!this.db || this.state.state === 'unavailable') return { availability: this.state, revision: this.revisionValue, projects: [], sections: [], labels: [], tasks: [], links: [], commentCounts: {}, fileCounts: {}, subtaskCounts: {} };
     const tasks = this.all(`SELECT ${TASK_COLUMNS} FROM todo_tasks t JOIN todo_projects p ON p.id = t.project_id AND p.deleted_at IS NULL WHERE t.deleted_at IS NULL AND t.completed_at IS NULL`).map(taskOf);
+    const doneSubtasks = this.all(`SELECT ${TASK_COLUMNS} FROM todo_tasks t JOIN todo_projects p ON p.id = t.project_id AND p.deleted_at IS NULL
+      JOIN todo_tasks parent ON parent.id = t.parent_id AND parent.deleted_at IS NULL AND parent.completed_at IS NULL WHERE t.deleted_at IS NULL AND t.completed_at IS NOT NULL`).map(taskOf);
     const links = this.all(`SELECT k.* FROM todo_links k JOIN todo_tasks a ON a.id = k.from_task_id AND a.deleted_at IS NULL JOIN todo_tasks b ON b.id = k.to_task_id AND b.deleted_at IS NULL
       WHERE a.completed_at IS NULL OR b.completed_at IS NULL`).map(linkOf);
     const commentCounts = Object.fromEntries(this.all<{ task_id: string; n: number }>(`SELECT c.task_id, COUNT(*) AS n FROM todo_comments c JOIN todo_tasks t ON t.id = c.task_id
@@ -226,7 +228,7 @@ export class TodoStore {
       projects: this.all('SELECT * FROM todo_projects WHERE deleted_at IS NULL ORDER BY sort_key').map(projectOf),
       sections: this.all('SELECT * FROM todo_sections WHERE deleted_at IS NULL ORDER BY sort_key').map(sectionOf),
       labels: this.all('SELECT * FROM todo_labels WHERE deleted_at IS NULL ORDER BY sort_key').map(labelOf),
-      tasks, links, commentCounts, fileCounts, subtaskCounts: this.subtaskCounts(),
+      tasks, links, commentCounts, fileCounts, subtaskCounts: this.subtaskCounts(), doneSubtasks,
       agents: Object.fromEntries(this.all("SELECT * FROM todo_agents WHERE state != 'closed'").map(agentOf).map(agent => [agent.taskId, agent])),
       ...(this.restoreProgress ? { restore: { ...this.restoreProgress } } : {}),
       ...this.savedChatPresets(),

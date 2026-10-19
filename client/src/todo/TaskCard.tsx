@@ -16,7 +16,7 @@ import { useFileDrop } from './attachments/Attachments';
 import { isOpen, type TodoWorld } from './todo-model';
 import { setSubtasksFolded, subtasksFolded } from './todo-prefs';
 import { colorOf, dateLabel, durationLabel, monthDay, recurrenceLabel } from './todo-format';
-import type { CardContext } from './todo-views';
+import { subtaskWindow, type CardContext } from './todo-views';
 
 /**
  * A task on the board: a check circle in its priority's color, its title, and one line of what it has. The line is a
@@ -116,11 +116,12 @@ export interface TaskCardProps {
 }
 
 export function TaskCard({ task, context, selected, onOpen, onComplete, onCompleteNext, onReopen, onMenu, onSelect, selectId = task.id, onFiles, readOnly, onChat }: TaskCardProps) {
-  // Sub-tasks show unless the owner folded them on this card; the fold is remembered (todo-prefs.ts). Completed ones
-  // are in the task's detail.
+  // Sub-tasks show unless the owner folded them on this card; the fold is remembered (todo-prefs.ts). A few of them
+  // show, completed ones struck through (`subtaskWindow`); all of them are in the task's detail.
   const [folded, setFolded] = useState(() => subtasksFolded(task.id));
   // A completed card (the completed list) lists none: its sub-tasks are in its detail.
-  const children = task.completedAt ? [] : (context.children.get(task.id) ?? []).filter(child => isOpen(child) && !context.shown?.has(child.id));
+  const listed = task.completedAt ? [] : (context.children.get(task.id) ?? []).filter(child => !context.shown?.has(child.id));
+  const { shown: children, more } = subtaskWindow(listed);
   const chips = CARD_META.filter(chip => chip.visible(task, context));
   const agent = context.world.agents[task.id];
   // A file dragged from the computer is not a card being dragged (dnd-kit follows the pointer, not HTML drag events).
@@ -158,12 +159,13 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
     </div>
     {(children.length > 0 || (!task.completedAt && (context.world.subtaskCounts[task.id]?.total ?? 0) > 0)) && <div className="todo-card-subtasks">
       <button type="button" className="todo-subtask-toggle" aria-expanded={!folded} onClick={event => { event.stopPropagation(); setSubtasksFolded(task.id, !folded); setFolded(!folded); }}>
-        <ChevronRight size={12} />{subtaskToggleText(context.world, task.id, children.length)}
+        <ChevronRight size={12} />{subtaskToggleText(context.world, task.id, listed.filter(isOpen).length)}
       </button>
-      {!folded && <ul>{children.map(child => <li key={child.id}>
+      {!folded && <ul>{children.map(child => <li key={child.id} className={child.completedAt ? 'done' : undefined}>
         <CheckCircle task={child} size="small" disabled={readOnly} onComplete={() => onComplete(child)} onReopen={onReopen && (() => onReopen(child))} />
         <button type="button" className="todo-subtask-title" onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{child.content}</button>
       </li>)}</ul>}
+      {!folded && more > 0 && <button type="button" className="todo-subtask-more" onClick={event => { event.stopPropagation(); onOpen(task.id); }}>{t('{0}건 더 있음', { 0: more })}</button>}
     </div>}
   </div>;
 }

@@ -247,6 +247,9 @@ export class TodoClient {
     }
     // One request moves the revision by one: more means another page changed something in between.
     if (changes.revision > this.base.revision + 1) this.wantRead = true;
+    // A task opened again or brought back comes without its completed sub-tasks, which its card lists: they come with
+    // the overview.
+    if (ops.some(op => op.op === 'task.uncomplete' || op.op === 'task.restore')) this.wantRead = true;
     this.base = mergeChanges(this.base, changes);
     this.publish();
     if (this.state.detailId && touchesDetail(this.base.detail, changes)) void this.readDetail(this.state.detailId);

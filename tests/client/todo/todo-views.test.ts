@@ -10,7 +10,7 @@ import { applyOps, inverseOps, worldFromOverview } from '../../../client/src/tod
 import { readShortcut, readSwitchKey } from '../../../client/src/todo/todo-shortcuts.js';
 import { moveSelection } from '../../../client/src/todo/todo-views.js';
 import { isTodoPage, pageSearch, readTodoLocation, todoSearch } from '../../../client/src/todo/todo-url.js';
-import { boardColumns, calendarTasks, cardContext, defaultDisplay, dropOps, dropPlace, foldGroups, groupingsFor, sectionDropAfter, shownTasks, manualOrder, overviewGroups, projectOrder, sectionMoveTarget, shapeSections, sidebarCounts, switchIndex, switchTargets, viewTitle, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { boardColumns, calendarTasks, cardContext, defaultDisplay, subtaskWindow, dropOps, dropPlace, foldGroups, groupingsFor, sectionDropAfter, shownTasks, manualOrder, overviewGroups, projectOrder, sectionMoveTarget, shapeSections, sidebarCounts, switchIndex, switchTargets, viewTitle, type ViewContext } from '../../../client/src/todo/todo-views.js';
 import { nthOf } from '../../../client/src/todo/DatePicker.js';
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { collisionsFor } from '../../../client/src/todo/BoardView.js';
@@ -121,6 +121,38 @@ test('a card shows only the properties it has, with the next-task count and its 
   assert.match(a, /title="댓글"[^>]*>.*2/);
   assert.match(a, /todo-chip project/);
   assert.match(render('c'), /하위 작업 1/);
+});
+
+test('a card lists three sub-tasks in their order, from the done one before the first open one', () => {
+  // `d` done, `o` open, in sibling order; the ids shown.
+  const shown = (marks: string) => {
+    const list = [...marks].map((mark, index) => ({ id: index + 1, completedAt: mark === 'd' ? 'x' : null }));
+    const { shown, more } = subtaskWindow(list);
+    return `${shown.map(item => item.id).join(',')} +${more}`;
+  };
+  assert.equal(shown('ddoooo'), '2,3,4 +3', 'the owner’s example: 1–6 with 1 and 2 done');
+  assert.equal(shown('oooooo'), '1,2,3 +3', 'nothing done: the first three');
+  assert.equal(shown('dddddo'), '4,5,6 +3', 'one open left: the last three');
+  assert.equal(shown('dddddd'), '4,5,6 +3', 'all done: the last three');
+  assert.equal(shown('dodoo'), '1,2,3 +2', 'done ones among the open: a run in order from the first open one');
+  assert.equal(shown('odd'), '1,2,3 +0', 'three or fewer: all of them');
+  assert.equal(shown(''), ' +0');
+});
+
+test('a card shows its sub-task window, done ones struck through, and how many more the detail has', () => {
+  const parent = task('p', { content: 'Parent' });
+  const subtasks = [1, 2, 3, 4, 5, 6].map(n => task(`p${n}`, { parentId: 'p', content: `Step ${n}`, sortKey: `${n}`, ...(n <= 2 ? { completedAt: 'x' } : {}) }));
+  const many = worldFromOverview(overview([parent, ...subtasks.filter(item => !item.completedAt)], { doneSubtasks: subtasks.filter(item => item.completedAt), subtaskCounts: { p: { done: 2, total: 6 } } }));
+  const html = renderToStaticMarkup(createElement(TaskCard, { task: many.tasks.p, context: cardContext(many, today, false), onOpen() {}, onComplete() {}, onCompleteNext() {} }));
+  assert.deepEqual([...html.matchAll(/todo-subtask-title"[^>]*>([^<]+)</g)].map(match => match[1]), ['Step 2', 'Step 3', 'Step 4']);
+  assert.match(html, /<li class="done">[^]*?Step 2/);
+  assert.match(html, /하위 작업 2\/6/);
+  assert.match(html, /class="todo-subtask-more"[^>]*>3건 더 있음</);
+  // Three or fewer: all of them, the done one too, and nothing more.
+  const few = worldFromOverview(overview([parent, subtasks[2]], { doneSubtasks: [subtasks[0]], subtaskCounts: { p: { done: 1, total: 2 } } }));
+  const small = renderToStaticMarkup(createElement(TaskCard, { task: few.tasks.p, context: cardContext(few, today, false), onOpen() {}, onComplete() {}, onCompleteNext() {} }));
+  assert.deepEqual([...small.matchAll(/todo-subtask-title"[^>]*>([^<]+)</g)].map(match => match[1]), ['Step 1', 'Step 3']);
+  assert.doesNotMatch(small, /todo-subtask-more/);
 });
 
 test('the header switch marks the page shown and labels it in either language', () => {

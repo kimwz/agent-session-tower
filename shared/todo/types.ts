@@ -187,6 +187,8 @@ export interface TodoOverview {
   fileCounts: Record<string, number>;
   /** Sub-tasks per open task that has any. */
   subtaskCounts: Record<string, TodoSubtaskCount>;
+  /** Completed direct sub-tasks of open tasks, so a card can show where its sub-tasks stand. Absent from older servers. */
+  doneSubtasks?: TodoTask[];
   /** Issue masters of todos that are not `closed`, by todo id. Absent from older servers. */
   agents?: Record<string, TodoAgent>;
   /** Present after a backup was restored here, while and after its attachments are brought back. */
