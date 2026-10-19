@@ -1,10 +1,13 @@
 /**
- * The Todo page's keys: `Q` add, `/` search, `B` board, `C` calendar, `W`/`M` calendar by week or month, `Shift+V`
- * board or calendar, `V` the list of lists to go to (`readSwitchKey`), `G` then `A`/`T`/`U`/`I` everything, today, upcoming, inbox;
+ * The Todo page's keys: `Q` add, `/` search, `B` board, `C` calendar (each pressed again goes back to the other,
+ * `layoutFor`), `W`/`M` calendar by week or month, `Shift+V` board or calendar, `V` the list of lists to go to
+ * (`readSwitchKey`), `G` then `A`/`T`/`U`/`I` everything, today, upcoming, inbox;
  * arrows move the chosen task on the board; on the chosen task `E` complete, `Shift+E` complete and add the next, `N`
  * add the next, `Enter` open; `Esc` close, or let go of the chosen task; `⌘Z`/`Ctrl+Z` undo the last change. `1` and
  * `2` switch pages (app/page-shortcuts.ts).
  */
+
+import type { TodoLayout } from '../../../shared/todo/types';
 
 export type Direction = 'up' | 'down' | 'left' | 'right';
 export type TodoShortcut =
@@ -33,6 +36,8 @@ export function readShortcut(event: ShortcutKey, pending: boolean): { shortcut?:
     const go = ({ a: 'all', t: 'today', u: 'upcoming', i: 'inbox' } as const)[key as 'a' | 't' | 'u' | 'i'];
     return go && !event.shiftKey ? { shortcut: { action: go }, pending: false } : { pending: false };
   }
+  // A held key repeats; a layout key would then flip the page back and forth.
+  if (event.repeat && (key === 'b' || key === 'c' || (key === 'v' && event.shiftKey))) return { pending: false };
   if (event.shiftKey) {
     if (key === 'v') return { shortcut: { action: 'layout' }, pending: false };
     if (key === 'e') return { shortcut: { action: 'complete-next' }, pending: false };
@@ -54,6 +59,11 @@ export function readShortcut(event: ShortcutKey, pending: boolean): { shortcut?:
     default: return ARROWS[key] ? { shortcut: { action: 'move', direction: ARROWS[key] }, pending: false } : { pending: false };
   }
 }
+
+export const otherLayout = (layout: TodoLayout): TodoLayout => layout === 'board' ? 'calendar' : 'board';
+
+/** The layout `B` or `C` (`pressed`) goes to: its own, or, already there, back to the other one. */
+export const layoutFor = (current: TodoLayout, pressed: TodoLayout): TodoLayout => current === pressed ? otherLayout(pressed) : pressed;
 
 export type SwitchKey = { action: 'choose' | 'mark'; index: number } | { action: 'close' };
 

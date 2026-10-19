@@ -17,7 +17,7 @@ import { createActions, type FollowUp } from './todo-actions';
 import { httpUploadIO } from './attachments/upload-io';
 import { TodoUploads } from './attachments/uploads';
 import { longDate, priorityName } from './todo-format';
-import { readShortcut, typingIn } from './todo-shortcuts';
+import { layoutFor, otherLayout, readShortcut, typingIn } from './todo-shortcuts';
 import { httpTransport, localToday, newId, TodoClient, useTodoState } from './todo-store';
 import { isTodoPage, readTodoLocation, todoSearch, viewKey, type TodoLocation, type TodoView } from './todo-url';
 import { isOpen } from './todo-model';
@@ -343,9 +343,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
           else return;
           break;
         case 'undo': if (!current.client.undo()) return; break;
-        case 'layout': current.setLayout(current.layout === 'board' ? 'calendar' : 'board'); break;
-        case 'board': current.setLayout('board'); break;
-        case 'calendar': current.setLayout('calendar'); break;
+        case 'layout': current.setLayout(otherLayout(current.layout)); break;
+        case 'board': case 'calendar': current.setLayout(layoutFor(current.layout, shortcut.action)); break;
         case 'week': current.setCalendar('week'); break;
         case 'month': current.setCalendar('month'); break;
       }
