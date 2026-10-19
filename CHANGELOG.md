@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.158.0] - 2026-10-19
+
+- **캘린더 월간 보기의 완료 점이 날짜 숫자 옆에 가로로 쌓입니다.** 날짜 칸 오른쪽 세로줄 대신 숫자 옆에서부터 가로로 놓이고, 두 줄까지 쌓입니다. 두 줄을 넘으면 마지막 자리에 `+4`처럼 남은 개수가 나오고, 누르면 지금처럼 그날 일정과 완료 목록이 열립니다. 한 줄에 놓이는 점의 수는 칸 너비에 맞춰 정해져 데스크톱과 휴대폰 모두 두 줄을 넘지 않습니다.
+- **완료 점의 색은 그 할 일이 속한 프로젝트에 지정된 색입니다.** 관리함 할 일은 지금처럼 회색입니다. 캘린더의 색 기준(우선순위/프로젝트) 설정과 상관없이 점은 프로젝트 색을 씁니다. 마우스를 올렸을 때의 제목, 눌러서 상세 열기, 주간 보기는 그대로입니다.
+
 ## [1.157.0] - 2026-10-19
 
 - **할 일 "전체" 보드에서 프로젝트 틀이 조금 더 또렷합니다.** 프로젝트마다 둘러싼 틀의 테두리와 배경을 한 단계씩만 밝혀 페이지 바탕과 구분되게 했고, 틀 안의 섹션 칸도 같은 만큼 밝혀 틀보다 한 단계 밝은 관계를 유지합니다.

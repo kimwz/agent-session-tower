@@ -154,6 +154,17 @@ export function dayEntries(tasks: readonly TodoTask[], from: string, to: string,
 /** A month cell's entries in the order shown: all-day first, then timed by time; deadlines are chips of their own. */
 export const cellEntries = (entries: DayEntries | undefined): CalendarEntry[] => entries ? [...entries.allDay, ...entries.timed] : [];
 
+/**
+ * Completion dots beside a month day's number: `perRow` a line, at most `rows` lines. When they do not all fit, the
+ * last `moreSlots` places go to the `+n` that stands for the rest.
+ */
+export function dotRows(count: number, perRow: number, rows = 2, moreSlots = 2): { shown: number; more: number } {
+  const capacity = Math.max(1, perRow) * rows;
+  if (count <= capacity) return { shown: count, more: 0 };
+  const shown = Math.max(0, capacity - moreSlots);
+  return { shown, more: count - shown };
+}
+
 /** How many entries fit a month cell before `+n`. */
 export function overflow(count: number, fit: number): { shown: number; more: number } {
   return count <= fit ? { shown: count, more: 0 } : { shown: Math.max(0, fit - 1), more: count - Math.max(0, fit - 1) };
