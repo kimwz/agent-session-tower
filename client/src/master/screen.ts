@@ -7,6 +7,8 @@ import { openSettings } from '../settings/settings-open';
 /** What the master may do on the owner's screen: the page's own actions and setters, handed down. */
 export interface MasterControls {
   selectSession(id: string | null): void;
+  /** The master's own conversation, opened (or closed) where the owner is: over the Todo page, or on the canvas. */
+  openMaster(id: string | null): void;
   openNewSession(cwd?: string, draft?: { title: string; prompt: string }): void;
   openAutoPrompt(cwd?: string, node?: string): void;
   showHelp(): void;

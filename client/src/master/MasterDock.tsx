@@ -34,11 +34,12 @@ function tabId(): string {
 
 /**
  * The master agent's floating button (bottom left). The master is a session: the button opens its conversation like
- * any other, or, before it has one, a panel to start it. While its conversation is open, the microphone and the
- * master's settings slide out beside the button; the microphone turns voice on, and then the button (a microphone
- * itself) turns it off, with the live voice bar beside it; with the conversation closed, the bar offers to open it
- * again above the settings icon. Hidden when this Tower has no master. `sessionId` is the
- * open conversation; `issueChat`, a todo's issue master shown on the Todo page, which works the screen the same way.
+ * any other (over the Todo page while that page shows, `openMaster`), or, before it has one, a panel to start it. While
+ * its conversation is open, the microphone and the master's settings slide out beside the button; the microphone turns
+ * voice on, and then the button (a microphone itself) turns it off, with the live voice bar beside it; with the
+ * conversation closed, the bar offers to open it again above the settings icon. Hidden when this Tower has no master.
+ * `sessionId` is the open conversation (on the Todo page, the one shown over it); `issueChat`, a todo's issue master
+ * shown on the Todo page, which works the screen the same way.
  */
 export function MasterDock({ token, controls, sessionId, issueChat = false, onIssueTasks }: { token: string; controls: MasterControls; sessionId: string | null; issueChat?: boolean; onIssueTasks?: (tasks: Readonly<Record<string, number>>) => void }) {
   const words = useWords();
@@ -144,7 +145,7 @@ export function MasterDock({ token, controls, sessionId, issueChat = false, onIs
   const press = useCallback(() => {
     if (!masterId) { setOpen(value => !value); return; }
     setOpen(false);
-    controlsRef.current.selectSession(masterOpenRef.current ? null : masterId);
+    controlsRef.current.openMaster(masterOpenRef.current ? null : masterId);
   }, [masterId]);
   const pressRef = useRef(press);
   pressRef.current = press;
@@ -185,12 +186,12 @@ export function MasterDock({ token, controls, sessionId, issueChat = false, onIs
     {(layout.side === 'voice' || layout.side === 'ended') && <div className="master-bar" style={barStyle(position)}>
       <VoiceBar voice={voice} />
       <div className="master-bar-buttons">
-        {layout.reopen && masterId && <OpenChatButton onOpen={() => controlsRef.current.selectSession(masterId)} />}
+        {layout.reopen && masterId && <OpenChatButton onOpen={() => controlsRef.current.openMaster(masterId)} />}
         {settingsButton}
       </div>
     </div>}
     {open && <Suspense fallback={<div className="master-panel"><LoaderCircle className="spin" size={18} /></div>}>
-      <MasterPanel token={token} overview={overview} voice={voice} top={position.panelTop} onClose={close} onStarted={id => { setOpen(false); controlsRef.current.selectSession(id); }} />
+      <MasterPanel token={token} overview={overview} voice={voice} top={position.panelTop} onClose={close} onStarted={id => { setOpen(false); controlsRef.current.openMaster(id); }} />
     </Suspense>}
   </>;
 }

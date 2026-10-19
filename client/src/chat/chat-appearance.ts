@@ -35,10 +35,14 @@ export function setChatFontSize(next: number): void {
   window.dispatchEvent(new CustomEvent(fontChangeEvent, { detail: value }));
 }
 
-export function useChatAppearance() {
+/**
+ * `widthProperty` is where the panel's width is kept on the document root: the canvas's conversation by default; the
+ * Todo page's chats name their own (or none), so one closing there never takes the canvas's away.
+ */
+export function useChatAppearance(widthProperty: string | null = '--chat-panel-width') {
   const { fontSize } = useChatFontSize();
   // While a conversation covers the right of the page, the header's settings button moves to its left edge (settings.css),
   // so the canvas tools measured against the button follow it.
-  const panel = usePanelWidth({ storageKey: widthKey, fallback: window.innerWidth >= 1600 ? 510 : 440, min: 320, maximum: maximumWidth, rootProperty: '--chat-panel-width' });
+  const panel = usePanelWidth({ storageKey: widthKey, fallback: window.innerWidth >= 1600 ? 510 : 440, min: 320, maximum: maximumWidth, ...(widthProperty ? { rootProperty: widthProperty } : {}) });
   return { fontSize, panel, width: panel.width };
 }

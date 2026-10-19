@@ -9,6 +9,7 @@ function page() {
   const done: unknown[][] = [];
   const controls: MasterControls = {
     selectSession: id => done.push(['selectSession', id]),
+    openMaster: id => done.push(['openMaster', id]),
     openNewSession: (cwd, draft) => done.push(['openNewSession', cwd, draft]),
     openAutoPrompt: (cwd, node) => done.push(['openAutoPrompt', cwd, node]),
     showHelp: () => done.push(['showHelp']),

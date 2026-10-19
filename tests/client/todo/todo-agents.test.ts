@@ -6,7 +6,7 @@ import type { Session } from '../../../shared/types.js';
 import type { TodoAgent, TodoTask } from '../../../shared/todo/types.js';
 import { OWN_PRESS, TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { TaskDetail, type DetailTab } from '../../../client/src/todo/TaskDetail.js';
-import { agentLook, screenSelect, TodoAgentContext, type TodoAgentView } from '../../../client/src/todo/todo-agents.js';
+import { agentLook, masterOpener, screenSelect, TodoAgentContext, type TodoAgentView } from '../../../client/src/todo/todo-agents.js';
 import { cardContext } from '../../../client/src/todo/todo-views.js';
 import { emptyWorld, withDetail, worldFromOverview } from '../../../client/src/todo/todo-model.js';
 import { overview, task } from './fixtures.js';
@@ -104,6 +104,19 @@ test('the master\'s close leaves an issue chat the Todo page shows, and otherwis
   open = null;
   select(null);
   assert.deepEqual(selected, ['claude:x', null]);
+});
+
+test('the master\'s button opens its conversation over the Todo page while that page shows, and on the canvas otherwise', () => {
+  const overTodo: (string | null)[] = [];
+  const selected: (string | null)[] = [];
+  let onTodo = true;
+  const open = masterOpener(() => onTodo, id => overTodo.push(id), id => selected.push(id));
+  open('claude:master');
+  open(null);
+  assert.deepEqual([overTodo, selected], [['claude:master', null], []], 'the owner stays on the Todo page');
+  onTodo = false;
+  open('claude:master');
+  assert.deepEqual([overTodo, selected], [['claude:master', null], ['claude:master']], 'the page is read at each press: on the canvas, as before');
 });
 
 test('a todo whose issue master waits while the work it handed out runs is at work: coloured icon, the count, the moving border', () => {
