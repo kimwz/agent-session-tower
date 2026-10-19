@@ -59,4 +59,29 @@ export interface RetentionOverview {
   providers: Record<Provider, RetentionCapability>;
   entries: RetentionJournalEntry[];
   temporary?: { checkedAt?: string; examined: number; removedEmpty: number; releasedOwned: number; deferredActive: number; deferredUnproven: number; failed: number; issues: string[] };
+  /** The latest cycles, newest last (see RetentionCycleRecord). */
+  recentCycles?: RetentionCycleRecord[];
 }
+
+/**
+ * One retention cycle, as kept for tracing: `check` is the owner's "현재 기록 확인·정리", `scheduled` the service's own,
+ * with what it was scheduled for (`request`: an archive request came; `waiting`: a requested session was still at work;
+ * `catch-up`: the last one ran out of budget; `resume`: requests were waiting when maintenance resumed; `hourly`;
+ * `startup`: the worker started).
+ */
+export interface RetentionCycleRecord {
+  trigger: 'scheduled' | 'check';
+  reason?: RetentionCycleReason;
+  startedAt: string;
+  endedAt: string;
+  ms: number;
+  observationComplete?: boolean;
+  candidates: number;
+  /** Session ids moved to cold storage in this cycle. */
+  archived: string[];
+  /** Candidates that ended in conflict. */
+  conflicts: number;
+  deferredReasons: Record<string, number>;
+  error?: string;
+}
+export type RetentionCycleReason = 'request' | 'waiting' | 'catch-up' | 'resume' | 'hourly' | 'startup';

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { AutoPromptJob, Run, Session } from '../../shared/types.js';
-import { PROMPT_PREVIEW, pageSelector, scopeFromBody, scopeFromParams, scopeParams, sameScope, sessionSummary, temporaryFolder } from '../../shared/session-scope.js';
+import { PROMPT_PREVIEW, pageSelector, putAway, scopeFromBody, scopeFromParams, scopeParams, sameScope, sessionSummary, temporaryFolder } from '../../shared/session-scope.js';
 
 const NOW = Date.parse('2026-10-01T12:00:00.000Z');
 const hoursAgo = (hours: number) => new Date(NOW - hours * 3_600_000).toISOString();
@@ -59,6 +59,19 @@ test('the default scope holds only the open main sessions the list can show', ()
   assert.deepEqual(ids(select({ closed: false })), ['recent', 'old', 'old-working', 'old-waiting', 'old-process']);
   // The archived list shows every closed main session, whatever its age.
   assert.deepEqual(ids(select({ days: 1, closed: true })), ['recent', 'old-working', 'old-waiting', 'old-process', 'archived']);
+});
+
+test('a session waiting to leave for cold storage is listed with the closed ones, even while it works', () => {
+  const sessions = [session('open'), session('leaving', { archiveRequested: true }), session('leaving-working', { archiveRequested: true, status: 'working' })];
+  const select = sessionSelector({ sessions, runs: [] }, NOW);
+  assert.deepEqual(ids(select({ days: 1, closed: false })), ['open']);
+  assert.deepEqual(ids(select({ days: 1, closed: true })), ['open', 'leaving', 'leaving-working']);
+  const summary = sessionSummary(sessions, []);
+  assert.deepEqual(summary.counts, { open: 1, closed: 2, working: 0, completed: 1 });
+  // Its folder keeps its canvas place: reopening the todo brings the session back where it was.
+  const leavingOnly = sessionSummary([session('x', { cwd: '/work/x', project: 'x', archiveRequested: true }), session('y', { cwd: '/work/y', project: 'y', closed: true })], []);
+  assert.deepEqual(leavingOnly.projects.map(project => project.open), [true, false]);
+  assert.ok(putAway(sessions[1]) && putAway(session('c', { closed: true })) && !putAway(sessions[0]));
 });
 
 test('opening a session brings its whole family, by any id it is known by', () => {

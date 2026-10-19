@@ -25,6 +25,8 @@ export interface RunnerSnapshot {
   nativeIds: Record<string, string>;
   /** The execution worker owns closure writes when workerClosed is advertised. */
   closedIds?: string[];
+  /** Sessions with a pending archive request (retention's archiveWhenIdle); absent from workers that predate it. */
+  archiveRequestedIds?: string[];
   settled: string[];
   autoPrompts: AutoPromptJob[];
   /** Absent from workers that predate version reporting. */

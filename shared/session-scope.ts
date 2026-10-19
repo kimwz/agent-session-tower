@@ -10,7 +10,7 @@ import type { AutoPromptJob, Run, Session, Snapshot } from './types.js';
 export interface SessionScope {
   /** The list's time window in days; absent for all time. */
   days?: number;
-  /** The archived list is open: every closed main session, whatever its age. */
+  /** The archived list is open: every closed main session (`putAway`), whatever its age. */
   closed: boolean;
   /** The opened session: its whole family is sent. */
   focus?: string;
@@ -21,7 +21,7 @@ export interface SessionScope {
 /** What a page shows about all of this computer's sessions, including those it was not sent. */
 export interface SessionSummary {
   counts: { open: number; closed: number; working: number; completed: number };
-  /** Every folder a main session ran in, with its project label; `open` when an open one did. A session with no folder is listed by project, as the canvas groups it. */
+  /** Every folder a main session ran in, with its project label; `open` when one not closed did (one only waiting to leave counts). A session with no folder is listed by project, as the canvas groups it. */
   projects: Array<{ cwd: string; project: string; open: boolean }>;
   /** Some open main session would be on the canvas with no time filter. */
   canvasHistory: boolean;
@@ -29,6 +29,14 @@ export interface SessionSummary {
 
 const MAX_DAYS = 36_500;
 const MAX_FOCUS = 1024;
+
+/**
+ * Listed with the closed sessions rather than on the canvas and in the open list: closed by the owner, or waiting to
+ * leave for cold storage (a completed todo's). Only where pages show sessions; work and access follow `closed` alone.
+ */
+export function putAway(session: Pick<Session, 'closed' | 'archiveRequested'>): boolean {
+  return Boolean(session.closed || session.archiveRequested);
+}
 
 /** Temporary worktrees stay in session history but do not occupy the canvas. `cwd` is the folder on its own computer. */
 export function temporaryFolder(cwd: string): boolean {
@@ -132,7 +140,7 @@ export function pageSelector(snapshot: Pick<Snapshot, 'sessions' | 'runs' | 'aut
     const cutoff = scope.days === undefined ? -Infinity : now - scope.days * 86_400_000;
     for (const session of mains) {
       // A conversation still being created is sent too: its first turn is about to make it shown.
-      const shown = session.closed ? scope.closed : session.creationPending || listShows(session, cutoff);
+      const shown = putAway(session) ? scope.closed : session.creationPending || listShows(session, cutoff);
       if (shown) kept.add(session.id);
     }
     if (scope.masters) for (const session of masters) kept.add(session.id);
@@ -188,8 +196,9 @@ export function sessionSummary(sessions: Session[], runs: Run[]): SessionSummary
   for (const session of sessions) {
     if (roots.get(session.id) !== session.id || session.launchedByAgent || session.master) continue;
     const key = session.cwd || `\0${session.project}`;
+    // A folder whose sessions only wait to leave keeps its canvas place: reopening their todo brings them back.
     projects.set(key, { cwd: session.cwd, project: session.project, open: !session.closed || projects.get(key)?.open === true });
-    if (session.closed) { counts.closed++; continue; }
+    if (putAway(session)) { counts.closed++; continue; }
     counts.open++;
     if (session.status === 'working') counts.working++;
     if (session.status === 'completed') counts.completed++;

@@ -17,6 +17,11 @@ export interface Session {
   title: string;
   customTitle?: string;
   closed?: boolean;
+  /**
+   * Handed to retention to leave for cold storage once its work is over (a completed todo's sessions). Its work goes on;
+   * pages only list it with the closed sessions (`putAway`), and reopening it takes the request back.
+   */
+  archiveRequested?: true;
   creationPending?: boolean;
   /** Stable starting project directory, not the agent shell's latest directory. */
   cwd: string;

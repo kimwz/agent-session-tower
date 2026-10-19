@@ -606,6 +606,7 @@ async function main() {
     reopen: id => backend.setClosed!(id, false),
     // The worker's retention moves them (and their sub-agents) to compressed storage once their work is over.
     requestArchive: ids => runs.retention('requestArchive', ids),
+    withdrawArchive: ids => runs.retention('withdrawRequest', ids),
     createSession: input => backend.createSession!(input),
     uncertain: error => errorDisposition(error) === 'uncertain',
     model: () => resolveModel(stateDir, 'todo.master'),

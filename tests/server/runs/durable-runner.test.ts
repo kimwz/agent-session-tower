@@ -301,6 +301,33 @@ test('an archive request names 1 to 500 sessions, records each under its canonic
   assert.equal(f.starts(), 0);
 });
 
+test('a session with an archive request is listed as leaving (not closed) at once; withdrawing or reopening shows it again', async t => {
+  const f = await fixture(true, true); t.after(f.cleanup);
+  const client = await f.connect();
+  assert.equal(client.applyClosed(f.session).archiveRequested, undefined);
+  await client.retention('requestArchive', [f.session.id]);
+  // The answer carries the next snapshot: no poll needed.
+  assert.deepEqual(client.applyClosed(f.session), { ...f.session, archiveRequested: true });
+  assert.deepEqual(await client.retention('withdrawRequest', [f.session.id]), { withdrawn: 1 });
+  assert.equal(client.applyClosed(f.session).archiveRequested, undefined);
+  assert.equal(f.retentionStore.policy(f.session.id)?.archiveWhenIdle, undefined);
+  await assert.rejects(client.retention('withdrawRequest', []), /Invalid retention archive request/);
+  // A cycle holding retention's queue does not hold pages back: the polled snapshot shows the request before it is written.
+  let release!: () => void;
+  (f.retention!.service as unknown as { operations: Promise<unknown> }).operations = new Promise<void>(resolve => { release = resolve; });
+  const pending = client.retention('requestArchive', [f.session.id]);
+  try {
+    await until(() => client.applyClosed(f.session).archiveRequested === true);
+    assert.equal(f.retentionStore.policy(f.session.id)?.archiveWhenIdle, undefined, 'not written yet');
+  } finally { release(); }
+  await pending;
+  assert.equal(f.retentionStore.policy(f.session.id)?.archiveWhenIdle, true);
+  await client.setClosed(f.session.id, false);
+  await until(() => client.applyClosed(f.session).archiveRequested === undefined);
+  assert.equal(client.applyClosed(f.session).closed, undefined);
+  assert.equal(f.starts(), 0);
+});
+
 test('reopening does not claim success or change visibility when archive cancellation fails or retention initialization is unavailable', async t => {
   const f = await fixture(true, true); t.after(f.cleanup);
   const client = await f.connect(); await client.setClosed(f.session.id, true);
