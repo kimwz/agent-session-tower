@@ -443,8 +443,8 @@ a.todo-file-name:hover { text-decoration:underline; }
 .todo-cal-more:hover { background:#1a2433; color:var(--text); }
 .todo-cal-day-popover { width:260px; display:flex; flex-direction:column; gap:3px; }
 .todo-cal-day-popover h4 { margin:2px 4px 6px; font-size:12px; color:#a8b6c8; }
-/* As tall as the day's number: two lines of dots (23px) run a pixel into the gap below rather than move the entries down. */
-.todo-cal-day-row { display:flex; align-items:flex-start; gap:4px; min-width:0; height:22px; }
+/* As tall as the day's number, its dots centered on it: one line or two (23px, half a pixel past each edge) never moves the entries. */
+.todo-cal-day-row { display:flex; align-items:center; gap:4px; min-width:0; height:22px; }
 /* Clipped below two lines only: a `+n` wider than a narrow cell's line may run past its side. */
 .todo-cal-done-dots { display:flex; flex:1; flex-wrap:wrap; align-content:flex-start; gap:1px; min-width:0; max-height:23px; overflow-x:visible; overflow-y:clip; }
 .todo-cal-done-dot { display:grid; place-items:center; width:11px; height:11px; flex:none; padding:0; border-radius:50%; }
@@ -592,7 +592,7 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-cal-day-row { align-self:stretch; gap:2px; height:auto; }
   /* The day's number sits at the left beside its completions; the entries' dots line up under it. */
   .todo-cal-dots { align-self:stretch; justify-content:flex-start; padding-left:3px; }
-  .todo-cal-done-dots { gap:2px; max-height:17px; padding-top:3px; }
+  .todo-cal-done-dots { gap:2px; max-height:12px; }
   .todo-cal-done-dots > i { width:5px; height:5px; box-shadow:none; }
   .todo-cal-done-more { min-width:0; height:5px; padding:0; font-size:8px; line-height:5px; }
   .todo-cal-week-view { flex:none; height:calc(100dvh - 210px); }

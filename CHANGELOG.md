@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.161.0] - 2026-10-20
+
+- **캘린더 월간 보기의 완료 점이 날짜 숫자와 세로 가운데가 맞습니다.** 점이 한 줄일 때 위로 붙어 있던 것을 날짜 숫자의 가운데 높이로 내렸습니다. 두 줄일 때도 묶음 전체의 가운데가 숫자 가운데와 맞습니다. 데스크톱과 휴대폰 모두 같고, `+n`·색·툴팁·주간 보기는 그대로입니다.
+
 ## [1.160.0] - 2026-10-19
 
 - **할 일 화면에서 마스터 에이전트를 열어도 할 일 화면에 그대로 있습니다.** 지금까지는 할 일 화면에서 마스터 버튼(또는 Shift+M)을 누르면 캔버스로 넘어갔습니다. 이제 마스터 대화가 할 일 화면 오른쪽에 캔버스와 같은 대화 창으로 열리고, 버튼을 다시 누르거나 창의 닫기·Esc로 닫으면 할 일 화면이 그대로 남습니다. 음성 대화 중 바의 대화 열기 버튼, 마스터 설정 창에서 처음 시작한 마스터도 같습니다. 캔버스에서는 지금처럼 캔버스에서 열리고, 음성 대화를 켠 채 할 일과 캔버스를 오가는 흐름도 그대로입니다.
