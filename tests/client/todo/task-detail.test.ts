@@ -86,6 +86,25 @@ test('an empty issue chat offers the presets as buttons: the saved ones in order
   assert.deepEqual(presets(render(task('a'), { tab: 'chat', chatPresets: ['조사 해줘'] })), ['조사 해줘']);
 });
 
+test('both tabs of the detail have a left edge to drag; it starts at 640px and comes back at the saved width', t => {
+  setLanguage('ko');
+  delete (globalThis as { window?: unknown }).window; // An earlier test's storage stub has no window size.
+  const handle = (markup: string) => /<div class="chat-resize-handle todo-detail-resize" role="separator" tabindex="0" aria-label="상세 패널 너비 조절" aria-orientation="vertical" aria-valuemin="480" aria-valuemax="[^"]+" aria-valuenow="(\d+)"/.exec(markup)?.[1];
+  for (const tab of ['detail', 'chat'] as const) {
+    const markup = render(task('a'), { tab });
+    assert.equal(handle(markup), '640', tab);
+    assert.match(markup, /class="todo-detail[^"]*" aria-label="[^"]*" tabindex="-1" style="--todo-detail-width:640px"/, tab);
+  }
+  t.after(() => { delete (globalThis as { window?: unknown }).window; });
+  const values = new Map([['agent-session-tower.todo-detail-width', '900']]);
+  (globalThis as { window?: unknown }).window = { innerWidth: 1440, localStorage: { getItem: (key: string) => values.get(key) ?? null, setItem() {} } };
+  assert.equal(handle(render(task('a'))), '900');
+  values.set('agent-session-tower.todo-detail-width', '5000');
+  assert.equal(handle(render(task('a'))), '1400', 'no wider than the page leaves room for');
+  values.set('agent-session-tower.todo-detail-width', '100');
+  assert.equal(handle(render(task('a'))), '480', 'no narrower than the property card needs');
+});
+
 test('the presets editor saves trimmed rows without blanks, and a drag moves one row', () => {
   assert.deepEqual(presetsToSave([' a ', '', '  ', 'b']), ['a', 'b']);
   assert.deepEqual(movePreset(['a', 'b', 'c'], 0, 2), ['b', 'c', 'a']);

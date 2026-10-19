@@ -899,6 +899,7 @@ export const english: Record<string, string> = {
   '이 실행기는 요청 끼워넣기를 지원하지 않습니다.': 'This runner does not support steering.',
 
   '대화창 너비 조절': 'Resize chat panel',
+  '상세 패널 너비 조절': 'Resize detail panel',
   '대화 글자 크기': 'Chat font size',
   '글자 작게': 'Decrease font size',
   '글자 크게': 'Increase font size',

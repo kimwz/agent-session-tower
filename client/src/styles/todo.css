@@ -157,7 +157,7 @@
 .todo-drag-overlay .todo-card { border-color:#4a6c9a; box-shadow:0 18px 40px #000a; cursor:grabbing; }
 
 /* Detail */
-.todo-detail { position:absolute; top:0; right:0; bottom:0; z-index:30; display:flex; flex-direction:column; width:min(640px, calc(100% - 40px)); border-left:1px solid var(--line); background:#0f1621; box-shadow:-24px 0 60px #0007; outline:none; }
+.todo-detail { position:absolute; top:0; right:0; bottom:0; z-index:30; display:flex; flex-direction:column; width:min(var(--todo-detail-width, 640px), calc(100% - 40px)); border-left:1px solid var(--line); background:#0f1621; box-shadow:-24px 0 60px #0007; outline:none; }
 .todo-detail-bar { display:flex; align-items:center; gap:6px; height:50px; padding:0 14px 0 18px; border-bottom:1px solid #1f2a39; }
 .todo-detail-back { display:none; }
 .todo-breadcrumb { display:inline-flex; align-items:center; gap:7px; max-width:200px; padding:4px 6px; border-radius:6px; color:#93a3b8; font-size:12px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
@@ -487,6 +487,7 @@ a.todo-file-name:hover { text-decoration:underline; }
 /* Narrow and phone */
 @media (max-width:900px) {
   .todo-detail { width:100%; }
+  .todo-detail > .todo-detail-resize { display:none; }
 }
 @media (max-width:680px) {
   .page-switch { margin-left:4px; }
