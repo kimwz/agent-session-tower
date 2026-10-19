@@ -1,6 +1,7 @@
 /**
  * The Todo page's keys: `Q` add, `/` search, `B` board, `C` calendar (each pressed again goes back to the other,
- * `layoutFor`), `W`/`M` calendar by week or month, `Shift+V` board or calendar, `V` the list of lists to go to (`readSwitchKey`), `G` then `A`/`T`/`U`/`I` everything, today, upcoming, inbox;
+ * `layoutFor`), `W`/`M` calendar by week or month, `Shift+V` board or calendar, `V` the list of lists to go to
+ * (`readSwitchKey`), `G` then `A`/`T`/`U`/`I` everything, today, upcoming, inbox;
  * arrows move the chosen task on the board; on the chosen task `E` complete, `Shift+E` complete and add the next, `N`
  * add the next, `Enter` open; `Esc` close, or let go of the chosen task; `⌘Z`/`Ctrl+Z` undo the last change. `1` and
  * `2` switch pages (app/page-shortcuts.ts).
