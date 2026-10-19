@@ -204,10 +204,13 @@ export class RetentionService {
       coldBytes: this.coldBytes, originalBytes: this.originalBytes, providers: { claude: this.options.adapter.capability('claude'), codex: this.options.adapter.capability('codex') }, entries,
       ...(this.options.log ? { recentCycles: this.options.log.recent(20) } : {}) };
   }
-  /** `check`: the owner asked (or a test); `scheduled`: the service's own timer. One already running is joined. */
-  cycle(trigger: 'scheduled' | 'check' = 'check'): Promise<RetentionOverview> {
+  /**
+   * `check`: the owner asked (or a test); `scheduled`: the service's own timer (or the worker's start, `startup`). One
+   * already running is joined.
+   */
+  cycle(trigger: 'scheduled' | 'check' = 'check', startup?: 'startup'): Promise<RetentionOverview> {
     if (this.checking) return this.checking;
-    const reason = trigger === 'scheduled' ? this.dueReason : undefined;
+    const reason = trigger === 'scheduled' ? startup ?? this.dueReason : undefined;
     const task = this.serial(() => this.recordedCycle(trigger, reason)); this.checking = task;
     void task.finally(() => {
       this.checking = undefined;
@@ -431,13 +434,13 @@ export class RetentionService {
       if (!await lease.revalidate()) { await this.put(entry, 'conflict', 'Retention preconditions changed.'); return; }
       await lease.preserveOwnership(); await this.put(entry, 'removing');
       const members = await lease.moveCold();
+      this.cycleArchived.push(...members.filter(member => member.state === 'cold').map(member => member.sessionId));
       this.publishCold();
       const current = this.options.store.get(entry.id) || entry;
       if (!members.length || members.some(member => member.state !== 'cold')) {
         await this.options.store.put({ ...current, phase: 'conflict', error: 'Some members could not be moved to cold storage.', updatedAt: new Date().toISOString() }); return;
       }
       await this.options.store.put({ ...current, phase: 'archived', updatedAt: new Date().toISOString() });
-      this.cycleArchived.push(...members.map(member => member.sessionId));
       try {
         await this.options.archive.create(entry.id, entry.candidate, records, await lease.sources(members));
         await this.options.archive.verify(entry.id); this.verified.add(entry.id);

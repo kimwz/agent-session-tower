@@ -337,10 +337,11 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (action === 'requestArchive' || action === 'withdrawRequest') {
           if (!Array.isArray(value) || !value.length || value.length > 500 || value.some(id => typeof id !== 'string' || !id || id.length > 4096)) throw new TowerError('invalid', 'Invalid retention archive request.');
           const ids = (value as string[]).map(id => options.runs.getSession(id)?.id ?? id);
-          // Pages hide requested sessions (archiveRequestedIds): the next snapshot shows the change.
-          const result = await (action === 'requestArchive' ? service.requestArchive(ids) : service.withdrawArchiveRequests(ids));
+          // Pages hide requested sessions (archiveRequestedIds) as soon as the service notes the intent, before a running
+          // cycle lets it be written: the next snapshot shows it, and the one after the write too.
+          const written = action === 'requestArchive' ? service.requestArchive(ids) : service.withdrawArchiveRequests(ids);
           changed();
-          return result;
+          try { return await written; } finally { changed(); }
         }
         if (typeof value !== 'string' || !value || value.length > 4096) throw new TowerError('invalid', 'Invalid retention target.');
         if (action === 'archive') return service.archiveSession(value);
@@ -1655,7 +1656,7 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
     runs.markReady();
     startupComplete = true;
     reviewer.release();
-    void retention?.service.cycle().catch(error => console.error(`Session retention: ${error instanceof Error ? error.message : String(error)}`));
+    void retention?.service.cycle('scheduled', 'startup').catch(error => console.error(`Session retention: ${error instanceof Error ? error.message : String(error)}`));
     // A restore's skills are written once the worker serves: linking into project folders (on a slow volume, say) never
     // keeps it from starting. The restore is recorded as done after them; a worker that stops first leaves it to the next.
     if (restoring) void (async () => {

@@ -66,7 +66,8 @@ export interface RetentionOverview {
 /**
  * One retention cycle, as kept for tracing: `check` is the owner's "현재 기록 확인·정리", `scheduled` the service's own,
  * with what it was scheduled for (`request`: an archive request came; `waiting`: a requested session was still at work;
- * `catch-up`: the last one ran out of budget; `resume`: requests were waiting when maintenance resumed; `hourly`).
+ * `catch-up`: the last one ran out of budget; `resume`: requests were waiting when maintenance resumed; `hourly`;
+ * `startup`: the worker started).
  */
 export interface RetentionCycleRecord {
   trigger: 'scheduled' | 'check';
@@ -83,4 +84,4 @@ export interface RetentionCycleRecord {
   deferredReasons: Record<string, number>;
   error?: string;
 }
-export type RetentionCycleReason = 'request' | 'waiting' | 'catch-up' | 'resume' | 'hourly';
+export type RetentionCycleReason = 'request' | 'waiting' | 'catch-up' | 'resume' | 'hourly' | 'startup';
