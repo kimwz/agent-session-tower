@@ -27,6 +27,7 @@ import { draftFromRun, finishComposerSend, restoreComposerEffort, getComposerSta
 import { matchChatRuns } from './chat-runs';
 import { EffortPicker, ModelPicker, supportedEffort } from './ModelPicker';
 import { useChatAppearance } from './chat-appearance';
+import { PanelResizeHandle } from '../common/panel-resize';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { localPart, nodeHeaders, nodeOf, pathFor, scopeDetail, scopedId, settleRequest } from '../remote/scope';
 import { SecretComposer, SecretChips, SecretComposerProvider } from '../secrets/SecretChatDialog';
@@ -261,9 +262,7 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
   const sendingLabel = stage === 'preparing' ? t("파일 준비 중") : t("보내는 중");
 
   return <RemoteContent.Provider value={host?.name}><WorkspaceFilesContext.Provider value={files}><div className="chat-panel-spacer" aria-hidden="true" style={{ width: appearance.width, flexBasis: appearance.width }} /><aside className="chat-panel" style={{ '--chat-font-size': `${appearance.fontSize}px`, '--chat-width': `${appearance.width}px` } as CSSProperties} aria-label={t("세션 대화")}>
-    <div className="chat-resize-handle" role="separator" tabIndex={0} aria-label={t("대화창 너비 조절")} aria-orientation="vertical" aria-valuemin={320} aria-valuemax={appearance.maxWidth} aria-valuenow={appearance.width}
-      onPointerDown={appearance.startResize} onPointerMove={appearance.resize} onPointerUp={appearance.stopResize} onPointerCancel={appearance.stopResize} onLostPointerCapture={appearance.stopResize}
-      onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); appearance.changeWidth(appearance.width + (event.key === 'ArrowLeft' ? 20 : -20)); } }} />
+    <PanelResizeHandle panel={appearance.panel} label={t("대화창 너비 조절")} />
     <header className="chat-header">
       <div className="chat-heading-line">
         {current && <span className={`chat-context-icon ${current.status}`}><SessionContextIcon provider={current.provider} usage={current.contextUsage} descriptionId={contextDescription} compact label={providerLabels[current.provider]} /></span>}

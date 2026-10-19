@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowRight, ArrowUpFromLine, CalendarDays, Check, CheckCheck
 import type { TodoAgent, TodoEvent, TodoFile, TodoPriority, TodoTask } from '../../../shared/todo/types';
 import { liveProjectIds } from '../../../shared/todo/compose';
 import { relativeTime } from '../common/lib';
+import { PanelResizeHandle, usePanelWidth } from '../common/panel-resize';
 import { getLanguage, translate as t } from '../i18n/i18n';
 import { DatePicker, type DateValue } from './DatePicker';
 import { Menu, Popover, usePopover, type MenuItem } from './Popover';
@@ -525,6 +526,12 @@ function AgentChat({ task, agent, presets, client, readOnly, onLeave }: { task: 
   return <AgentStart key={task.id} task={task} presets={shownChatPresets(presets)} client={client} readOnly={readOnly} />;
 }
 
+/** The detail panel's width on a wide screen: 640px until the owner drags its edge. It covers the header's right, so it
+ * leaves the header's controls beside it with their gaps: 413px in Korean, 449px in English (wider "Settings"). */
+const DETAIL_WIDTH_KEY = 'agent-session-tower.todo-detail-width';
+const DETAIL_MIN_WIDTH = 480;
+const DETAIL_HEADER_ROOM = 460;
+
 /** The detail's tabs: the task itself, or its issue chat. The one chosen stays while the page is open. */
 export type DetailTab = 'detail' | 'chat';
 
@@ -553,6 +560,10 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
   useEffect(() => { setMoving(false); }, [taskId]);
   const panel = useRef<HTMLElement>(null);
   useEffect(() => { panel.current?.focus({ preventScroll: true }); }, [taskId]);
+  // One width for both tabs, so switching between them does not move the edge. The property card needs 480px. On a wide
+  // screen the panel covers the right of the window, header included, and the header's controls move beside it (todo.css).
+  const size = usePanelWidth({ storageKey: DETAIL_WIDTH_KEY, fallback: 640, min: DETAIL_MIN_WIDTH, rootProperty: '--todo-detail-panel-width',
+    maximum: () => (typeof window === 'undefined' ? Infinity : window.innerWidth) - DETAIL_HEADER_ROOM });
   const project = task && world.projects.find(item => item.id === task.projectId);
   const parent = task?.parentId ? world.tasks[task.parentId] : undefined;
   const context: DetailContext | undefined = task && { task, world, today, client, actions, readOnly, uploads };
@@ -560,7 +571,9 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
   const chatting = tab === 'chat';
   // Files pasted or dropped anywhere in it go to the description (the comment box keeps its own); the chat takes its own.
   const drop = useFileDrop(files => task && uploads.add(files, { taskId: task.id }), readOnly || !task || chatting);
-  return <aside ref={panel} className={`todo-detail ${drop.over ? 'drop-target' : ''} ${chatting ? 'chatting' : ''}`} aria-label={task ? task.content : t('작업')} tabIndex={-1} {...drop.handlers}>
+  return <aside ref={panel} className={`todo-detail ${drop.over ? 'drop-target' : ''} ${chatting ? 'chatting' : ''}`} aria-label={task ? task.content : t('작업')} tabIndex={-1}
+    style={{ '--todo-detail-width': `${size.width}px` } as CSSProperties} {...drop.handlers}>
+    <PanelResizeHandle panel={size} label={t('상세 패널 너비 조절')} className="todo-detail-resize" />
     <header className="todo-detail-bar">
       <button type="button" className="icon-button todo-detail-back" aria-label={t('닫기')} onClick={onClose}><ArrowLeft size={17} /></button>
       {project && <button type="button" className="todo-breadcrumb" onClick={() => onProject(project.id)}><i className="todo-dot" style={{ background: colorOf(project.color) }} />{project.inbox ? t('관리함') : project.name}</button>}

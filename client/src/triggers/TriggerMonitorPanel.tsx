@@ -4,6 +4,7 @@ import type { SlackPublicStatus } from '../../../shared/slack';
 import type { TriggerEvent } from '../../../shared/triggers';
 import type { AutoPromptJob } from '../../../shared/types';
 import { useChatAppearance } from '../chat/chat-appearance';
+import { PanelResizeHandle } from '../common/panel-resize';
 import { SessionTail } from '../chat/SessionTail';
 import { absoluteTime } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
@@ -30,7 +31,7 @@ export function TriggerMonitorPanel({ token, slack, slackError, mentionId, jobs,
   const overview = !eventId && !mentionId;
   const [shown, setShown] = useState(PANEL_PAGE);
   return <><div className="chat-panel-spacer" aria-hidden="true" style={{ width: appearance.width, flexBasis: appearance.width }} /><aside className="chat-panel slack-monitor-panel trigger-monitor-panel" aria-label={t('트리거 모니터')} style={{ '--chat-font-size': `${appearance.fontSize}px`, '--chat-width': `${appearance.width}px` } as CSSProperties}>
-    <div className="chat-resize-handle" role="separator" tabIndex={0} aria-label={t('대화창 너비 조절')} aria-orientation="vertical" aria-valuemin={320} aria-valuemax={appearance.maxWidth} aria-valuenow={appearance.width} onPointerDown={appearance.startResize} onPointerMove={appearance.resize} onPointerUp={appearance.stopResize} onPointerCancel={appearance.stopResize} onLostPointerCapture={appearance.stopResize} onKeyDown={key => { if (key.key === 'ArrowLeft' || key.key === 'ArrowRight') { key.preventDefault(); appearance.changeWidth(appearance.width + (key.key === 'ArrowLeft' ? 20 : -20)); } }} />
+    <PanelResizeHandle panel={appearance.panel} label={t('대화창 너비 조절')} />
     <header className="chat-header"><div className="chat-heading-line"><Zap size={20} /><h2>{t('트리거 모니터')}</h2><div className="chat-header-actions"><button className="icon-button" onClick={onClose} aria-label={t('닫기')}><X size={18} /></button></div></div></header>
     <div className="slack-monitor-content">
       {slackError && <p role="alert">{translateMessage(slackError)}</p>}

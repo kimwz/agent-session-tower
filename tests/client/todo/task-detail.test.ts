@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -10,6 +10,9 @@ import { forgetFoldedForTests } from '../../../client/src/todo/todo-prefs.js';
 import { movePreset, presetsDirty, presetsToSave, shownChatPresets } from '../../../client/src/todo/chat-presets.js';
 import { setLanguage } from '../../../client/src/i18n/i18n.js';
 import { overview, task } from './fixtures.js';
+
+// Each test brings its own browser stub (storage, window size) and leaves none behind.
+afterEach(() => { delete (globalThis as { window?: unknown }).window; });
 
 const render = (item: ReturnType<typeof task>, options: { tab?: 'detail' | 'chat'; chatPresets?: string[]; readOnly?: boolean } = {}) => {
   const world = withDetail(worldFromOverview({ ...overview([item]), ...(options.chatPresets ? { chatPresets: options.chatPresets } : {}) }, emptyWorld()), { task: item, subtasks: [], comments: [], files: [], completions: [], events: [], previous: [], next: [] });
@@ -84,6 +87,24 @@ test('an empty issue chat offers the presets as buttons: the saved ones in order
   setLanguage('en');
   assert.deepEqual(presets(render(task('a'), { tab: 'chat' })), ['Start the work', 'Design it', 'Research it']);
   assert.deepEqual(presets(render(task('a'), { tab: 'chat', chatPresets: ['조사 해줘'] })), ['조사 해줘']);
+});
+
+test('both tabs of the detail have a left edge to drag; it starts at 640px and comes back at the saved width', t => {
+  setLanguage('ko');
+  const handle = (markup: string) => /<div class="chat-resize-handle todo-detail-resize" role="separator" tabindex="0" aria-label="상세 패널 너비 조절" aria-orientation="vertical" aria-valuemin="480" aria-valuemax="[^"]+" aria-valuenow="(\d+)"/.exec(markup)?.[1];
+  const values = new Map<string, string>();
+  (globalThis as { window?: unknown }).window = { innerWidth: 1440, localStorage: { getItem: (key: string) => values.get(key) ?? null, setItem() {} } };
+  for (const tab of ['detail', 'chat'] as const) {
+    const markup = render(task('a'), { tab });
+    assert.equal(handle(markup), '640', tab);
+    assert.match(markup, /class="todo-detail[^"]*" aria-label="[^"]*" tabindex="-1" style="--todo-detail-width:640px"/, tab);
+  }
+  values.set('agent-session-tower.todo-detail-width', '900');
+  assert.equal(handle(render(task('a'))), '900');
+  values.set('agent-session-tower.todo-detail-width', '5000');
+  assert.equal(handle(render(task('a'))), '980', "no wider than leaves the header's controls beside it");
+  values.set('agent-session-tower.todo-detail-width', '100');
+  assert.equal(handle(render(task('a'))), '480', 'no narrower than the property card needs');
 });
 
 test('the presets editor saves trimmed rows without blanks, and a drag moves one row', () => {
