@@ -677,18 +677,19 @@ a.todo-file-name:hover { text-decoration:underline; }
 @media (max-width:680px) { .todo-agent-start { padding:16px; } .todo-detail-tabs { padding:0 10px; } }
 
 /* The master's conversation over the Todo page (App): the canvas's own chat panel, covering the right of the window and
-   the header as on the canvas, above a task detail it may cover. On a phone the detail is a full-screen layer (60), so
-   the chat goes over it and the master's button, bar and panel over the chat, in the canvas's order. */
+   the header as on the canvas, above a task detail it may cover. The master's button, bar and panel stay over the chat
+   at every width (a docked list can put the button where the chat starts); on a phone the detail is a full-screen
+   layer (60), so the chat goes over it. The header keeps room for the wider of the chat and a detail under it. */
 .todo-master-chat { display:contents; }
 .todo-master-chat .chat-panel-spacer { display:none; }
+.todo-mode:has(.todo-master-chat) :is(.master-fab, .master-tray, .master-bar) { z-index:62; }
+.todo-mode:has(.todo-master-chat) .master-panel { z-index:63; }
 @media (min-width:681px) {
-  .todo-mode:has(.todo-master-chat) .app-header .header-actions { flex:none; margin-left:auto; margin-right:var(--todo-chat-panel-width, 0px); }
+  .todo-mode:has(.todo-master-chat) .app-header .header-actions { flex:none; margin-left:auto; margin-right:max(var(--todo-chat-panel-width, 0px), var(--todo-detail-panel-width, 0px)); }
 }
 @media (min-width:681px) and (max-width:1100px) {
   .todo-mode:has(.todo-master-chat) .app-header :is(.brand h1, .brand-local, .header-center, .connection-state) { display:none; }
 }
 @media (max-width:680px) {
   .todo-master-chat .chat-panel { z-index:61; }
-  .todo-mode:has(.todo-master-chat) :is(.master-fab, .master-tray, .master-bar) { z-index:62; }
-  .todo-mode:has(.todo-master-chat) .master-panel { z-index:63; }
 }
