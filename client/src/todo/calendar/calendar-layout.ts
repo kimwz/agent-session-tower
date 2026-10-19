@@ -154,6 +154,39 @@ export function dayEntries(tasks: readonly TodoTask[], from: string, to: string,
 /** A month cell's entries in the order shown: all-day first, then timed by time; deadlines are chips of their own. */
 export const cellEntries = (entries: DayEntries | undefined): CalendarEntry[] => entries ? [...entries.allDay, ...entries.timed] : [];
 
+/** Completion dots beside a month day's number, on a desktop or a phone (smaller): a dot's size and the gap after it (px). */
+export type DotSize = 'desktop' | 'mobile';
+const DOT = { desktop: { dot: 11, gap: 1 }, mobile: { dot: 5, gap: 2 } } as const;
+/** Lines of dots a day shows at most. */
+export const DOT_LINES = 2;
+/** Dots a line before the cell is measured (and on the server): what a usual cell holds. */
+export const DOTS_PER_LINE = { desktop: 6, mobile: 3 } as const;
+/** The `+n` label's width a character and its padding (px). */
+const MORE_LABEL = { desktop: { char: 5.6, pad: 4 }, mobile: { char: 4.8, pad: 0 } } as const;
+
+/** Dots a line of `width` px holds (its exact width: a dot more than fits would push the rest to a hidden line). */
+export function dotsPerLine(width: number, size: DotSize): number {
+  const { dot, gap } = DOT[size];
+  return Math.max(1, Math.floor((width + gap) / (dot + gap)));
+}
+
+/** Dot places the `+n` of a day with `count` completions takes: enough for its longest label, at least two. */
+export function moreSlots(count: number, size: DotSize): number {
+  const label = MORE_LABEL[size], chars = 1 + String(count).length;
+  return Math.max(2, Math.ceil((chars * label.char + label.pad + DOT[size].gap) / (DOT[size].dot + DOT[size].gap)));
+}
+
+/**
+ * How many of a day's `count` completion dots show, `perLine` a line on `DOT_LINES` lines, and how many the `+n` in
+ * the last places stands for. On a line too short for the label, the `+n` takes the whole last line (and may run past it).
+ */
+export function dotRows(count: number, perLine: number, size: DotSize): { shown: number; more: number } {
+  const capacity = perLine * DOT_LINES;
+  if (count <= capacity) return { shown: count, more: 0 };
+  const shown = capacity - Math.min(moreSlots(count, size), perLine);
+  return { shown, more: count - shown };
+}
+
 /** How many entries fit a month cell before `+n`. */
 export function overflow(count: number, fit: number): { shown: number; more: number } {
   return count <= fit ? { shown: count, more: 0 } : { shown: Math.max(0, fit - 1), more: count - Math.max(0, fit - 1) };

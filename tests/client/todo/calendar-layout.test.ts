@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cellEntries, dayEntries, dayStart, doneDays, doneRange, occurrencesIn, resizeCommit, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, visibleRange, yToMinutes } from '../../../client/src/todo/calendar/calendar-layout.js';
+import { cellEntries, dotRows, dotsPerLine, moreSlots, dayEntries, dayStart, doneDays, doneRange, occurrencesIn, resizeCommit, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, visibleRange, yToMinutes } from '../../../client/src/todo/calendar/calendar-layout.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { CalendarView, dropPatch, periodTitle } from '../../../client/src/todo/calendar/CalendarView.js';
+import { CalendarView, doneDotColor, dropPatch, periodTitle } from '../../../client/src/todo/calendar/CalendarView.js';
 import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
-import { overview, task } from './fixtures.js';
+import { overview, project, task } from './fixtures.js';
+import { colorOf } from '../../../client/src/todo/todo-format.js';
 
 test('a month shows whole Monday weeks around it', () => {
   const weeks = monthWeeks('2026-10-17');
@@ -172,22 +173,23 @@ test('completions fall on the local day and minute they were made, and a period 
   });
 });
 
-test('completions show as dots down a month day that open their task, and at their time in the week', () => {
+test('completions show as dots beside a month day’s number that open their task, and at their time in the week', () => {
   const world = worldFromOverview(overview([]));
   const at = (hours: number, minutes: number) => new Date(2026, 9, 14, hours, minutes).toISOString();
   const done = [
-    ...Array.from({ length: 9 }, (_, index) => ({ completion: { id: `c${index}`, taskId: `d${index}`, occurrenceDate: null, completedAt: at(9, index) }, task: task(`d${index}`, { content: `끝낸 일 ${index}`, completedAt: at(9, index) }) })),
+    ...Array.from({ length: 14 }, (_, index) => ({ completion: { id: `c${index}`, taskId: `d${index}`, occurrenceDate: null, completedAt: at(9, index) }, task: task(`d${index}`, { content: `끝낸 일 ${index}`, completedAt: at(9, index) }) })),
     { completion: { id: 'w', taskId: 'r', occurrenceDate: '2026-10-13', completedAt: at(14, 5) }, task: task('r', { content: '반복', dueDate: '2026-10-15', recurrence: { freq: 'day', interval: 1 } }) },
   ];
   const base = { tasks: [], world, today: '2026-10-14', future: true, colorBy: 'priority' as const, mobile: false, readOnly: false, onMode() {}, onOpen() {}, onAdd() {}, onChange() {}, done };
   const month = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'month' }));
-  // Six fit the shortest row before `+n`: five dots and +5.
-  assert.equal((month.match(/class="todo-cal-done-dot"/g) ?? []).length, 5);
+  // Two lines of six (before the cell is measured) hold twelve; past that, ten dots and +5 in the last two places.
+  assert.equal((month.match(/class="todo-cal-done-dot"/g) ?? []).length, 10);
   assert.match(month, /class="todo-cal-done-more"[^>]*>\+5</);
   assert.match(month, /title="09:00 완료 · 끝낸 일 0"/);
-  assert.equal((month.match(/todo-cal-cell[^"]*with-done/g) ?? []).length, 1);
+  // Beside the day's number, in the Inbox's grey.
+  assert.match(month, /<div class="todo-cal-day-row"><span class="todo-cal-day">14<\/span><span class="todo-cal-done-dots"><button type="button" class="todo-cal-done-dot" style="--entry-color:#7d8aa0"/);
   const week = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'week' }));
-  assert.equal((week.match(/class="todo-cal-block done short"/g) ?? []).length, 10);
+  assert.equal((week.match(/class="todo-cal-block done short"/g) ?? []).length, 15);
   assert.match(week, new RegExp(`class="todo-cal-block done short" style="[^"]*top:${minutesToY(14 * 60 + 5)}px`));
   // One made just before midnight stays inside the day's grid.
   const late = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'week', done: [{ completion: { id: 'late', taskId: 'l', occurrenceDate: null, completedAt: at(23, 50) }, task: task('l') }] }));
@@ -196,6 +198,37 @@ test('completions show as dots down a month day that open their task, and at the
   const none = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'month', done: undefined }));
   assert.doesNotMatch(none, /todo-cal-done/);
   const phone = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'month', mobile: true }));
-  assert.equal((phone.match(/<span class="todo-cal-done-dots" aria-hidden="true">(<i[^>]*><\/i>)+<\/span>/g) ?? []).length, 1);
+  // A phone's two lines of three: three dots and +12 (whose two digits take three places), none of them buttons.
+  assert.match(phone, /<span class="todo-cal-done-dots" aria-hidden="true">(<i[^>]*><\/i>){3}<b class="todo-cal-done-more">\+12<\/b><\/span>/);
   assert.match(phone, /todo-cal-entry done/);
+});
+
+test('completion dots fill two lines, and the rest give way to +n in the last places', () => {
+  assert.deepEqual(dotRows(12, 6, 'desktop'), { shown: 12, more: 0 });
+  assert.deepEqual(dotRows(13, 6, 'desktop'), { shown: 10, more: 3 });
+  // The +n keeps as many places as its longest label needs: two on a desktop, three for a phone's +10 and up.
+  assert.equal(moreSlots(25, 'desktop'), 2);
+  assert.equal(moreSlots(150, 'desktop'), 3);
+  assert.equal(moreSlots(8, 'mobile'), 2);
+  assert.equal(moreSlots(25, 'mobile'), 3);
+  assert.deepEqual(dotRows(25, 3, 'mobile'), { shown: 3, more: 22 });
+  // A line shorter than the label: the +n takes the whole last line, never a third.
+  assert.deepEqual(dotRows(3, 1, 'desktop'), { shown: 1, more: 2 });
+  assert.deepEqual(dotRows(30, 2, 'mobile'), { shown: 2, more: 28 });
+  // A line holds a dot only when it fits whole: a fraction of a pixel short is one fewer (11px dots, 1px apart).
+  assert.equal(dotsPerLine(46.6, 'desktop'), 3);
+  assert.equal(dotsPerLine(47, 'desktop'), 4);
+  assert.equal(dotsPerLine(94.6, 'desktop'), 7);
+  assert.equal(dotsPerLine(5, 'desktop'), 1);
+  assert.equal(dotsPerLine(19, 'mobile'), 3);
+  assert.equal(dotsPerLine(18.9, 'mobile'), 2);
+});
+
+test('a completion dot takes its project’s color, and an Inbox task’s is grey', () => {
+  const world = worldFromOverview(overview([], { projects: [project('inbox', { inbox: true, color: 'red' }), project('web', { color: 'blue' }), project('ops', { color: 'green' })] }));
+  assert.equal(doneDotColor(world, task('a')), '#7d8aa0');
+  assert.equal(doneDotColor(world, task('b', { projectId: 'web' })), colorOf('blue'));
+  assert.equal(doneDotColor(world, task('c', { projectId: 'ops' })), colorOf('green'));
+  assert.notEqual(colorOf('blue'), colorOf('green'));
+  assert.equal(doneDotColor(world, task('d', { projectId: 'gone' })), '#7d8aa0');
 });
