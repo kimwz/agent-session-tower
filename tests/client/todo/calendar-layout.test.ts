@@ -173,9 +173,9 @@ test('completions show as dots down a month day that open their task, and at the
   ];
   const base = { tasks: [], world, today: '2026-10-14', future: true, colorBy: 'priority' as const, mobile: false, readOnly: false, onMode() {}, onOpen() {}, onAdd() {}, onChange() {}, done };
   const month = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'month' }));
-  // Seven fit before `+n`: six dots and +4.
-  assert.equal((month.match(/class="todo-cal-done-dot"/g) ?? []).length, 6);
-  assert.match(month, /class="todo-cal-done-more"[^>]*>\+4</);
+  // Six fit the shortest row before `+n`: five dots and +5.
+  assert.equal((month.match(/class="todo-cal-done-dot"/g) ?? []).length, 5);
+  assert.match(month, /class="todo-cal-done-more"[^>]*>\+5</);
   assert.match(month, /title="09:00 완료 · 끝낸 일 0"/);
   assert.equal((month.match(/todo-cal-cell[^"]*with-done/g) ?? []).length, 1);
   const week = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'week' }));

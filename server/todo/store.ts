@@ -21,6 +21,8 @@ import { TODO_DATA_TABLES, TODO_SCHEMA, TODO_SCHEMA_STEP, minWriterAt } from './
 export const TODO_COMPLETED_CURSOR = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)~(\d{1,15})$/;
 /** A completed list's time bound: a time as completions record it (`toISOString`), so comparing the text compares the times. */
 export const TODO_COMPLETED_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+/** A real time written as `toISOString` writes it (not `2026-02-30…`), so comparing the text compares the times. */
+const completedTime = (text: string) => TODO_COMPLETED_TIME.test(text) && !Number.isNaN(Date.parse(text)) && new Date(text).toISOString() === text;
 /** The fixed id of the one project that always exists. */
 export const INBOX_ID = 'inbox';
 /** Deleted things can be restored this long, then they are removed for good. */
@@ -310,7 +312,7 @@ export class TodoStore {
    */
   completed(input: { projectId?: string; labelId?: string; before?: string; since?: string; until?: string; limit?: number }): TodoCompletedPage {
     this.readable();
-    for (const bound of [input.since, input.until]) if (bound !== undefined && !TODO_COMPLETED_TIME.test(bound)) throw new TowerError('invalid', '완료 목록 기간이 올바르지 않습니다.');
+    for (const bound of [input.since, input.until]) if (bound !== undefined && !completedTime(bound)) throw new TowerError('invalid', '완료 목록 기간이 올바르지 않습니다.');
     const limit = Math.min(Math.max(input.limit ?? 50, 1), 100);
     const cursor = input.before ? TODO_COMPLETED_CURSOR.exec(input.before) : undefined;
     if (input.before && !cursor) throw new TowerError('invalid', '완료 목록 커서가 올바르지 않습니다.');
@@ -320,9 +322,10 @@ export class TodoStore {
       WHERE c.undone_at IS NULL AND t.deleted_at IS NULL AND (? IS NULL OR t.project_id = ?)
         AND (? IS NULL OR EXISTS (SELECT 1 FROM todo_task_labels tl WHERE tl.task_id = t.id AND tl.label_id = ?))
         AND (? IS NULL OR c.completed_at < ? OR (c.completed_at = ? AND c.rowid < ?))
-        AND (? IS NULL OR c.completed_at >= ?) AND (? IS NULL OR c.completed_at < ?)
+        ${input.since ? 'AND c.completed_at >= ?' : ''} ${input.until ? 'AND c.completed_at < ?' : ''}
       ORDER BY c.completed_at DESC, c.rowid DESC LIMIT ?`, input.projectId ?? null, input.projectId ?? null, input.labelId ?? null, input.labelId ?? null, at, at, at, row,
-    input.since ?? null, input.since ?? null, input.until ?? null, input.until ?? null, limit + 1);
+    // Bounds are written into the query only when given, so the index on completion times can seek to them.
+    ...(input.since ? [input.since] : []), ...(input.until ? [input.until] : []), limit + 1);
     const page = rows.slice(0, limit);
     const items = page.map(item => ({
       completion: completionOf({ id: item.c_id, task_id: item.c_task_id, occurrence_date: item.c_occurrence_date, completed_at: item.c_completed_at }), task: taskOf(item),

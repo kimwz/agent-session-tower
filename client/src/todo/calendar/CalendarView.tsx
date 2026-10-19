@@ -45,8 +45,11 @@ export interface CalendarProps {
 
 const PRIORITY_COLORS = { 1: 'var(--p1)', 2: 'var(--p2)', 3: 'var(--p3)', 4: '#7d8aa0' } as const;
 const MONTH_FIT = 4;
-/** Dots down a month day's edge before `+n`; a phone's smaller cell shows fewer and opens nothing from them. */
-const DOT_FIT = 7;
+/**
+ * Dots down a month day's edge before `+n`: as many as fit the shortest week row (96px less the cell's padding, 13px
+ * a dot); a phone's smaller cell shows fewer and opens nothing from them.
+ */
+const DOT_FIT = 6;
 const MOBILE_DOT_FIT = 3;
 
 type Drop = { kind: 'day' | 'allday' | 'time'; date: string };
