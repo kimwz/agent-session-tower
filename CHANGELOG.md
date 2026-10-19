@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.152.0] - 2026-10-19
+
+- **할 일 상세 패널의 너비를 조절할 수 있습니다.** 할 일을 열면 오른쪽에 나오는 패널(상세·채팅 탭)의 왼쪽 경계를 끌거나, 경계에 초점을 두고 ←/→ 키(20px씩)로 넓히고 좁힙니다. 세션 대화창과 같은 손잡이입니다. 480px부터 할 일 화면 너비보다 40px 좁은 데까지 바뀌고, 이 브라우저에 저장되어 새로고침 뒤에도 유지되며, 두 탭이 같은 너비를 씁니다. 처음에는 지금처럼 640px이고, 900px 이하 화면과 휴대폰에서는 지금처럼 화면을 다 채웁니다.
+
 ## [1.151.0] - 2026-10-19
 
 - **Codex가 압축한 대화도 목록에 다시 나옵니다.** Codex(0.162 이후)는 한동안 쓰지 않은 대화 기록을 `.jsonl.zst`로 압축합니다. Tower는 `.jsonl`만 읽어서, 압축된 대화가 세션 목록·대화 읽기·검색·worktree 정리와 세션 보관(프로젝트별 최근 20개 유지, 하위 세션 7일)에서 모두 빠졌습니다. 이제 압축된 기록을 풀어 읽어 같은 기준으로 다룹니다. 이어서 대화하면 Codex가 `.jsonl`로 되돌리고, 그 사이 두 파일이 함께 있으면 `.jsonl` 하나만 셉니다.
