@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.154.0] - 2026-10-19
+
+- **할 일 보드 카드의 제목이 세 줄을 넘으면 "…"으로 줄여 보입니다.** 긴 제목이 전부 펼쳐져 카드가 길어지던 것을, 세 줄까지만 보이고 나머지는 말줄임으로 줄입니다. 세 줄 이하의 제목은 그대로입니다. 전체 제목은 카드를 열면 상세에서 보이고, 마우스를 올리면 툴팁으로도 보입니다. 캘린더와 할 일 상세, 하위 작업 줄은 바뀌지 않습니다.
+
 ## [1.153.0] - 2026-10-19
 
 - **할 일 보드 카드가 하위 작업을 3건까지만 보여 줍니다.** 하위 작업이 많아도 카드가 길어지지 않도록, 순서대로 이어진 3건만 보이고 나머지는 "N건 더 있음"으로 줄입니다. 누르면 그 할 일의 상세가 열리고 전체 하위 작업은 거기서 봅니다.

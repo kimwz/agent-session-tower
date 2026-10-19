@@ -1,4 +1,5 @@
 import test, { afterEach } from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -49,6 +50,17 @@ test('a card shows its sub-tasks unless they were folded, a done one struck thro
   assert.match(markup, /aria-expanded="true"/);
   assert.match(markup, />c1</);
   assert.match(markup, /<li class="done">[^]*?>c2</, 'three or fewer show all, completed ones struck through');
+});
+
+test('a card title shows three lines at most, the whole of it in its hover text', () => {
+  (globalThis as { window?: unknown }).window = { localStorage: { getItem: () => null, setItem() {} } };
+  const long = task('p', { content: 'A title long enough to need more than three lines on a board card' });
+  const markup = renderToStaticMarkup(createElement(TaskCard, { task: long, context: cardContext(worldFromOverview(overview([long]), emptyWorld()), '2026-10-14', false), onOpen() {}, onComplete() {}, onCompleteNext() {} }));
+  assert.match(markup, /<span class="todo-card-title" title="A title long enough to need more than three lines on a board card">/);
+  const css = readFileSync(new URL('../../../client/src/styles/todo.css', import.meta.url), 'utf8');
+  const rule = css.match(/^\.todo-card-title \{([^}]*)\}/m);
+  assert.ok(rule);
+  for (const part of ['display:-webkit-box;', '-webkit-box-orient:vertical;', '-webkit-line-clamp:3;', 'overflow:hidden;']) assert.ok(rule[1].includes(part), part);
 });
 
 test('a folded card lists no sub-tasks, and says so', () => {
