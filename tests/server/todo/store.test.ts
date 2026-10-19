@@ -316,6 +316,29 @@ test('completed tasks page newest first and search finds open tasks before done 
   assert.deepEqual(store.search('50%').map(task => task.id), ['open']);
 });
 
+test('the completed list keeps the times from since (included) to until (left out), across pages', async t => {
+  const { store, apply, tick } = await fixture(t);
+  for (const id of ['one', 'two', 'three', 'four']) {
+    apply({ op: 'task.create', id, content: id });
+    tick();
+    apply({ op: 'task.complete', id, completionId: `c-${id}`, occurrence: null, today: '2026-10-17' });
+    tick();
+  }
+  const at = Object.fromEntries(store.completed({}).items.map(item => [item.task.id, item.completion.completedAt]));
+  const ids = (input: Parameters<typeof store.completed>[0]) => store.completed(input).items.map(item => item.task.id);
+  assert.deepEqual(ids({ since: at.two, until: at.four }), ['three', 'two']);
+  assert.deepEqual(ids({ since: at.three }), ['four', 'three']);
+  assert.deepEqual(ids({ until: at.two }), ['one']);
+  const first = store.completed({ since: at.one, until: at.four, limit: 2 });
+  assert.deepEqual(first.items.map(item => item.task.id), ['three', 'two']);
+  assert.deepEqual(ids({ since: at.one, until: at.four, limit: 2, before: first.before }), ['one']);
+  // An occurrence taken back leaves the list.
+  apply({ op: 'task.uncomplete', id: 'three', completionId: 'c-three' });
+  assert.deepEqual(ids({ since: at.two, until: at.four }), ['two']);
+  for (const bound of ['2026-10-17', '2026-10-17T00:00:00Z', 'x']) assert.throws(() => store.completed({ since: bound }), error => kind(error) === 'invalid');
+  assert.throws(() => store.completed({ until: '2026-10-17' }), error => kind(error) === 'invalid');
+});
+
 test('a repeating parent closes its open sub-tasks with each occurrence, and undoing it reopens those still below it', async t => {
   const { store, apply, task } = await fixture(t);
   apply({ op: 'task.create', id: 'p', content: 'Weekly review', dueDate: '2026-10-17', recurrence: { freq: 'week', interval: 1 } },

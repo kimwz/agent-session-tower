@@ -20,6 +20,7 @@ export function DisplayMenu({ view, layout, value, onChange, completedAvailable 
           {(['priority', 'project'] as const).map(color => <button key={color} type="button" role="radio" aria-checked={value.colorBy === color} onClick={() => onChange({ ...value, colorBy: color })}>{t(GROUP_LABELS[color])}</button>)}
         </div></div>
         <label className="todo-display-row todo-check-row"><span>{t('반복 작업의 다음 일정 표시')}</span><input type="checkbox" className="settings-switch" checked={value.future} onChange={event => onChange({ ...value, future: event.target.checked })} /></label>
+        {view.kind !== 'search' && <label className="todo-display-row todo-check-row"><span>{t('완료한 작업 표시')}</span><input type="checkbox" className="settings-switch" checked={value.done} onChange={event => onChange({ ...value, done: event.target.checked })} /></label>}
       </> : <>
       {groups.length > 1 && <div className="todo-display-row"><span>{t('그룹')}</span><div className="todo-segmented" role="radiogroup" aria-label={t('그룹')}>
         {groups.map(group => <button key={group} type="button" role="radio" aria-checked={value.group === group} onClick={() => onChange({ ...value, group })}>{t(GROUP_LABELS[group])}</button>)}

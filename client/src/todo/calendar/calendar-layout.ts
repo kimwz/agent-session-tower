@@ -1,6 +1,6 @@
 import { addDays, addMonths, dateParts, formatDate, weekday } from '../../../../shared/todo/dates';
 import { futureOccurrences, nextOccurrence } from '../../../../shared/todo/recurrence';
-import type { TodoRecurrence, TodoTask } from '../../../../shared/todo/types';
+import type { TodoCompletion, TodoRecurrence, TodoTask } from '../../../../shared/todo/types';
 
 /**
  * The calendar's arithmetic, apart from drawing: which dates a month or week shows, where a time sits in the time grid
@@ -157,4 +157,32 @@ export const cellEntries = (entries: DayEntries | undefined): CalendarEntry[] =>
 /** How many entries fit a month cell before `+n`. */
 export function overflow(count: number, fit: number): { shown: number; more: number } {
   return count <= fit ? { shown: count, more: 0 } : { shown: Math.max(0, fit - 1), more: count - Math.max(0, fit - 1) };
+}
+
+/** A completion on the calendar: on the local day and minute it was made, not the date it did. */
+export interface DoneEntry { completion: TodoCompletion; task: TodoTask; date: string; minutes: number }
+
+/** The start of a local day as `toISOString` writes it: a completed list's bound. */
+export function dayStart(date: string): string {
+  const { year, month, day } = dateParts(date);
+  return new Date(year, month - 1, day).toISOString();
+}
+
+/** The completion times the days from `from` to `to` hold: from the first one's local midnight to the midnight after the last. */
+export const doneRange = (from: string, to: string) => ({ since: dayStart(from), until: dayStart(addDays(to, 1)) });
+
+/** Completions by the local day they were made on, from `from` to `to`, earliest first. */
+export function doneDays(items: readonly { completion: TodoCompletion; task: TodoTask }[], from: string, to: string): Map<string, DoneEntry[]> {
+  const days = new Map<string, DoneEntry[]>();
+  for (const { completion, task } of items) {
+    const at = new Date(completion.completedAt);
+    if (Number.isNaN(at.getTime())) continue;
+    const date = formatDate(at.getFullYear(), at.getMonth() + 1, at.getDate());
+    if (date < from || date > to) continue;
+    let list = days.get(date);
+    if (!list) days.set(date, list = []);
+    list.push({ completion, task, date, minutes: at.getHours() * 60 + at.getMinutes() });
+  }
+  for (const list of days.values()) list.sort((a, b) => a.completion.completedAt < b.completion.completedAt ? -1 : a.completion.completedAt > b.completion.completedAt ? 1 : 0);
+  return days;
 }

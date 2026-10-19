@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cellEntries, dayEntries, occurrencesIn, resizeCommit, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, visibleRange, yToMinutes } from '../../../client/src/todo/calendar/calendar-layout.js';
+import { cellEntries, dayEntries, dayStart, doneDays, doneRange, occurrencesIn, resizeCommit, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, visibleRange, yToMinutes } from '../../../client/src/todo/calendar/calendar-layout.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { CalendarView, dropPatch, periodTitle } from '../../../client/src/todo/calendar/CalendarView.js';
@@ -138,4 +138,52 @@ test('repeats counted from completion keep their beat from the task’s date in 
   const monthly = { freq: 'month' as const, interval: 1, fromCompletion: true };
   const wide = occurrencesIn(monthly, '2026-01-31', '2026-05-01', '2026-08-31');
   assert.deepEqual(occurrencesIn(monthly, '2026-01-31', '2026-06-01', '2026-07-31'), wide.filter(date => date >= '2026-06-01' && date <= '2026-07-31'));
+});
+
+/** Runs `run` with the process in time zone `zone`, then puts the zone back. */
+function inZone(zone: string, run: () => void) {
+  const saved = process.env.TZ;
+  process.env.TZ = zone;
+  try { run(); } finally { if (saved === undefined) delete process.env.TZ; else process.env.TZ = saved; }
+}
+
+test('completions fall on the local day and minute they were made, and a period runs from local midnight to the next', () => {
+  inZone('Asia/Seoul', () => {
+    assert.deepEqual(doneRange('2026-09-28', '2026-11-01'), { since: '2026-09-27T15:00:00.000Z', until: '2026-11-01T15:00:00.000Z' });
+    const item = (id: string, completedAt: string) => ({ completion: { id, taskId: id, occurrenceDate: '2026-10-01', completedAt }, task: task(id) });
+    // 23:59 in Seoul is still that day; a minute later is the next one. The occurrence date plays no part.
+    const days = doneDays([item('late', '2026-10-14T14:59:00.000Z'), item('next', '2026-10-14T15:00:00.000Z'), item('early', '2026-10-14T00:30:00.000Z'), item('out', '2026-11-01T15:00:00.000Z')], '2026-10-12', '2026-11-01');
+    assert.deepEqual(days.get('2026-10-14')?.map(entry => [entry.completion.id, entry.minutes]), [['early', 570], ['late', 1439]]);
+    assert.deepEqual(days.get('2026-10-15')?.map(entry => [entry.completion.id, entry.minutes]), [['next', 0]]);
+    assert.equal([...days.values()].flat().some(entry => entry.completion.id === 'out'), false);
+  });
+  // The day summer time ends has 25 hours: the period still ends at the next local midnight.
+  inZone('America/New_York', () => {
+    assert.equal(dayStart('2026-11-01'), '2026-11-01T04:00:00.000Z');
+    assert.deepEqual(doneRange('2026-11-01', '2026-11-01'), { since: '2026-11-01T04:00:00.000Z', until: '2026-11-02T05:00:00.000Z' });
+  });
+});
+
+test('completions show as dots down a month day that open their task, and at their time in the week', () => {
+  const world = worldFromOverview(overview([]));
+  const at = (hours: number, minutes: number) => new Date(2026, 9, 14, hours, minutes).toISOString();
+  const done = [
+    ...Array.from({ length: 9 }, (_, index) => ({ completion: { id: `c${index}`, taskId: `d${index}`, occurrenceDate: null, completedAt: at(9, index) }, task: task(`d${index}`, { content: `끝낸 일 ${index}`, completedAt: at(9, index) }) })),
+    { completion: { id: 'w', taskId: 'r', occurrenceDate: '2026-10-13', completedAt: at(14, 5) }, task: task('r', { content: '반복', dueDate: '2026-10-15', recurrence: { freq: 'day', interval: 1 } }) },
+  ];
+  const base = { tasks: [], world, today: '2026-10-14', future: true, colorBy: 'priority' as const, mobile: false, readOnly: false, onMode() {}, onOpen() {}, onAdd() {}, onChange() {}, done };
+  const month = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'month' }));
+  // Seven fit before `+n`: six dots and +4.
+  assert.equal((month.match(/class="todo-cal-done-dot"/g) ?? []).length, 6);
+  assert.match(month, /class="todo-cal-done-more"[^>]*>\+4</);
+  assert.match(month, /title="09:00 완료 · 끝낸 일 0"/);
+  assert.equal((month.match(/todo-cal-cell[^"]*with-done/g) ?? []).length, 1);
+  const week = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'week' }));
+  assert.equal((week.match(/class="todo-cal-block done short"/g) ?? []).length, 10);
+  assert.match(week, new RegExp(`class="todo-cal-block done short" style="[^"]*top:${minutesToY(14 * 60 + 5)}px`));
+  const none = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'month', done: undefined }));
+  assert.doesNotMatch(none, /todo-cal-done/);
+  const phone = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'month', mobile: true }));
+  assert.equal((phone.match(/<span class="todo-cal-done-dots" aria-hidden="true">(<i[^>]*><\/i>)+<\/span>/g) ?? []).length, 1);
+  assert.match(phone, /todo-cal-entry done/);
 });

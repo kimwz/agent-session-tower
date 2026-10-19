@@ -10,7 +10,7 @@ import { applyOps, inverseOps, worldFromOverview } from '../../../client/src/tod
 import { readShortcut, readSwitchKey } from '../../../client/src/todo/todo-shortcuts.js';
 import { moveSelection } from '../../../client/src/todo/todo-views.js';
 import { isTodoPage, pageSearch, readTodoLocation, todoSearch } from '../../../client/src/todo/todo-url.js';
-import { boardColumns, calendarTasks, cardContext, defaultDisplay, subtaskWindow, dropOps, dropPlace, foldGroups, groupingsFor, sectionDropAfter, shownTasks, manualOrder, overviewGroups, projectOrder, sectionMoveTarget, shapeSections, sidebarCounts, switchIndex, switchTargets, viewTitle, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { boardColumns, calendarDone, calendarTasks, cardContext, defaultDisplay, subtaskWindow, dropOps, dropPlace, foldGroups, groupingsFor, sectionDropAfter, shownTasks, manualOrder, overviewGroups, projectOrder, sectionMoveTarget, shapeSections, sidebarCounts, switchIndex, switchTargets, viewTitle, type ViewContext } from '../../../client/src/todo/todo-views.js';
 import { nthOf } from '../../../client/src/todo/DatePicker.js';
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { collisionsFor } from '../../../client/src/todo/BoardView.js';
@@ -386,4 +386,17 @@ test('on the overview a card let go off every column lands nowhere, not in the n
   assert.equal(collisionsFor(true)(args({ x: 50, y: 320 }))[0]?.id, 'column:tower/section:none');
   assert.ok(collisionsFor(false)(args({ x: 50, y: 260 })).length > 0, 'a project board takes the nearest column');
   assert.ok(collisionsFor(true)(args(null)).length > 0, 'a keyboard drag has no pointer and goes to the nearest');
+});
+
+test('the calendar shows completions by default, and leaves out those of archived projects and sections like its open tasks', () => {
+  assert.equal(defaultDisplay({ kind: 'inbox' }).done, true);
+  const world = worldFromOverview(overview([], {
+    projects: [project('inbox', { inbox: true }), project('old', { archivedAt: '2026-10-01T00:00:00.000Z' }), project('p')],
+    sections: [section('shelf', 'p', { archivedAt: '2026-10-01T00:00:00.000Z' })],
+  }));
+  const item = (id: string, patch: Parameters<typeof task>[1] = {}) => ({ completion: { id, taskId: id, occurrenceDate: null, completedAt: '2026-10-14T01:00:00.000Z' }, task: task(id, patch) });
+  const items = [item('a'), item('b', { projectId: 'old' }), item('c', { projectId: 'p', sectionId: 'shelf' }), item('d', { projectId: 'p' })];
+  assert.deepEqual(calendarDone(items, world).map(entry => entry.task.id), ['a', 'd']);
+  // An archived project opened to be read shows its own.
+  assert.deepEqual(calendarDone(items, world, true).map(entry => entry.task.id), ['a', 'b', 'c', 'd']);
 });

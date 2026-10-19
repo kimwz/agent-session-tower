@@ -26,7 +26,8 @@ class FakeTransport implements TodoTransport {
     const completions = (this.completions[id] ?? []).map(completion => ({ id: completion, taskId: id, occurrenceDate: null, completedAt: 'x' }));
     return { task: this.current.tasks.find(item => item.id === id)!, subtasks: [], comments: [], completions, events: [], previous: [], next: [], files: [] };
   }
-  async completed(): Promise<TodoCompletedPage> { this.reads.completed++; const next = this.completedPages.shift(); return next ? next() : { items: [] }; }
+  completedAsked: Parameters<TodoTransport['completed']>[0][] = [];
+  async completed(input: Parameters<TodoTransport['completed']>[0]): Promise<TodoCompletedPage> { this.reads.completed++; this.completedAsked.push(input); const next = this.completedPages.shift(); return next ? next() : { items: [] }; }
   async search(): Promise<TodoTask[]> { return []; }
   async apply(request: TodoRequest) { this.requests.push(request); if (this.hold) await this.hold; return this.answer(request); }
   started: { taskId: string; text: string }[] = [];
@@ -263,6 +264,33 @@ test('reopening sends the completion of the row chosen, or the task’s latest r
   await actions.reopen(task);
   await settle();
   assert.deepEqual(transport.requests.flatMap(request => request.ops).map(op => 'completionId' in op ? op.completionId : ''), ['c-old', 'c-new']);
+});
+
+test('a period’s completed list is read whole, page after page, and again with its period after a completion', async () => {
+  const transport = new FakeTransport();
+  const { client } = await ready(transport);
+  const item = (id: string) => ({ completion: { id, taskId: 'a', occurrenceDate: null, completedAt: 'x' }, task: transport.current.tasks[0] });
+  transport.completedPages = [async () => ({ items: [item('c1')], before: 'p1' }), async () => ({ items: [item('c2')], before: 'p2' }), async () => ({ items: [item('c3')] })];
+  const range = { since: '2026-09-28T15:00:00.000Z', until: '2026-11-09T15:00:00.000Z' };
+  await client.readCompleted('inbox', false, undefined, range);
+  const list = client.getState().completed!;
+  assert.deepEqual(list.items.map(entry => entry.completion.id), ['c1', 'c2', 'c3']);
+  assert.deepEqual(list.range, range);
+  assert.equal(list.before, undefined);
+  assert.deepEqual(transport.completedAsked.map(input => input.before), [undefined, 'p1', 'p2']);
+  assert.ok(transport.completedAsked.every(input => input.projectId === 'inbox' && input.since === range.since && input.until === range.until && input.limit === 100));
+  client.apply([{ op: 'task.complete', id: 'b', completionId: 'cb', occurrence: null, today: '2026-10-14' }]);
+  await settle();
+  assert.deepEqual(transport.completedAsked.at(-1), { projectId: 'inbox', before: undefined, ...range, limit: 100 });
+  // The board's list, of no period, starts afresh instead of keeping the period's rows.
+  let release!: () => void;
+  transport.completedPages = [() => new Promise(resolve => { release = () => resolve({ items: [] }); })];
+  const board = client.readCompleted('inbox');
+  assert.deepEqual(client.getState().completed?.items, []);
+  assert.equal(client.getState().completed?.range, undefined);
+  release();
+  await board;
+  assert.equal(transport.completedAsked.at(-1)?.since, undefined);
 });
 
 test('a late answer to an older completed-list load never replaces a newer one', async () => {

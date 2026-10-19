@@ -21,7 +21,8 @@ import { readShortcut, typingIn } from './todo-shortcuts';
 import { httpTransport, localToday, newId, TodoClient, useTodoState } from './todo-store';
 import { isTodoPage, readTodoLocation, todoSearch, viewKey, type TodoLocation, type TodoView } from './todo-url';
 import { isOpen } from './todo-model';
-import { archivedColumns, foldGroups, overviewGroups, shapeSections, shownTasks, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
+import { doneRange } from './calendar/calendar-layout';
+import { archivedColumns, calendarDone as calendarDoneItems, foldGroups, overviewGroups, shapeSections, shownTasks, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
 import { CalendarView } from './calendar/CalendarView';
 import type { TodoLayout } from '../../../shared/todo/types';
 
@@ -184,9 +185,18 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     // Remembered with the project, not as a change to undo; an archived project is only read.
     if (shown && shown.layout !== next && client.getState().world.availability.state === 'ready' && liveProjectIds(client.getState().world.projects).has(shown.id)) client.apply([{ op: 'project.update', id: shown.id, patch: { layout: next } }], { undoable: false });
   }, [navigate, client]);
-  const completedScope = display.completed && completedAvailable && layout === 'board' ? project?.id ?? '' : null;
+  // The calendar's days, as it last said (`onRange`), whose completions it shows when asked; the search's shows none.
+  const [calendarDays, setCalendarDays] = useState<{ from: string; to: string } | null>(null);
+  const onCalendarRange = useCallback((from: string, to: string) => setCalendarDays(days => days?.from === from && days.to === to ? days : { from, to }), []);
+  const calendarDone = layout === 'calendar' && display.done && view.kind !== 'search' && calendarDays ? doneRange(calendarDays.from, calendarDays.to) : null;
+  // One completed list at a time: the board's completed column, or the calendar's days.
+  const completedScope = (display.completed && completedAvailable && layout === 'board') || calendarDone ? project?.id ?? '' : null;
   const completedLabel = view.kind === 'label' ? view.id : undefined;
-  useEffect(() => { if (completedScope === null) client.hideCompleted(); else void readCompleted(client, completedScope, false, completedLabel); }, [client, completedScope, completedLabel]);
+  const { since: doneSince, until: doneUntil } = calendarDone ?? {};
+  useEffect(() => {
+    if (completedScope === null) client.hideCompleted();
+    else void client.readCompleted(completedScope, false, completedLabel, doneSince && doneUntil ? { since: doneSince, until: doneUntil } : undefined);
+  }, [client, completedScope, completedLabel, doneSince, doneUntil]);
 
   const setDisplay = (value: DisplaySettings) => { setDisplays(previous => ({ ...previous, [key]: value })); saveDisplay(key, value); };
   // The overview: every project with its sections, each column showing its first cards until opened.
@@ -225,7 +235,11 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
 
   // The completed list as it shows (the list's own filter), each row chosen by its completion: a repeating task has several.
   // A label's are chosen by the server (`readCompleted` with the label).
-  const completedItems = display.completed && state.completed ? state.completed.items.filter(({ completion }) => view.kind === 'today' ? localToday(new Date(completion.completedAt)) === today : true) : [];
+  const completedItems = display.completed && state.completed && !state.completed.range ? state.completed.items.filter(({ completion }) => view.kind === 'today' ? localToday(new Date(completion.completedAt)) === today : true) : [];
+  // The calendar's completions, once those of the days it shows have come.
+  const shownList = state.completed;
+  const doneShown = useMemo(() => doneSince && shownList?.range?.since === doneSince && shownList.range.until === doneUntil ? calendarDoneItems(shownList.items, world, locked) : undefined,
+    [doneSince, doneUntil, shownList, world, locked]);
   const doneKey = (completionId: string) => `done:${completionId}`;
   const chosenDone = selectedId?.startsWith('done:') ? completedItems.find(item => doneKey(item.completion.id) === selectedId)?.task : undefined;
   // One card shows chosen: a completion chosen (and opened from there) shows on its row only, never also on the task's card.
@@ -373,7 +387,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
     { key: 'delete', label: t('삭제'), danger: true, icon: <Trash2 size={13} />, run: () => actions.remove(task) },
   ];
 
-  const completedColumn = display.completed && state.completed ? (() => {
+  const completedColumn = display.completed && state.completed && !state.completed.range ? (() => {
     const items = completedItems;
     return <section className="todo-column todo-completed-column" aria-label={t('완료됨')}>
       <header className="todo-column-head"><h3>{t('완료됨')}</h3><span className="todo-column-count">{items.length || ''}</span></header>
@@ -411,7 +425,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   else if (world.availability.state === 'unavailable') body = <div className="todo-state"><TriangleAlert size={20} /><h3>{t('할 일을 사용할 수 없습니다')}</h3><p>{world.availability.reason}</p></div>;
   else if ((view.kind === 'project' && !project) || (view.kind === 'label' && !world.labels.some(label => label.id === view.id))) body = <div className="todo-state"><p>{t('찾을 수 없는 목록입니다.')}</p><button type="button" className="secondary-button" onClick={() => goTo({ kind: 'today' })}>{t('오늘 보기')}</button></div>;
   else if (layout === 'calendar') body = <CalendarView tasks={locked && project ? Object.values(world.tasks).filter(task => isOpen(task) && task.projectId === project.id) : calendarTasks(view, { world, today, start, query, searchResults })}
-    world={world} today={today} mode={display.calendar} future={display.future} colorBy={display.colorBy} mobile={mobile} readOnly={readOnly || locked} onComplete={actions.complete} onMode={mode => setDisplay({ ...display, calendar: mode })} onOpen={openTask} onAdd={preset => openAdd({ ...(project ? { projectId: project.id } : {}), ...(view.kind === 'label' ? { labelIds: [view.id] } : {}), ...preset })}
+    world={world} today={today} mode={display.calendar} future={display.future} colorBy={display.colorBy} mobile={mobile} readOnly={readOnly || locked} onComplete={actions.complete}
+    done={doneShown} doneError={doneSince && state.completed?.range ? state.completed.error : undefined} onRange={onCalendarRange} onMode={mode => setDisplay({ ...display, calendar: mode })} onOpen={openTask} onAdd={preset => openAdd({ ...(project ? { projectId: project.id } : {}), ...(view.kind === 'label' ? { labelIds: [view.id] } : {}), ...preset })}
     onChange={ops => client.apply(ops)} />;
   else if (emptyBoard) body = <div className="todo-state todo-empty"><p>{view.kind === 'today' ? t('오늘 할 일을 모두 끝냈습니다.') : view.kind === 'search' ? (searchResults === null ? t('검색어를 입력하세요.') : t('찾은 작업이 없습니다.')) : t('작업이 없습니다.')}</p>
     {view.kind !== 'search' && !readOnly && !locked && <button type="button" className="secondary-button" onClick={() => openAdd()}><Plus size={13} />{t('작업 추가')}</button>}</div>;
