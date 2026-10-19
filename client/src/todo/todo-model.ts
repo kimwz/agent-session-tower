@@ -39,11 +39,18 @@ export const isOpen = (task: TodoTask | undefined): boolean => !!task && !task.c
 export const byOrder = <T extends { sortKey: string; id: string }>(a: T, b: T) => a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 export const inboxOf = (world: Pick<TodoWorld, 'projects'>) => world.projects.find(project => project.inbox);
 
-/** A new overview replaces what it covers; completed and deleted tasks the page saw stay known. */
+/**
+ * A new overview replaces what it covers; completed and deleted tasks the page saw stay known, and the completed
+ * sub-tasks of open tasks come with it (the cards show them among the open ones). Those are all of them: one the page
+ * saw completed under an open task that is no longer among them was deleted or moved elsewhere (by another page).
+ */
 export function worldFromOverview(overview: TodoOverview, previous?: TodoWorld): TodoWorld {
   const tasks: Record<string, TodoTask> = {};
-  for (const task of Object.values(previous?.tasks ?? {})) if (!isOpen(task)) tasks[task.id] = task;
-  for (const task of overview.tasks) tasks[task.id] = task;
+  // A completed sub-task of an open task is left out here; the overview's own list puts back those still there.
+  const open = overview.doneSubtasks && new Set(overview.tasks.map(task => task.id));
+  const gone = (task: TodoTask) => !!open && !task.deletedAt && !!task.parentId && open.has(task.parentId);
+  for (const task of Object.values(previous?.tasks ?? {})) if (!isOpen(task) && !gone(task)) tasks[task.id] = task;
+  for (const task of [...overview.tasks, ...(overview.doneSubtasks ?? [])]) tasks[task.id] = task;
   return {
     availability: overview.availability, revision: overview.revision,
     projects: [...overview.projects].sort(byOrder), sections: [...overview.sections].sort(byOrder), labels: [...overview.labels].sort(byOrder),

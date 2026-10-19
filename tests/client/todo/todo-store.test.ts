@@ -230,6 +230,30 @@ test('an open completed list is read again after this page completes or reopens 
   assert.equal(transport.reads.completed, before + 1);
 });
 
+test('the completed sub-tasks of open tasks come with the overview; one gone from it (deleted elsewhere) leaves', () => {
+  const p = task('p'), done = (id: string) => task(id, { parentId: 'p', completedAt: 'x' });
+  const first = worldFromOverview(overview([p, task('p3', { parentId: 'p' })], { doneSubtasks: [done('p1'), done('p2')] }));
+  assert.deepEqual(Object.keys(first.tasks).sort(), ['p', 'p1', 'p2', 'p3']);
+  // Another page deleted p2; a task this page deleted, and a completed task of no open parent, stay known (undo).
+  const mine = { ...done('p4'), deletedAt: 'y' }, other = task('t', { completedAt: 'x' });
+  const next = worldFromOverview(overview([p, task('p3', { parentId: 'p' })], { doneSubtasks: [done('p1')] }), { ...first, tasks: { ...first.tasks, p4: mine, t: other } });
+  assert.deepEqual(Object.keys(next.tasks).sort(), ['p', 'p1', 'p3', 'p4', 't']);
+  // An older server sends none: what the page saw stays.
+  assert.ok(worldFromOverview(overview([p]), first).tasks.p2);
+});
+
+test('reopening a task reads the overview again, for the completed sub-tasks its card lists', async () => {
+  const transport = new FakeTransport();
+  const { client } = await ready(transport);
+  const before = transport.reads.overview;
+  client.apply([{ op: 'task.update', id: 'a', patch: { priority: 2 } }]);
+  await settle();
+  assert.equal(transport.reads.overview, before);
+  client.apply([{ op: 'task.uncomplete', id: 'a', completionId: 'c1' }]);
+  await settle();
+  assert.equal(transport.reads.overview, before + 1);
+});
+
 test('reopening sends the completion of the row chosen, or the task’s latest read fresh', async () => {
   const { client, transport } = await ready();
   const actions = createActions(client, { openTask() {} });

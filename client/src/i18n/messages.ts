@@ -2893,6 +2893,7 @@ export const english: Record<string, string> = {
   "반복 간격": "Interval",
   "할 일 목록 열기": "Open todo lists",
   "하위 작업 {0}/{1}": "Sub-tasks {0}/{1}",
+  "{0}건 더 있음": "{0} more",
   "“{0}” 순서 바꾸기": "Reorder “{0}”",
   "다른 작업 아래로 옮기기": "Move under another task",
   "위에 둘 작업 검색": "Search for the task to put it under",

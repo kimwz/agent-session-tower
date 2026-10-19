@@ -153,6 +153,8 @@
 .todo-card-subtasks li { display:flex; align-items:flex-start; gap:8px; }
 .todo-card-subtasks li.done .todo-subtask-title { color:#6d7c92; text-decoration:line-through; }
 .todo-subtask-title { flex:1; min-width:0; text-align:left; color:#b9c5d4; font-size:12px; line-height:1.4; overflow-wrap:anywhere; }
+.todo-subtask-more { margin:6px 0 0 22px; color:#6d7c92; font-size:11px; }
+.todo-subtask-more:hover { color:#b9c5d4; }
 .todo-drag-overlay { width:280px; transform:rotate(1.5deg); }
 .todo-drag-overlay .todo-card { border-color:#4a6c9a; box-shadow:0 18px 40px #000a; cursor:grabbing; }
 

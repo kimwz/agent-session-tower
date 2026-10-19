@@ -111,6 +111,27 @@ test('nothing is put in, under or copied into an archived project or section', a
   assert.equal(store.revision(), before);
 });
 
+test('the overview carries the completed sub-tasks of open tasks only, for their cards', async t => {
+  const { store, apply } = await fixture(t);
+  const done = (id: string) => apply({ op: 'task.complete', id, completionId: `c-${id}`, occurrence: null, today: '2026-10-17' });
+  apply(
+    { op: 'task.create', id: 'p', content: 'Open parent' },
+    { op: 'task.create', id: 'a', parentId: 'p', content: 'Done' },
+    { op: 'task.create', id: 'b', parentId: 'p', content: 'Open' },
+    { op: 'task.create', id: 'c', parentId: 'p', content: 'Done, then deleted' },
+    { op: 'task.create', id: 'a1', parentId: 'a', content: 'Done grandchild' },
+    { op: 'task.create', id: 'q', content: 'Completed parent' },
+    { op: 'task.create', id: 'q1', parentId: 'q', content: 'Its done sub-task' },
+    { op: 'task.create', id: 'top', content: 'Done top-level task' },
+  );
+  for (const id of ['a', 'c', 'q', 'top']) done(id);
+  apply({ op: 'task.delete', id: 'c' });
+  const overview = store.overview();
+  assert.deepEqual(overview.doneSubtasks?.map(task => task.id), ['a']);
+  assert.ok(overview.doneSubtasks?.every(task => task.completedAt));
+  assert.ok(overview.tasks.every(task => !task.completedAt), 'the open list keeps its meaning');
+});
+
 test('the overview counts each open task’s sub-tasks, and every answer carries the counts it changed', async t => {
   const { store, apply } = await fixture(t);
   apply(

@@ -41,14 +41,14 @@ test('a rare property with a value takes its row, and the additions row is gone 
   assert.deepEqual(rows, ['date', 'priority', 'labels', 'project', 'deadline', 'duration']);
 });
 
-test('a card shows its open sub-tasks unless they were folded', () => {
+test('a card shows its sub-tasks unless they were folded, a done one struck through', () => {
   (globalThis as { window?: unknown }).window = { localStorage: { getItem: () => null, setItem() {} } };
   const parent = task('p'), open = task('c1', { parentId: 'p' }), done = task('c2', { parentId: 'p', completedAt: '2026-10-14T01:00:00.000Z' });
   const world = worldFromOverview(overview([parent, open, done]), emptyWorld());
   const markup = renderToStaticMarkup(createElement(TaskCard, { task: parent, context: cardContext(world, '2026-10-14', false), onOpen() {}, onComplete() {}, onCompleteNext() {} }));
   assert.match(markup, /aria-expanded="true"/);
   assert.match(markup, />c1</);
-  assert.doesNotMatch(markup, />c2</, 'completed ones are in the detail');
+  assert.match(markup, /<li class="done">[^]*?>c2</, 'three or fewer show all, completed ones struck through');
 });
 
 test('a folded card lists no sub-tasks, and says so', () => {
