@@ -1,5 +1,5 @@
 /* The Todo page (client/src/todo): only what is needed shows; the rest waits on hover, selection and menus. */
-.todo-mode, .todo-popover, .todo-modal-scrim { --p1:#ec7b7b; --p2:#e9a35f; --p3:#7fa6f2; --p4:#5f6d82; --todo-card:#131c29; --todo-card-hover:#172231; --todo-column:#0f1621; --todo-group:#10161f; --todo-group-line:#27354a; --todo-group-column:#121a25; }
+.todo-mode, .todo-popover, .todo-modal-scrim { --p1:#ec7b7b; --p2:#e9a35f; --p3:#7fa6f2; --p4:#5f6d82; --todo-card:#131c29; --todo-card-hover:#172231; --todo-column:#121a25; --todo-group:#10161f; --todo-group-line:#27354a; }
 
 /* Header: canvas or todo, with its words. It stays in the compact header beside the sidebar toggle. */
 .page-switch { display:inline-flex; align-items:center; gap:2px; margin-left:10px; padding:2px; border:1px solid #2b3a4e; border-radius:8px; background:#0f1722; }
@@ -109,7 +109,7 @@
 .todo-group-title h3 { font-size:14px; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .todo-group-path { color:#6d7c92; font-size:12px; white-space:nowrap; }
 .todo-group-columns { display:flex; align-items:flex-start; gap:14px; overflow-x:auto; padding-bottom:4px; overscroll-behavior-x:contain; }
-.todo-overview .todo-column { max-height:none; background:var(--todo-group-column); padding:0 4px; }
+.todo-overview .todo-column { max-height:none; background:var(--todo-column); padding:0 4px; }
 .todo-overview .todo-column-cards { overflow-y:visible; min-height:44px; padding-bottom:6px; }
 .todo-fold-cards { display:flex; align-items:center; gap:6px; height:28px; padding:0 8px; border-radius:7px; color:#93a3b8; font-size:12px; }
 .todo-fold-cards:hover { background:#151f2c; color:var(--bright); }
