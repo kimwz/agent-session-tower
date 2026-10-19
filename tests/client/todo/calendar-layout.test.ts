@@ -156,6 +156,11 @@ test('completions fall on the local day and minute they were made, and a period 
     assert.deepEqual(days.get('2026-10-14')?.map(entry => [entry.completion.id, entry.minutes]), [['early', 570], ['late', 1439]]);
     assert.deepEqual(days.get('2026-10-15')?.map(entry => [entry.completion.id, entry.minutes]), [['next', 0]]);
     assert.equal([...days.values()].flat().some(entry => entry.completion.id === 'out'), false);
+    // Sub-tasks closed with their parent leave the mark to it; one completed on its own keeps its own.
+    const parent = item('p', '2026-10-16T01:00:00.000Z');
+    const withParent = { ...item('s1', '2026-10-16T01:00:00.000Z'), task: task('s1', { parentId: 'p' }) };
+    const alone = { ...item('s2', '2026-10-15T23:00:00.000Z'), task: task('s2', { parentId: 'p' }) };
+    assert.deepEqual(doneDays([parent, withParent, alone], '2026-10-12', '2026-10-18').get('2026-10-16')?.map(entry => entry.completion.id), ['s2', 'p']);
   });
   // The day summer time ends has 25 hours: the period still ends at the next local midnight.
   inZone('America/New_York', () => {
@@ -181,6 +186,10 @@ test('completions show as dots down a month day that open their task, and at the
   const week = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'week' }));
   assert.equal((week.match(/class="todo-cal-block done short"/g) ?? []).length, 10);
   assert.match(week, new RegExp(`class="todo-cal-block done short" style="[^"]*top:${minutesToY(14 * 60 + 5)}px`));
+  // One made just before midnight stays inside the day's grid.
+  const late = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'week', done: [{ completion: { id: 'late', taskId: 'l', occurrenceDate: null, completedAt: at(23, 50) }, task: task('l') }] }));
+  const style = /class="todo-cal-block done short" style="[^"]*top:([\d.]+)px;height:([\d.]+)px/.exec(late);
+  assert.ok(style && Number(style[1]) + Number(style[2]) <= minutesToY(24 * 60));
   const none = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'month', done: undefined }));
   assert.doesNotMatch(none, /todo-cal-done/);
   const phone = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'month', mobile: true }));

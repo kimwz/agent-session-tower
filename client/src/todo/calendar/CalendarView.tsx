@@ -152,10 +152,13 @@ function MonthCell({ date, month, today, entries, done, color, props }: { date: 
         {all.slice(0, shown).map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={!props.readOnly} compact onComplete={completer(props)} />)}
         {hidden > 0 && <button type="button" className="todo-cal-more" onClick={event => { event.stopPropagation(); open(event.currentTarget); }}>{t('+{0}개', { 0: hidden })}</button>}
         {showAll && <Popover anchor={more} onClose={() => setShowAll(false)} label={longDate(date)} className="todo-cal-day-popover">
+          {/* A press in it is not a press on the day under it (React passes events up through the portal). */}
+          <div className="todo-cal-day-list" onClick={event => event.stopPropagation()}>
           <h4>{longDate(date)}</h4>
           {all.map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={false} onComplete={completer(props)} />)}
           {done.length > 0 && <h5>{t('완료됨')}</h5>}
           {done.map(entry => <DoneRow key={entry.completion.id} entry={entry} color={color(entry.task)} onOpen={props.onOpen} />)}
+          </div>
         </Popover>}
       </>}
   </div>;
@@ -247,9 +250,11 @@ function Block({ entry, placed, color, props, preview }: { entry: CalendarEntry;
 }
 
 /** A completion in the week's grid, at the minute it was made: faded and checked, opening its task, never moved. */
-function DoneBlock({ entry, placed, color, onOpen }: { entry: DoneEntry; placed: { column: number; columns: number }; color: string; onOpen: (id: string) => void }) {
+function DoneBlock({ entry, placed, color, onOpen }: { entry: DoneEntry; placed: { start: number; end: number; column: number; columns: number }; color: string; onOpen: (id: string) => void }) {
+  // Drawn over its span, which ends at midnight; a late one starts early enough to stay in the day.
+  const top = Math.min(minutesToY(placed.start), minutesToY(DAY_MINUTES) - 18);
   const style = {
-    '--entry-color': color, top: minutesToY(entry.minutes), height: Math.max(18, minutesToY(DEFAULT_DURATION) - 2),
+    '--entry-color': color, top, height: Math.max(18, minutesToY(placed.end - placed.start) - 2),
     left: `calc(${(placed.column / placed.columns) * 100}% + 2px)`, width: `calc(${100 / placed.columns}% - 4px)`,
   } as CSSProperties;
   return <button type="button" className="todo-cal-block done short" style={style} title={doneTitle(entry)} aria-label={doneTitle(entry)} onClick={event => { event.stopPropagation(); onOpen(entry.task.id); }}>

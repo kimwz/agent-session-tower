@@ -188,6 +188,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   // The calendar's days, as it last said (`onRange`), whose completions it shows when asked; the search's shows none.
   const [calendarDays, setCalendarDays] = useState<{ from: string; to: string } | null>(null);
   const onCalendarRange = useCallback((from: string, to: string) => setCalendarDays(days => days?.from === from && days.to === to ? days : { from, to }), []);
+  // Forgotten when the calendar closes, so it opening again (at today) never asks for the days it showed before.
+  useEffect(() => { if (layout !== 'calendar') setCalendarDays(null); }, [layout]);
   const calendarDone = layout === 'calendar' && display.done && view.kind !== 'search' && calendarDays ? doneRange(calendarDays.from, calendarDays.to) : null;
   // One completed list at a time: the board's completed column, or the calendar's days.
   const completedScope = (display.completed && completedAvailable && layout === 'board') || calendarDone ? project?.id ?? '' : null;
@@ -238,8 +240,10 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   const completedItems = display.completed && state.completed && !state.completed.range ? state.completed.items.filter(({ completion }) => view.kind === 'today' ? localToday(new Date(completion.completedAt)) === today : true) : [];
   // The calendar's completions, once those of the days it shows have come.
   const shownList = state.completed;
-  const doneShown = useMemo(() => doneSince && shownList?.range?.since === doneSince && shownList.range.until === doneUntil ? calendarDoneItems(shownList.items, world, locked) : undefined,
-    [doneSince, doneUntil, shownList, world, locked]);
+  // The list read for this calendar: its project, label and days, never another list's for a moment while it is read.
+  const calendarList = doneSince && completedScope !== null && shownList?.projectId === completedScope && (shownList.labelId || undefined) === completedLabel
+    && shownList.range?.since === doneSince && shownList.range.until === doneUntil ? shownList : null;
+  const doneShown = useMemo(() => calendarList ? calendarDoneItems(calendarList.items, world, locked) : undefined, [calendarList, world, locked]);
   const doneKey = (completionId: string) => `done:${completionId}`;
   const chosenDone = selectedId?.startsWith('done:') ? completedItems.find(item => doneKey(item.completion.id) === selectedId)?.task : undefined;
   // One card shows chosen: a completion chosen (and opened from there) shows on its row only, never also on the task's card.
@@ -426,7 +430,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen }
   else if ((view.kind === 'project' && !project) || (view.kind === 'label' && !world.labels.some(label => label.id === view.id))) body = <div className="todo-state"><p>{t('찾을 수 없는 목록입니다.')}</p><button type="button" className="secondary-button" onClick={() => goTo({ kind: 'today' })}>{t('오늘 보기')}</button></div>;
   else if (layout === 'calendar') body = <CalendarView tasks={locked && project ? Object.values(world.tasks).filter(task => isOpen(task) && task.projectId === project.id) : calendarTasks(view, { world, today, start, query, searchResults })}
     world={world} today={today} mode={display.calendar} future={display.future} colorBy={display.colorBy} mobile={mobile} readOnly={readOnly || locked} onComplete={actions.complete}
-    done={doneShown} doneError={doneSince && state.completed?.range ? state.completed.error : undefined} onRange={onCalendarRange} onMode={mode => setDisplay({ ...display, calendar: mode })} onOpen={openTask} onAdd={preset => openAdd({ ...(project ? { projectId: project.id } : {}), ...(view.kind === 'label' ? { labelIds: [view.id] } : {}), ...preset })}
+    done={doneShown} doneError={calendarList?.error || undefined} onRange={onCalendarRange} onMode={mode => setDisplay({ ...display, calendar: mode })} onOpen={openTask} onAdd={preset => openAdd({ ...(project ? { projectId: project.id } : {}), ...(view.kind === 'label' ? { labelIds: [view.id] } : {}), ...preset })}
     onChange={ops => client.apply(ops)} />;
   else if (emptyBoard) body = <div className="todo-state todo-empty"><p>{view.kind === 'today' ? t('오늘 할 일을 모두 끝냈습니다.') : view.kind === 'search' ? (searchResults === null ? t('검색어를 입력하세요.') : t('찾은 작업이 없습니다.')) : t('작업이 없습니다.')}</p>
     {view.kind !== 'search' && !readOnly && !locked && <button type="button" className="secondary-button" onClick={() => openAdd()}><Plus size={13} />{t('작업 추가')}</button>}</div>;

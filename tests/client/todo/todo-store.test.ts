@@ -293,6 +293,36 @@ test('a period’s completed list is read whole, page after page, and again with
   assert.equal(transport.completedAsked.at(-1)?.since, undefined);
 });
 
+test('a period reads at most ten pages, and a page that fails leaves the list with its error', async () => {
+  const transport = new FakeTransport();
+  const { client } = await ready(transport);
+  const item = (id: string) => ({ completion: { id, taskId: 'a', occurrenceDate: null, completedAt: 'x' }, task: transport.current.tasks[0] });
+  transport.completedPages = Array.from({ length: 11 }, (_, index) => async () => ({ items: [item(`c${index}`)], before: `p${index}` }));
+  const range = { since: '2026-09-28T15:00:00.000Z', until: '2026-11-09T15:00:00.000Z' };
+  await client.readCompleted('', false, undefined, range);
+  assert.equal(transport.completedAsked.length, 10);
+  assert.equal(client.getState().completed?.items.length, 10);
+  assert.equal(client.getState().completed?.before, undefined);
+  transport.completedPages = [async () => ({ items: [item('d0')], before: 'q0' }), async () => { throw new ApiError('읽지 못했습니다.', 500); }];
+  await client.readCompleted('', false, 'call', range);
+  assert.equal(client.getState().completed?.loading, false);
+  assert.equal(client.getState().completed?.error, '읽지 못했습니다.');
+});
+
+test('the completed list is read again when the answer changes a listed task that was not asked for (moved with its parent)', async () => {
+  const transport = new FakeTransport();
+  transport.current = overview([task('p', { content: 'P' })]);
+  const { client } = await ready(transport);
+  const child = task('c', { parentId: 'p', completedAt: 'x' });
+  transport.completedPages.push(async () => ({ items: [{ completion: { id: 'cc', taskId: 'c', occurrenceDate: null, completedAt: 'x' }, task: child }] }));
+  await client.readCompleted('inbox');
+  const before = transport.reads.completed;
+  transport.answer = async () => changes(++transport.current.revision, { tasks: [{ ...task('p'), projectId: 'b' }, { ...child, projectId: 'b' }] });
+  client.apply([{ op: 'task.move', id: 'p', projectId: 'b', sectionId: null, parentId: null }]);
+  await settle();
+  assert.equal(transport.reads.completed, before + 1);
+});
+
 test('a late answer to an older completed-list load never replaces a newer one', async () => {
   const transport = new FakeTransport();
   const { client } = await ready(transport);

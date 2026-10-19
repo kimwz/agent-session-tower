@@ -273,7 +273,7 @@ export class TodoClient {
     this.base = mergeChanges(this.base, changes);
     this.publish();
     if (this.state.detailId && touchesDetail(this.base.detail, changes)) void this.readDetail(this.state.detailId);
-    if (this.state.completed && touchesCompleted(this.state.completed, ops)) this.rereadCompleted();
+    if (this.state.completed && touchesCompleted(this.state.completed, ops, changes)) this.rereadCompleted();
     this.pump();
   }
 
@@ -369,10 +369,13 @@ export class TodoClient {
 }
 
 const COMPLETED_OPS = new Set<TodoOp['op']>(['task.complete', 'task.uncomplete', 'task.delete', 'task.restore']);
-/** Whether a change may show in the completed list: it completes or reopens a task, or changes one listed. */
-function touchesCompleted(list: CompletedList, ops: readonly TodoOp[]): boolean {
+/**
+ * Whether a change may show in the completed list: it completes or reopens a task, or changes one listed, asked for or
+ * changed along with another (a completed sub-task moved with its parent).
+ */
+function touchesCompleted(list: CompletedList, ops: readonly TodoOp[], changes: TodoChanges): boolean {
   const listed = new Set(list.items.map(item => item.task.id));
-  return ops.some(op => COMPLETED_OPS.has(op.op) || ('id' in op && typeof op.id === 'string' && listed.has(op.id)));
+  return ops.some(op => COMPLETED_OPS.has(op.op) || ('id' in op && typeof op.id === 'string' && listed.has(op.id))) || changes.tasks.some(task => listed.has(task.id));
 }
 
 const message = (error: unknown) => error instanceof Error ? translateMessage(error.message) : t('요청을 처리하지 못했습니다.');
