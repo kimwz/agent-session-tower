@@ -3,6 +3,8 @@ import { RETENTION_SESSION_BUDGET, selectRetention, type RetentionCandidate, typ
 import { RetentionArchive } from './archive.js';
 import { retentionNodeMap } from './ancestry.js';
 import { RetentionStore } from './store.js';
+import type { RetentionCycleLog } from './cycle-log.js';
+import type { RetentionCycleReason } from '../../../shared/retention.js';
 import type { RetentionAdapter, RetentionJournalEntry, RetentionOverview, RetentionMember, RetentionOperationContext } from './types.js';
 
 export interface RetentionServiceOptions {
@@ -15,10 +17,15 @@ export interface RetentionServiceOptions {
   refresh?: () => Promise<void>;
   onArchived?: (ids: string[]) => Promise<void>;
   onError?: (error: unknown) => void;
+  /** Where each cycle is recorded for tracing. */
+  log?: RetentionCycleLog;
   now?: () => number;
 }
 /** How soon a cycle looks again while a session asked to go once idle is still listed. */
 const WAITING_MS = 2 * 60_000;
+/** How soon a cycle comes after an archive request, or after a pause while requests wait. */
+const REQUEST_MS = 5_000;
+const HOUR_MS = 3_600_000;
 
 export class RetentionService {
   private timer?: ReturnType<typeof setTimeout>;
@@ -30,6 +37,10 @@ export class RetentionService {
   /** Subagent parent links (hot and cold) from the latest observation, to tell whether a reopen sits under a request. */
   private parents = new Map<string, string | undefined>();
   private cycleIncomplete = false;
+  /** What the current cycle moved to cold storage and how many of its candidates ended in conflict, for its record. */
+  private cycleArchived = new Set<string>();
+  private cycleConflicts = 0;
+  private cycleObserved = false;
   private nextCandidateId?: string;
   private checking?: Promise<RetentionOverview>;
   private stopped = true;
@@ -52,14 +63,16 @@ export class RetentionService {
   private operations: Promise<unknown> = Promise.resolve();
   constructor(private readonly options: RetentionServiceOptions) {}
   async start(): Promise<void> {
-    await this.options.store.start(); await this.options.archive.start();
+    await this.options.store.start(); await this.options.archive.start(); await this.options.log?.start();
     this.verification = 'pending'; this.verified.clear();
     this.resume();
   }
   coldMembers(): RetentionMember[] {
     return this.options.store.list().flatMap(entry => entry.members || []).filter(member => member.state === 'cold');
   }
-  publishCold(): void { this.options.onColdChanged?.(this.coldMembers()); }
+  publishCold(): void { this.coldIds = undefined; this.options.onColdChanged?.(this.coldMembers()); }
+  /** Sessions now in cold storage; every change of them is published (`publishCold`), which lets this go. */
+  private coldIds?: Set<string>;
   reconcileCold(force = false): Promise<void> {
     if (this.stopped) return Promise.resolve();
     if (this.inspecting) return this.inspecting;
@@ -131,22 +144,52 @@ export class RetentionService {
       // Identity/state and Codex's official archived path can change after fresh provider validation.
       members.set(member.sessionId, member);
       await this.options.store.put({ ...current, members: [...members.values()], updatedAt: new Date().toISOString() });
+      // Recorded as each one lands, so a move that fails halfway still names what it moved.
+      if (member.state === 'cold') this.cycleArchived.add(member.sessionId);
       this.publishCold(); // Intent must protect launcher proofs before the first physical move.
     } };
   }
+  /**
+   * Maintenance pauses (a worker handoff that did not happen, a storage hold) keep the cycle that was due rather than
+   * starting an hour over; archive requests waiting meanwhile (or left from before a restart) bring one within seconds.
+   */
   resume(): void {
     if (!this.stopped) return; this.stopped = false;
-    this.schedule(3_600_000);
+    const left = this.dueAt === undefined ? HOUR_MS : Math.max(0, this.dueAt - Date.now());
+    if ((this.requested || this.requestedIds().length > 0) && left > REQUEST_MS) this.schedule(REQUEST_MS, 'resume');
+    else this.schedule(left, this.dueAt === undefined ? 'hourly' : this.dueReason);
   }
   /** How long until the next cycle, as last scheduled (diagnostics and tests). */
   nextCycleIn(): number | undefined { return this.stopped ? undefined : this.delay; }
   private delay?: number;
-  private schedule(delay: number): void {
+  /** When the next cycle is due and why, kept while stopped so resuming keeps the plan. */
+  private dueAt?: number;
+  private dueReason: RetentionCycleReason = 'hourly';
+  private schedule(delay: number, reason: RetentionCycleReason): void {
+    this.delay = delay; this.dueAt = Date.now() + delay; this.dueReason = reason;
     if (this.stopped) return;
-    this.delay = delay;
     if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => { this.timer = undefined; void this.cycle().catch(error => this.report(error)); }, delay);
+    this.timer = setTimeout(() => { this.timer = undefined; void this.cycle('scheduled').catch(error => this.report(error)); }, delay);
     this.timer.unref();
+  }
+  /**
+   * Sessions asked to go once their work is over, still waiting to: pages list them with the closed ones. A request or
+   * withdrawal still queued behind a running cycle counts already, so pages follow it at once.
+   */
+  requestedIds(): string[] {
+    // A request outlives the move to cold storage (a restored session goes back); only one still listed waits.
+    this.coldIds ??= new Set(this.coldMembers().map(member => member.sessionId));
+    const ids = new Set(this.options.store.requestedIds().filter(id => !this.coldIds!.has(id)));
+    for (const [id, intent] of this.intents) if (intent.requested) ids.add(id); else ids.delete(id);
+    return [...ids];
+  }
+  /** Requests and withdrawals not yet written, newest per session (see `requestedIds`). */
+  private intents = new Map<string, { requested: boolean; seq: number }>();
+  private intentSeq = 0;
+  private intend(ids: readonly string[], requested: boolean, work: () => Promise<void>): Promise<void> {
+    const seq = ++this.intentSeq;
+    for (const id of ids) this.intents.set(id, { requested, seq });
+    return this.serial(work).finally(() => { for (const id of ids) if (this.intents.get(id)?.seq === seq) this.intents.delete(id); });
   }
   stop(): void { this.stopped = true; if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
   async quiesce(): Promise<void> {
@@ -164,13 +207,40 @@ export class RetentionService {
       blockedProvider: entries.filter(entry => entry.phase === 'blocked-provider').length,
       backupOnly: entries.filter(entry => entry.phase === 'backup-verified' && !entry.backupError).length,
       failures: entries.filter(entry => (['conflict', 'missing-backup'].includes(entry.phase) || entry.backupError)).length,
-      coldBytes: this.coldBytes, originalBytes: this.originalBytes, providers: { claude: this.options.adapter.capability('claude'), codex: this.options.adapter.capability('codex') }, entries };
+      coldBytes: this.coldBytes, originalBytes: this.originalBytes, providers: { claude: this.options.adapter.capability('claude'), codex: this.options.adapter.capability('codex') }, entries,
+      ...(this.options.log ? { recentCycles: this.options.log.recent(20) } : {}) };
   }
-  cycle(): Promise<RetentionOverview> {
+  /**
+   * `check`: the owner asked (or a test); `scheduled`: the service's own timer (or the worker's start, `startup`). One
+   * already running is joined.
+   */
+  cycle(trigger: 'scheduled' | 'check' = 'check', startup?: 'startup'): Promise<RetentionOverview> {
     if (this.checking) return this.checking;
-    const task = this.serial(() => this.runCycle()); this.checking = task;
-    void task.finally(() => { this.checking = undefined; this.schedule(this.catchUp || this.requested ? 1000 : this.waiting ? WAITING_MS : 3_600_000); }).catch(error => this.report(error));
+    const reason = trigger === 'scheduled' ? startup ?? this.dueReason : undefined;
+    const task = this.serial(() => this.recordedCycle(trigger, reason)); this.checking = task;
+    void task.finally(() => {
+      this.checking = undefined;
+      if (this.catchUp) this.schedule(1000, 'catch-up');
+      else if (this.requested) this.schedule(1000, 'request');
+      else if (this.waiting) this.schedule(WAITING_MS, 'waiting');
+      else this.schedule(HOUR_MS, 'hourly');
+    }).catch(error => this.report(error));
     return task;
+  }
+  private async recordedCycle(trigger: 'scheduled' | 'check', reason: RetentionCycleReason | undefined): Promise<RetentionOverview> {
+    const started = Date.now(); this.cycleArchived = new Set(); this.cycleConflicts = 0; this.cycleObserved = false;
+    let failure: unknown, result: RetentionOverview | undefined;
+    try { result = await this.runCycle(); }
+    catch (error) { failure = error; throw error; }
+    finally {
+      const observed = this.cycleObserved;
+      await this.options.log?.record({ trigger, ...(reason ? { reason } : {}), startedAt: new Date(started).toISOString(), endedAt: new Date().toISOString(), ms: Date.now() - started,
+        ...(observed ? { observationComplete: this.observationComplete } : {}), candidates: observed ? this.candidates : 0, archived: [...this.cycleArchived], conflicts: this.cycleConflicts,
+        deferredReasons: observed ? { ...this.deferredReasons } : {},
+        ...(failure ? { error: String(failure) } : observed ? {} : { error: this.stopped ? 'Maintenance paused before sessions were observed.' : 'Cold backup verification is not complete.' }) });
+    }
+    // The answer includes this cycle's own record.
+    return this.options.log ? { ...result, recentCycles: this.options.log.recent(20) } : result;
   }
   verifyBackups(): Promise<void> { return this.serial(() => this.verifyBackupsNow()); }
   private async verifyBackupsNow(): Promise<void> {
@@ -195,6 +265,7 @@ export class RetentionService {
     await this.verifyBackupsNow();
     if (this.verification !== 'complete') return this.overview();
     const observation = await this.observe(); observation.migratedAt = this.options.store.migratedAt;
+    this.cycleObserved = true;
     const selected = selectRetention(observation);
     // Sessions handed over to go once their work ends (a closed todo's issue master and its family) leave soon after:
     // while one waits only for its work to end, cycles come every few minutes. One held back by the owner (a reopened
@@ -243,6 +314,7 @@ export class RetentionService {
         this.addDeferred('session-budget', candidates.length - index); break;
       }
       await this.archiveCandidate(entry, records); count += candidate.ids.length;
+      if (this.options.store.get(entry.id)?.phase === 'conflict') this.cycleConflicts++;
     }
     if (blockedEntries.length) await this.options.store.putMany(blockedEntries);
     if (observation.complete) await this.prunePolicies(observation);
@@ -290,17 +362,35 @@ export class RetentionService {
    * Nothing is checked or moved here: parents and masters are accepted, and a busy session simply
    * waits. The request lasts across restarts until the session is archived or reopened.
    */
-  requestArchive(ids: readonly string[]): Promise<{ requested: number }> {
-    return this.serial(async () => {
-      const unique = [...new Set(ids)]; const at = new Date(this.options.now?.() ?? Date.now()).toISOString();
+  async requestArchive(ids: readonly string[]): Promise<{ requested: number }> {
+    const unique = [...new Set(ids)];
+    await this.intend(unique, true, async () => {
+      const at = new Date(this.options.now?.() ?? Date.now()).toISOString();
       for (const id of unique) {
         const policy = this.options.store.policy(id) || { id, archiveRevision: 0 };
         if (!policy.archiveWhenIdle) await this.options.store.setPolicy({ ...policy, archiveWhenIdle: true, archiveRequestedAt: at, archiveRevision: policy.archiveRevision + 1 });
       }
-      // Several closings tend to arrive together; one cycle a few seconds later takes them all.
-      this.requested = true; if (!this.checking) this.schedule(5_000);
-      return { requested: unique.length };
+      // Several closings tend to arrive together; one cycle a few seconds later takes them all. While maintenance is
+      // paused this only notes the cycle as due; resuming brings it.
+      this.requested = true; if (!this.checking) this.schedule(REQUEST_MS, 'request');
     });
+    return { requested: unique.length };
+  }
+  /**
+   * Takes back the archive requests these sessions carry themselves (a reopened todo's family still listed): they
+   * stay where they are and show again. Unlike reopening, nothing is restored and no reopen is recorded.
+   */
+  async withdrawArchiveRequests(ids: readonly string[]): Promise<{ withdrawn: number }> {
+    const unique = [...new Set(ids)]; let withdrawn = 0;
+    await this.intend(unique, false, async () => {
+      for (const id of unique) {
+        const policy = this.options.store.policy(id);
+        if (!policy?.archiveWhenIdle) continue;
+        const { archiveWhenIdle: _, archiveRequestedAt: __, ...kept } = policy;
+        await this.options.store.setPolicy({ ...kept, archiveRevision: kept.archiveRevision + 1 }); withdrawn++;
+      }
+    });
+    return { withdrawn };
   }
   archiveSession(id: string): Promise<RetentionOverview> { return this.serial(() => this.archiveSessionNow(id)); }
   private async archiveSessionNow(id: string): Promise<RetentionOverview> {

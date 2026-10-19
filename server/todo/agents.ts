@@ -15,9 +15,11 @@ import type { TodoStore } from './store.js';
  * brings sessions in line with the todos, in one queue for the whole web process:
  *
  * - a todo closed for good (completed, or deleted) closes its master: the master, every session in its folder and its
- *   family are handed to retention, which moves them to compressed storage once their work is over. Nothing is hidden
- *   or stopped: work they were given goes on to its end, and only then do they leave;
- * - a todo opened again takes its master back from retention (from compressed storage too); the rest stay handed over;
+ *   family are handed to retention, which moves them to compressed storage once their work is over. Pages list them
+ *   with the closed sessions from then on (Session.archiveRequested), but nothing is stopped: work they were given goes
+ *   on to its end, and only then do they leave;
+ * - a todo opened again takes its master back from retention (from compressed storage too) and its family still listed
+ *   (not what already left for compressed storage); the rest of its folder stays handed over;
  * - a start whose answer was lost is found by its folder, or given up after a while so the owner can start again.
  *
  * Each pass reads the rows again and changes one only while it is as it was read (TodoStore.changeAgent), so a todo
@@ -42,7 +44,7 @@ const HAND_OVER_CHUNK = 500;
 const LINE_CHARS = 300;
 
 /** What a pass needs to know of a session, as pages see it (closed ones included). */
-export type AgentSession = Pick<Session, 'id' | 'cwd' | 'provider' | 'status' | 'closed' | 'activeProcess' | 'scheduledAt' | 'creationPending' | 'createdAt' | 'isSubagent' | 'parentId' | 'launchedByAgent' | 'node'>;
+export type AgentSession = Pick<Session, 'id' | 'cwd' | 'provider' | 'status' | 'closed' | 'archiveRequested' | 'activeProcess' | 'scheduledAt' | 'creationPending' | 'createdAt' | 'isSubagent' | 'parentId' | 'launchedByAgent' | 'node'>;
 
 export interface TodoAgentsOptions {
   stateDir: string;
@@ -59,6 +61,8 @@ export interface TodoAgentsOptions {
   reopen(id: string): Promise<unknown>;
   /** Hands sessions to retention, which moves them (and their sub-agents) to compressed storage once idle. */
   requestArchive(ids: string[]): Promise<unknown>;
+  /** Takes such hand-overs back: the sessions stay and show again. Nothing is brought back from compressed storage. */
+  withdrawArchive(ids: string[]): Promise<unknown>;
   /** Starts a session as the owner. */
   createSession(input: CreateSessionRequest): Promise<{ session: Pick<Session, 'id' | 'provider'> }>;
   /** Whether a failed start may have made the session after all. */
@@ -394,6 +398,7 @@ export class TodoAgents {
       if (await this.options.reopen(agent.sessionId)) {
         this.handed.delete(agent.sessionId);
         this.confirmed.add(agent.taskId);
+        await this.takeBack(this.family(agent, folder, byId).filter(id => byId.get(id)?.archiveRequested), byId);
         if (bound && !bound.closed) return this.keep(agent, folder, byId);
         return;
       }
@@ -412,6 +417,28 @@ export class TodoAgents {
     }
     const extra = open.filter(session => session.id !== master.id).map(session => session.id);
     if (extra.length && !this.waitingAfterFailure(agent.taskId)) await this.handOver(extra, byId);
+    // An open todo's family carries no hand-over: one left (a take-back that failed, or one seen late) is taken back.
+    const handedFamily = this.family(agent, folder, byId).filter(id => byId.get(id)?.archiveRequested);
+    if (handedFamily.length && !this.waitingAfterFailure(agent.taskId)) await this.takeBack(handedFamily, byId);
+  }
+
+  /** An issue master's recorded family still listed, outside its folder (whose extra sessions `keep` hands over). */
+  private family(agent: TodoAgent, folder: AgentSession[], byId: Map<string, AgentSession>): string[] {
+    const inFolder = new Set(folder.map(session => session.id));
+    return this.options.store.familyOf(agent.taskId).map(member => member.sessionId).filter(id => byId.has(id) && !inFolder.has(id));
+  }
+
+  /** Takes hand-overs back, at most 500 at a time; a later close hands them over again. The pass sees them taken back. */
+  private async takeBack(ids: string[], byId: Map<string, AgentSession>): Promise<void> {
+    for (let at = 0; at < ids.length; at += HAND_OVER_CHUNK) {
+      const chunk = ids.slice(at, at + HAND_OVER_CHUNK);
+      await this.options.withdrawArchive(chunk);
+      for (const id of chunk) {
+        this.handed.delete(id);
+        const { archiveRequested: _, ...session } = byId.get(id)!;
+        byId.set(id, session);
+      }
+    }
   }
 
   /** A closed todo's master: it, its folder and its family are handed to retention, then it is `closed`. */
@@ -431,8 +458,9 @@ export class TodoAgents {
 
   /**
    * A closed master: whatever of it shows up since (a late start in its folder, a session its family started) is
-   * handed over too. Once all of it is handed over and none of it can lose work, the family record goes, since nothing
-   * of a master whose work is over starts new sessions. One the owner reopened by hand is left to ordinary retention.
+   * handed over too. Once all of it is handed over, none of it can lose work and none still waits to leave (reopening
+   * the todo takes those back), the family record goes, since nothing of a master whose work is over starts new
+   * sessions. One the owner reopened by hand is left to ordinary retention.
    */
   private async tidy(agent: TodoAgent, folder: AgentSession[], byId: Map<string, AgentSession>): Promise<void> {
     const store = this.options.store;
@@ -450,7 +478,7 @@ export class TodoAgents {
     if (!fresh || !current.length) return;
     // One recorded but not listed yet would look moved away; it is waited for.
     if (current.some(member => !now.has(member.sessionId) && this.now() - Date.parse(member.createdAt) < TODO_AGENT_START_WAIT_MS)) return;
-    const unsettled = (id: string) => { const session = now.get(id); return session !== undefined && (busy(session) || !this.handed.has(id)); };
+    const unsettled = (id: string) => { const session = now.get(id); return session !== undefined && (busy(session) || !this.handed.has(id) || Boolean(session.archiveRequested)); };
     if (this.members(agent, this.folders(fresh).get(agent.taskId) ?? [], current).some(unsettled)) return;
     store.removeFamily(agent.taskId);
     this.options.onChange();

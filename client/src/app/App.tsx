@@ -42,7 +42,7 @@ import { reconcileApprovalDecisions } from '../chat/chat-approvals';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { releaseWhileHidden } from '../common/hidden-release';
 import { connectSnapshotStream, NodeSnapshotStore, SnapshotStore, type SnapshotConnection } from './snapshot-stream';
-import { sameScope, scopeParams } from '../../../shared/session-scope';
+import { putAway, sameScope, scopeParams } from '../../../shared/session-scope';
 import { archivedPending, pageScope } from './page-scope';
 import { combinedView, hostOf, hostProblem, workspaceNote } from '../remote/hosts';
 import { localPart, nodeOf, nodePath, pathFor, scopedId, splitScopedId } from '../remote/scope';
@@ -389,8 +389,8 @@ function TowerApp() {
   const groupTitles = useMemo(() => new Map(groups.map(group => [group.cwd, group.title])), [groups]);
   const coordinatorIds = useMemo(() => slackCoordinatorSessionIds(slack?.events || []), [slack?.events]);
   const allMainSessions = useMemo(() => getMainSessions(sessions).filter(session => !coordinatorIds.has(session.id)), [sessions, coordinatorIds]);
-  const mainSessions = useMemo(() => allMainSessions.filter(session => !session.closed), [allMainSessions]);
-  const closedSessions = useMemo(() => allMainSessions.filter(session => session.closed).sort(sortSessions), [allMainSessions]);
+  const mainSessions = useMemo(() => allMainSessions.filter(session => !putAway(session)), [allMainSessions]);
+  const closedSessions = useMemo(() => allMainSessions.filter(putAway).sort(sortSessions), [allMainSessions]);
   // The page holds only the sessions its list shows; counts and folders cover all of them.
   const summary = useMemo(() => pageSummary(snapshot?.sessionSummary, allMainSessions), [snapshot?.sessionSummary, allMainSessions]);
   const anySessions = summary.counts.open + summary.counts.closed > 0 || sessions.length > 0;
@@ -449,11 +449,11 @@ function TowerApp() {
   const listedSessions = showClosed ? closedSessions.filter(session => onMachine(session) && (provider === 'all' || session.provider === provider) && (project === 'all' || session.cwd === project) && (!query.trim() || `${groupTitles.get(session.cwd) || ''} ${sessionTitle(session)} ${session.cwd} ${session.lastMessage}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))) : filtered;
   const changeSessionClosed = useCallback(async () => {
     if (!selectedMainSession || changingClosed || !token || connection !== 'connected') return;
-    const closing = !selectedMainSession.closed;
+    const closing = !putAway(selectedMainSession);
     setChangingClosed(true);
     try {
       await api(pathFor(selectedMainSession.id, id => `/api/sessions/${encodeURIComponent(id)}/${closing ? 'close' : 'reopen'}`), { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' });
-      snapshots.provisional(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === selectedMainSession.id ? { ...session, closed: closing } : session) } : previous);
+      snapshots.provisional(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === selectedMainSession.id ? { ...session, closed: closing, archiveRequested: undefined } : session) } : previous);
       if (closing) closeChat();
       else setShowClosed(false);
       refresh();
@@ -540,7 +540,7 @@ function TowerApp() {
       {monitorOpen && !activeChatId && <TriggerMonitorPanel token={token} slack={slack} slackError={slackError} mentionId={selectedSlackId} jobs={snapshot?.autoPrompts || []} slackUnreadIds={slackUnreadIds} onSlackRead={acknowledgeSlack}
         events={triggerEvents} eventId={triggerEventId} triggerUnreadIds={triggerUnreadIds} onTriggerRead={acknowledgeTrigger} hasMore={triggerHasMore} onMore={() => void loadMoreTriggers()} onEventUpdate={updateTriggerEvent} onClose={closeChat} onSelectMention={selectSlack} onSelectEvent={selectTriggerEvent} onNavigate={onSelect} />}
       {activeChatId && <Suspense fallback={<aside className="chat-panel"><div className="chat-loading"><LoaderCircle className="spin" size={20} /><span>{t("대화를 여는 중")}</span></div></aside>}><ChatPanel contextBanner={<><SlackConversationAlert workflow={slack?.events.find(event => event.id === selectedSlackId)} /><SlackReplyProposals token={token} key={selectedSlackId} workflow={slack?.events.find(event => event.id === selectedSlackId)} />
-        <GitHubReplyProposals token={token} sessionId={activeChatId} enabled={!selectedSession?.node && selectedSession?.launchedBy?.kind === 'trigger'} /></>} key={activeChatId} sessionId={activeChatId} session={selectedSession} allSessions={sessions} workspaceFolders={workspaceFolders} provider={(hostOf(hosts, nodeOf(activeChatId))?.providers ?? []).find(item => item.provider === (selectedSession?.provider || (localPart(activeChatId).startsWith('claude') ? 'claude' : 'codex')))} host={chatHost} compactionReady={!!snapshot?.compaction} runs={currentRuns} token={token} connected={connection === 'connected'} onClose={closeChat} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate} onSessionClose={changeSessionClosed} onAcknowledgeOutcome={acknowledgeOutcome} sessionClosed={!!selectedMainSession?.closed} changingClosed={changingClosed} readRevision={page === 'todo' || showNewSession || showAutoPrompt || issueCwd || (sidebarIsDrawer && sidebarOpen) ? '' : revisions.get(activeChatId)} onRead={onConversationRead} /></Suspense>}
+        <GitHubReplyProposals token={token} sessionId={activeChatId} enabled={!selectedSession?.node && selectedSession?.launchedBy?.kind === 'trigger'} /></>} key={activeChatId} sessionId={activeChatId} session={selectedSession} allSessions={sessions} workspaceFolders={workspaceFolders} provider={(hostOf(hosts, nodeOf(activeChatId))?.providers ?? []).find(item => item.provider === (selectedSession?.provider || (localPart(activeChatId).startsWith('claude') ? 'claude' : 'codex')))} host={chatHost} compactionReady={!!snapshot?.compaction} runs={currentRuns} token={token} connected={connection === 'connected'} onClose={closeChat} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate} onSessionClose={changeSessionClosed} onAcknowledgeOutcome={acknowledgeOutcome} sessionClosed={!!selectedMainSession && putAway(selectedMainSession)} changingClosed={changingClosed} readRevision={page === 'todo' || showNewSession || showAutoPrompt || issueCwd || (sidebarIsDrawer && sidebarOpen) ? '' : revisions.get(activeChatId)} onRead={onConversationRead} /></Suspense>}
     </div>
     <AutoPromptDialog visible={showAutoPrompt} initialCwd={autoPromptCwd} initialNode={autoPromptNode === '' ? undefined : autoPromptNode ?? (autoPromptCwd ? undefined : selectedSession?.node)} providers={snapshot?.providers || []} hosts={hosts} projects={projects} sessions={sessions} jobs={view?.autoPrompts || []} token={token} connected={connection === 'connected'} onClose={closeAutoPrompt} onNavigate={openAutoPromptSession} onRefresh={refresh} />
     {issueCwd && <IssueDialog key={issueCwd} cwd={issueCwd} providers={snapshot?.providers || []} hosts={hosts} token={token} connected={connection === 'connected'} onClose={closeIssue} onCreated={sessionCreated} />}

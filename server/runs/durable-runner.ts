@@ -59,6 +59,7 @@ export class DurableRunManager extends EventEmitter {
   private paths?: Awaited<ReturnType<typeof runnerPaths>>;
   private snapshot?: RunnerSnapshot;
   private closedIds = new Set<string>();
+  private archiveRequestedIds = new Set<string>();
   private unreachableSince?: number;
   /** Set once a proven handoff's successor stayed silent; retried with backoff until a worker answers. */
   private recovery?: { nextAt: number; delay: number };
@@ -180,7 +181,7 @@ export class DurableRunManager extends EventEmitter {
       // From here it is exactly a web restart: start a worker, then attach to whichever worker holds the lock.
       this.recovery = { nextAt: 0, delay: 1000 };
       this.snapshot = undefined;
-      this.closedIds.clear();
+      this.closedIds.clear(); this.archiveRequestedIds.clear();
     }
     const recovery = this.recovery;
     if (Date.now() < recovery.nextAt) return;
@@ -235,9 +236,10 @@ export class DurableRunManager extends EventEmitter {
     return found && markMaster([structuredClone(found)], this.paths?.stateDir ?? this.options.stateDir)[0];
   }
   nativeSessionId(id: string): string { return this.snapshot?.nativeIds[id] ?? id; }
+  /** What the worker says of a session's place in pages: closed by the owner, or waiting to leave for cold storage. */
   applyClosed(session: Session): Session {
-    const { closed: _, ...native } = session;
-    return this.closedIds.has(session.id) ? { ...native, closed: true } : native;
+    const { closed: _, archiveRequested: __, ...native } = session;
+    return { ...native, ...(this.closedIds.has(session.id) ? { closed: true } : {}), ...(this.archiveRequestedIds.has(session.id) ? { archiveRequested: true as const } : {}) };
   }
   async setClosed(id: string, closed: boolean): Promise<Session | undefined> {
     if (!this.supports('workerClosed')) throw new TowerError('unavailable', '실행 워커 업데이트 후 세션 표시 상태를 저장할 수 있습니다.');
@@ -501,12 +503,13 @@ export class DurableRunManager extends EventEmitter {
       const record = await this.handoffFrom(this.snapshot.instance);
       if (!record || !reply.snapshot || reply.snapshot.instance !== reply.instance || reply.snapshot.handoff !== record.successor) throw incompatible();
       this.snapshot = undefined;
-      this.closedIds.clear();
+      this.closedIds.clear(); this.archiveRequestedIds.clear();
       adopted = true;
     }
     if (reply.snapshot && (!this.snapshot || reply.snapshot.revision >= this.snapshot.revision)) {
       this.snapshot = reply.snapshot;
       this.closedIds = new Set(reply.snapshot.closedIds ?? []);
+      this.archiveRequestedIds = new Set(reply.snapshot.archiveRequestedIds ?? []);
       this.emit('change');
     }
     // The successor refused a request addressed to its predecessor; it never ran.
