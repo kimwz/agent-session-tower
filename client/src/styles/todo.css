@@ -440,6 +440,21 @@ a.todo-file-name:hover { text-decoration:underline; }
 .todo-cal-more:hover { background:#1a2433; color:var(--text); }
 .todo-cal-day-popover { width:260px; display:flex; flex-direction:column; gap:3px; }
 .todo-cal-day-popover h4 { margin:2px 4px 6px; font-size:12px; color:#a8b6c8; }
+.todo-cal-cell { position:relative; }
+.todo-cal-cell.with-done { padding-right:18px; }
+.todo-cal-done-dots { position:absolute; top:6px; right:3px; bottom:6px; display:flex; flex-direction:column; align-items:center; gap:1px; overflow:hidden; }
+.todo-cal-done-dot { display:grid; place-items:center; width:13px; height:13px; flex:none; padding:0; border-radius:50%; }
+.todo-cal-done-dot i, .todo-cal-done-dots > i { display:block; width:7px; height:7px; border-radius:50%; background:var(--entry-color); box-shadow:0 0 0 1px #0b1018; opacity:.8; }
+.todo-cal-done-dot:hover { background:#22334a; }
+.todo-cal-done-dot:hover i { opacity:1; transform:scale(1.15); }
+.todo-cal-done-more { flex:none; padding:0 1px; color:#8392a7; font-size:9.5px; line-height:13px; font-variant-numeric:tabular-nums; }
+.todo-cal-done-more:hover { color:var(--text); }
+.todo-cal-entry.done { opacity:.6; background:transparent; }
+.todo-cal-entry.done:hover { opacity:.9; background:color-mix(in srgb, var(--entry-color) 12%, #121b28); }
+.todo-cal-entry.done > svg { color:var(--entry-color); }
+.todo-cal-entry.done > span { text-decoration:line-through; text-decoration-color:#ffffff40; }
+.todo-cal-day-popover h5 { margin:8px 4px 2px; font-size:11px; font-weight:500; color:#6d7c92; }
+.todo-cal-done-error { flex:none; font-size:11.5px; }
 .todo-cal-dots { display:flex; gap:3px; justify-content:center; margin-top:auto; }
 .todo-cal-dots i { width:5px; height:5px; border-radius:50%; }
 .todo-cal-dots i.future { opacity:.45; }
@@ -475,6 +490,10 @@ a.todo-file-name:hover { text-decoration:underline; }
 .todo-cal-block.short .todo-cal-check { top:50%; transform:translateY(-50%); }
 .todo-cal-block time { flex:none; color:#a8b6c8; font-size:10.5px; font-variant-numeric:tabular-nums; }
 .todo-cal-block span:not(.todo-cal-resize) { overflow:hidden; text-overflow:ellipsis; }
+.todo-cal-block.done { opacity:.6; z-index:1; border-left-width:2px; background:color-mix(in srgb, var(--entry-color) 10%, #0f1621); color:#b9c6d6; text-align:left; }
+.todo-cal-block.done:hover { opacity:.95; }
+.todo-cal-block.done > svg { flex:none; color:var(--entry-color); }
+.todo-cal-block.done > span { text-decoration:line-through; text-decoration-color:#ffffff40; }
 .todo-cal-block.future { opacity:.45; background:transparent; border:1px dashed color-mix(in srgb, var(--entry-color) 50%, transparent); }
 .todo-cal-block.dragging { z-index:5; opacity:.9; box-shadow:0 10px 30px #000a; cursor:grabbing; }
 .todo-cal-resize { position:absolute; left:0; right:0; bottom:0; height:8px; cursor:ns-resize; touch-action:none; }
@@ -566,6 +585,9 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-cal-cell { align-items:center; padding:4px 2px; }
   .todo-cal-cell .todo-cal-day { align-self:center; }
   .todo-cal-cell.selected { background:#1a2a40; }
+  .todo-cal-cell.with-done { padding-right:2px; }
+  .todo-cal-done-dots { top:8px; right:2px; gap:2px; }
+  .todo-cal-done-dots > i { width:5px; height:5px; box-shadow:none; }
   .todo-cal-week-view { flex:none; height:calc(100dvh - 210px); }
   .todo-cal-unscheduled { flex:none; max-height:170px; }
   .todo-cal-unscheduled > div { flex-direction:row; flex-wrap:wrap; }

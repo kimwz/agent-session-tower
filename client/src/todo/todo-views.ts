@@ -51,9 +51,10 @@ export interface DisplaySettings {
   group: GroupKey;
   sort: SortKey;
   completed: boolean;
-  /** Calendar: month or week, later occurrences of repeating tasks, and coloring by priority or project. */
+  /** Calendar: month or week, later occurrences of repeating tasks, completed tasks, and coloring by priority or project. */
   calendar: 'month' | 'week';
   future: boolean;
+  done: boolean;
   colorBy: 'priority' | 'project';
 }
 
@@ -81,6 +82,16 @@ export function calendarTasks(view: TodoView, context: ViewContext): TodoTask[] 
   }
 }
 
+/**
+ * The completions a list's calendar shows, of those the server chose by the list's project or label: like its open
+ * tasks, none of an archived project or section, unless the list is an archived project opened to be read (`all`).
+ */
+export function calendarDone<T extends { task: TodoTask }>(items: readonly T[], world: TodoWorld, all = false): T[] {
+  if (all) return [...items];
+  const live = liveProjects(world), shelved = archivedSectionIds(world);
+  return items.filter(({ task }) => live.has(task.projectId) && !(task.sectionId && shelved.has(task.sectionId)));
+}
+
 /** The groupings a kind of list offers, its default first. */
 export function groupingsFor(view: TodoView): GroupKey[] {
   switch (view.kind) {
@@ -93,7 +104,7 @@ export function groupingsFor(view: TodoView): GroupKey[] {
     case 'search': return ['project', 'priority'];
   }
 }
-export const defaultDisplay = (view: TodoView): DisplaySettings => ({ group: groupingsFor(view)[0], sort: 'manual', completed: false, calendar: 'month', future: true, colorBy: 'priority' });
+export const defaultDisplay = (view: TodoView): DisplaySettings => ({ group: groupingsFor(view)[0], sort: 'manual', completed: false, calendar: 'month', future: true, done: true, colorBy: 'priority' });
 
 export const projectOf = (world: TodoWorld, view: TodoView): TodoProject | undefined =>
   view.kind === 'inbox' ? world.projects.find(project => project.inbox) : view.kind === 'project' ? world.projects.find(project => project.id === view.id) : undefined;

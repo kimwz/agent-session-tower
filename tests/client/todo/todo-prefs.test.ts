@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { forgetFoldedForTests, setSubtasksFolded, subtasksFolded } from '../../../client/src/todo/todo-prefs.js';
+import { loadDisplay, saveDisplay } from '../../../client/src/todo/DisplayMenu.js';
+import { defaultDisplay } from '../../../client/src/todo/todo-views.js';
 
 function storage(initial: Record<string, string> = {}, refuse = false) {
   const values = new Map(Object.entries(initial));
@@ -42,4 +44,16 @@ test('when saving keeps failing, every fold of this page is still remembered', (
   setSubtasksFolded('b', true);
   assert.equal(subtasksFolded('a'), true);
   assert.equal(subtasksFolded('b'), true);
+});
+
+test('the calendar’s completed tasks show on a list saved before the setting existed, and turning them off is remembered', () => {
+  const saved = storage({ 'agent-session-tower.todo-display': JSON.stringify({ 'p:work': { group: 'section', sort: 'manual', completed: false, calendar: 'week', future: true, colorBy: 'priority' } }) });
+  (globalThis as { window?: unknown }).window = { localStorage: saved };
+  const fallback = defaultDisplay({ kind: 'project', id: 'work' });
+  const before = loadDisplay('p:work', fallback);
+  assert.equal(before.done, true);
+  assert.equal(before.calendar, 'week');
+  saveDisplay('p:work', { ...before, done: false });
+  assert.equal(loadDisplay('p:work', fallback).done, false);
+  assert.equal(loadDisplay('inbox', defaultDisplay({ kind: 'inbox' })).done, true);
 });

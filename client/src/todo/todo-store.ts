@@ -17,7 +17,7 @@ import { applyOps, emptyWorld, inverseOps, mergeChanges, touchesDetail, withAgen
 export interface TodoTransport {
   overview(): Promise<TodoOverview>;
   detail(id: string): Promise<TodoTaskDetail>;
-  completed(input: { projectId?: string; labelId?: string; before?: string }): Promise<TodoCompletedPage>;
+  completed(input: { projectId?: string; labelId?: string; before?: string } & Partial<CompletedRange> & { limit?: number }): Promise<TodoCompletedPage>;
   search(query: string, completed: boolean): Promise<TodoTask[]>;
   apply(request: TodoRequest): Promise<TodoChanges>;
   /** Starts a todo's issue master with the owner's first message; the answer may name the agent it recorded. */
@@ -29,11 +29,13 @@ export function httpTransport(token: () => string): TodoTransport {
   return {
     overview: () => api<TodoOverview>('/api/todos'),
     detail: id => api<TodoTaskDetail>(`/api/todos/tasks/${encodeURIComponent(id)}`),
-    completed: ({ projectId, labelId, before }) => {
-      const params = new URLSearchParams({ limit: '50' });
+    completed: ({ projectId, labelId, before, since, until, limit }) => {
+      const params = new URLSearchParams({ limit: String(limit ?? 50) });
       if (projectId) params.set('projectId', projectId);
       if (labelId) params.set('labelId', labelId);
       if (before) params.set('before', before);
+      if (since) params.set('since', since);
+      if (until) params.set('until', until);
       return api<TodoCompletedPage>(`/api/todos/completed?${params}`);
     },
     search: async (query, completed) => (await api<{ tasks: TodoTask[] }>(`/api/todos/search?${new URLSearchParams({ q: query, ...(completed ? { completed: '1' } : {}) })}`)).tasks,
@@ -45,11 +47,19 @@ export function httpTransport(token: () => string): TodoTransport {
 export interface TodoToastAction { label: string; run: () => void }
 export interface TodoToast { id: number; message: string; tone: 'info' | 'error'; actions: TodoToastAction[] }
 
+/** The times a completed list keeps: from `since` (included) to `until` (left out), as `toISOString` writes them. */
+export interface CompletedRange { since: string; until: string }
+
+/** A period's list is read whole, up to this many pages of 100. */
+const RANGE_PAGES = 10;
+
 export interface CompletedList {
   /** A project id, or '' for every project. */
   projectId: string;
   /** Only tasks with this label, when set (a label's list). */
   labelId?: string;
+  /** Only completions of this period, read whole at once (the calendar's days); otherwise a page at a time. */
+  range?: CompletedRange;
   items: TodoCompletedPage['items'];
   before?: string;
   loading: boolean;
@@ -177,21 +187,32 @@ export class TodoClient {
 
   /**
    * Shows completed tasks of a project ('' for all), only those with `labelId` when it is given; `more` adds the next
-   * page of the list shown (its label unless another is given).
+   * page of the list shown (its label and period unless others are given). With `range`, the whole period is read.
    */
-  async readCompleted(projectId: string, more = false, labelId?: string) {
+  async readCompleted(projectId: string, more = false, labelId?: string, range?: CompletedRange) {
     const current = this.state.completed;
     const label = (more ? labelId ?? current?.labelId : labelId) || undefined;
-    const same = (list: CompletedList | null | undefined): list is CompletedList => !!list && list.projectId === projectId && (list.labelId || undefined) === label;
+    const period = more ? range ?? current?.range : range;
+    const same = (list: CompletedList | null | undefined): list is CompletedList => !!list && list.projectId === projectId && (list.labelId || undefined) === label
+      && list.range?.since === period?.since && list.range?.until === period?.until;
     const before = more && same(current) ? current.before : undefined;
     if (more && !before) return;
     const ticket = ++this.completedRead;
-    this.set({ completed: { projectId, ...(label ? { labelId: label } : {}), items: same(current) ? current.items : [], before: current?.before, loading: true, error: '' } });
+    const scope = { projectId, ...(label ? { labelId: label } : {}), ...(period ? { range: period } : {}) };
+    this.set({ completed: { ...scope, items: same(current) ? current.items : [], before: current?.before, loading: true, error: '' } });
     try {
-      const page = await this.transport.completed({ projectId: projectId || undefined, ...(label ? { labelId: label } : {}), before });
+      const ask = (after?: string) => this.transport.completed({ projectId: projectId || undefined, ...(label ? { labelId: label } : {}), before: after, ...(period ? { ...period, limit: 100 } : {}) });
+      let page = await ask(before);
+      let read = page.items;
+      // A period shows whole: its pages are read one after another before any shows, so it never shows half.
+      for (let pages = 1; period && page.before && pages < RANGE_PAGES; pages++) {
+        if (ticket !== this.completedRead) return;
+        page = await ask(page.before);
+        read = [...read, ...page.items];
+      }
       if (ticket !== this.completedRead || !same(this.state.completed)) return;
-      const items = more ? [...this.state.completed.items, ...page.items] : page.items;
-      this.set({ completed: { projectId, ...(label ? { labelId: label } : {}), items, before: page.before, loading: false, error: '' } });
+      const items = more ? [...this.state.completed.items, ...read] : read;
+      this.set({ completed: { ...scope, items, before: period ? undefined : page.before, loading: false, error: '' } });
     } catch (error) {
       if (ticket !== this.completedRead || !same(this.state.completed)) return;
       this.set({ completed: { ...this.state.completed, loading: false, error: message(error) } });
@@ -200,7 +221,7 @@ export class TodoClient {
   /** Reads the completed list shown again, as it was asked for. */
   private rereadCompleted() {
     const list = this.state.completed;
-    if (list) void this.readCompleted(list.projectId, false, list.labelId);
+    if (list) void this.readCompleted(list.projectId, false, list.labelId, list.range);
   }
   hideCompleted() { this.completedRead++; if (this.state.completed) this.set({ completed: null }); }
 
@@ -252,7 +273,8 @@ export class TodoClient {
     this.base = mergeChanges(this.base, changes);
     this.publish();
     if (this.state.detailId && touchesDetail(this.base.detail, changes)) void this.readDetail(this.state.detailId);
-    if (this.state.completed && touchesCompleted(this.state.completed, ops)) this.rereadCompleted();
+    // A list still being read may answer from before this change: it is read again too.
+    if (this.state.completed && (this.state.completed.loading || touchesCompleted(this.state.completed, ops, changes))) this.rereadCompleted();
     this.pump();
   }
 
@@ -348,10 +370,13 @@ export class TodoClient {
 }
 
 const COMPLETED_OPS = new Set<TodoOp['op']>(['task.complete', 'task.uncomplete', 'task.delete', 'task.restore']);
-/** Whether a change may show in the completed list: it completes or reopens a task, or changes one listed. */
-function touchesCompleted(list: CompletedList, ops: readonly TodoOp[]): boolean {
+/**
+ * Whether a change may show in the completed list: it completes or reopens a task, or changes one listed, asked for or
+ * changed along with another (a completed sub-task moved with its parent).
+ */
+function touchesCompleted(list: CompletedList, ops: readonly TodoOp[], changes: TodoChanges): boolean {
   const listed = new Set(list.items.map(item => item.task.id));
-  return ops.some(op => COMPLETED_OPS.has(op.op) || ('id' in op && typeof op.id === 'string' && listed.has(op.id)));
+  return ops.some(op => COMPLETED_OPS.has(op.op) || ('id' in op && typeof op.id === 'string' && listed.has(op.id))) || changes.tasks.some(task => listed.has(task.id));
 }
 
 const message = (error: unknown) => error instanceof Error ? translateMessage(error.message) : t('요청을 처리하지 못했습니다.');

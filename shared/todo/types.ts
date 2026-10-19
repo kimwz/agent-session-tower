@@ -105,6 +105,8 @@ export interface TodoCompletion {
   /** The date that was done: a repeating task's occurrence, or the task's date. */
   occurrenceDate: string | null;
   completedAt: string;
+  /** The completion that closed it with its own (a parent completed with its open sub-tasks), when one did. */
+  causeId?: string;
 }
 
 export type TodoEventKind = 'created' | 'updated' | 'moved' | 'completed' | 'uncompleted' | 'deleted' | 'restored' | 'linked' | 'unlinked' | 'commented' | 'attached';

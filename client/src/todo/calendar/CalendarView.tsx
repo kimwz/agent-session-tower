@@ -3,20 +3,22 @@ import { DndContext, DragOverlay, useDraggable, useDroppable, type DragEndEvent,
 import { CalendarX, Check, ChevronLeft, ChevronRight, Flag, Repeat } from 'lucide-react';
 import { dateParts, weekday } from '../../../../shared/todo/dates';
 import type { TodoOp } from '../../../../shared/todo/ops';
-import type { TodoTask } from '../../../../shared/todo/types';
+import type { TodoCompletion, TodoTask } from '../../../../shared/todo/types';
 import { getLanguage, translate as t } from '../../i18n/i18n';
 import { Popover } from '../Popover';
 import type { QuickAddPreset } from '../QuickAdd';
 import { colorOf, dateLabel, longDate, monthDay, weekdayName } from '../todo-format';
 import { pointerOrNearest, useTodoSensors } from '../todo-dnd';
 import type { TodoWorld } from '../todo-model';
-import { cellEntries, resizeCommit, DAY_MINUTES, DEFAULT_DURATION, dayEntries, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, timeOf, visibleRange, yToMinutes, type CalendarEntry, type CalendarMode, type DayEntries } from './calendar-layout';
+import { cellEntries, doneDays, resizeCommit, DAY_MINUTES, DEFAULT_DURATION, dayEntries, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, timeOf, visibleRange, yToMinutes, type CalendarEntry, type CalendarMode, type DayEntries, type DoneEntry } from './calendar-layout';
 
 /**
  * The calendar layout of a list: a month of days, or a week (three days on a phone) with an all-day row over a time
  * grid. Tasks are dragged to another day, time or the all-day row; a block's bottom edge sets its duration; an empty
  * day or slot adds a task there; undated tasks wait in a side panel to be dragged in. Later occurrences of repeating
  * tasks show faded and cannot be moved. A task's small check circle, beside the button that opens it, completes it.
+ * Completed tasks, when given, show where they were completed: as dots down a month day's right edge, or at their time
+ * in the week's grid; each opens its task.
  */
 
 export interface CalendarProps {
@@ -33,10 +35,22 @@ export interface CalendarProps {
   onAdd: (preset: QuickAddPreset) => void;
   onChange: (ops: TodoOp[]) => void;
   onComplete?: (task: TodoTask) => void;
+  /** Completions to show, of the days shown or more; none when absent. */
+  done?: readonly { completion: TodoCompletion; task: TodoTask }[];
+  /** Why the completions could not be read, said beside the calendar's title. */
+  doneError?: string;
+  /** The days shown, whenever they change: the page reads their completions. */
+  onRange?: (from: string, to: string) => void;
 }
 
 const PRIORITY_COLORS = { 1: 'var(--p1)', 2: 'var(--p2)', 3: 'var(--p3)', 4: '#7d8aa0' } as const;
 const MONTH_FIT = 4;
+/**
+ * Dots down a month day's edge before `+n`: as many as fit the shortest week row (96px less the cell's padding, 13px
+ * a dot); a phone's smaller cell shows fewer and opens nothing from them.
+ */
+const DOT_FIT = 6;
+const MOBILE_DOT_FIT = 3;
 
 type Drop = { kind: 'day' | 'allday' | 'time'; date: string };
 
@@ -94,51 +108,79 @@ function TaskEntry({ entry, color, onOpen, draggable, compact }: { entry: Calend
   </button>;
 }
 
+const doneTitle = (entry: DoneEntry) => t('{0} 완료 · {1}', { 0: timeOf(entry.minutes), 1: entry.task.content });
+
+/** A month day's completions: dots down its right edge, each opening its task; the rest behind `+n`. */
+function DoneDots({ entries, color, onOpen, onMore, mobile }: { entries: DoneEntry[]; color: (task: TodoTask) => string; onOpen: (id: string) => void; onMore: (anchor: HTMLElement) => void; mobile: boolean }) {
+  const { shown, more } = overflow(entries.length, mobile ? MOBILE_DOT_FIT : DOT_FIT);
+  // A phone's cell is pressed to choose its day, whose list then shows them.
+  if (mobile) return <span className="todo-cal-done-dots" aria-hidden="true">{entries.slice(0, MOBILE_DOT_FIT).map(entry => <i key={entry.completion.id} style={{ '--entry-color': color(entry.task) } as CSSProperties} />)}</span>;
+  return <span className="todo-cal-done-dots">
+    {entries.slice(0, shown).map(entry => <button key={entry.completion.id} type="button" className="todo-cal-done-dot" style={{ '--entry-color': color(entry.task) } as CSSProperties} title={doneTitle(entry)} aria-label={doneTitle(entry)}
+      onClick={event => { event.stopPropagation(); onOpen(entry.task.id); }}><i /></button>)}
+    {more > 0 && <button type="button" className="todo-cal-done-more" title={t('완료 {0}개 더', { 0: more })} onClick={event => { event.stopPropagation(); onMore(event.currentTarget); }}>+{more}</button>}
+  </span>;
+}
+
+/** A completion in a list (a day's popover, a phone's day): faded and checked, opening its task. */
+function DoneRow({ entry, color, onOpen }: { entry: DoneEntry; color: string; onOpen: (id: string) => void }) {
+  return <button type="button" className="todo-cal-entry done" style={{ '--entry-color': color } as CSSProperties} title={doneTitle(entry)} onClick={event => { event.stopPropagation(); onOpen(entry.task.id); }}>
+    <Check size={11} strokeWidth={3} /><time>{timeOf(entry.minutes)}</time><span>{entry.task.content}</span>
+  </button>;
+}
+
 /** Completing from the calendar, unless it only shows. */
 const completer = (props: CalendarProps) => props.readOnly ? undefined : props.onComplete;
 
-function MonthCell({ date, month, today, entries, color, props }: { date: string; month: number; today: string; entries: DayEntries | undefined; color: (task: TodoTask) => string; props: CalendarProps & { selected: string; onSelect: (date: string) => void } }) {
+function MonthCell({ date, month, today, entries, done, color, props }: { date: string; month: number; today: string; entries: DayEntries | undefined; done: DoneEntry[]; color: (task: TodoTask) => string; props: CalendarProps & { selected: string; onSelect: (date: string) => void } }) {
   const drop = useDroppable({ id: `day:${date}`, data: { drop: { kind: 'day', date } satisfies Drop }, disabled: props.readOnly });
-  const more = useRef<HTMLButtonElement>(null);
+  const more = useRef<HTMLElement | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const open = (anchor: HTMLElement) => { more.current = anchor; setShowAll(true); };
   const list = cellEntries(entries);
   const deadlines = entries?.deadlines ?? [];
   const { shown, more: hidden } = overflow(list.length + deadlines.length, MONTH_FIT);
   const all = [...list, ...deadlines];
   const outside = dateParts(date).month !== month;
-  return <div ref={drop.setNodeRef} role="gridcell" aria-label={longDate(date)} className={`todo-cal-cell ${outside ? 'outside' : ''} ${date === today ? 'today' : ''} ${date < today ? 'past' : ''} ${drop.isOver ? 'drop-target' : ''} ${props.mobile && date === props.selected ? 'selected' : ''}`}
-    onClick={() => props.mobile ? props.onSelect(date) : !props.readOnly && props.onAdd({ dueDate: date })}>
+  return <div ref={drop.setNodeRef} role="gridcell" aria-label={longDate(date)} className={`todo-cal-cell ${outside ? 'outside' : ''} ${date === today ? 'today' : ''} ${date < today ? 'past' : ''} ${drop.isOver ? 'drop-target' : ''} ${props.mobile && date === props.selected ? 'selected' : ''} ${done.length ? 'with-done' : ''}`}
+    // A press in its day popover (drawn elsewhere, but passed up here by React) is not a press on the day.
+    onClick={event => { if (!event.currentTarget.contains(event.target as Node)) return; if (props.mobile) props.onSelect(date); else if (!props.readOnly) props.onAdd({ dueDate: date }); }}>
     <span className="todo-cal-day">{dateParts(date).day}</span>
+    {done.length > 0 && <DoneDots entries={done} color={color} onOpen={props.onOpen} onMore={open} mobile={props.mobile} />}
     {props.mobile
       ? all.length > 0 && <span className="todo-cal-dots">{all.slice(0, 3).map((entry, index) => <i key={index} className={entry.kind} style={{ background: color(entry.task) }} />)}</span>
       : <>
         {all.slice(0, shown).map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={!props.readOnly} compact onComplete={completer(props)} />)}
-        {hidden > 0 && <button ref={more} type="button" className="todo-cal-more" onClick={event => { event.stopPropagation(); setShowAll(true); }}>{t('+{0}개', { 0: hidden })}</button>}
+        {hidden > 0 && <button type="button" className="todo-cal-more" onClick={event => { event.stopPropagation(); open(event.currentTarget); }}>{t('+{0}개', { 0: hidden })}</button>}
         {showAll && <Popover anchor={more} onClose={() => setShowAll(false)} label={longDate(date)} className="todo-cal-day-popover">
           <h4>{longDate(date)}</h4>
           {all.map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={false} onComplete={completer(props)} />)}
+          {done.length > 0 && <h5>{t('완료됨')}</h5>}
+          {done.map(entry => <DoneRow key={entry.completion.id} entry={entry} color={color(entry.task)} onOpen={props.onOpen} />)}
         </Popover>}
       </>}
   </div>;
 }
 
-function MonthView({ props, days, anchor, color, selected, onSelect }: { props: CalendarProps; days: Map<string, DayEntries>; anchor: string; color: (task: TodoTask) => string; selected: string; onSelect: (date: string) => void }) {
+function MonthView({ props, days, done, anchor, color, selected, onSelect }: { props: CalendarProps; days: Map<string, DayEntries>; done: Map<string, DoneEntry[]>; anchor: string; color: (task: TodoTask) => string; selected: string; onSelect: (date: string) => void }) {
   const weeks = monthWeeks(anchor);
   const month = dateParts(anchor).month;
   const day = days.get(selected);
   const selectedEntries = [...cellEntries(day), ...(day?.deadlines ?? [])];
+  const selectedDone = done.get(selected) ?? [];
   return <>
     <div className="todo-cal-month" role="grid" aria-label={t('월간')}>
       <div className="todo-cal-weekdays" role="row">{[1, 2, 3, 4, 5, 6, 0].map(index => <span key={index} role="columnheader">{weekdayName(index)}</span>)}</div>
       {weeks.map(week => <div key={week[0]} className="todo-cal-week" role="row">
-        {week.map(date => <MonthCell key={date} date={date} month={month} today={props.today} entries={days.get(date)} color={color} props={{ ...props, selected, onSelect }} />)}
+        {week.map(date => <MonthCell key={date} date={date} month={month} today={props.today} entries={days.get(date)} done={done.get(date) ?? NONE} color={color} props={{ ...props, selected, onSelect }} />)}
       </div>)}
     </div>
     {props.mobile && <section className="todo-cal-agenda" aria-label={longDate(selected)}>
       <header><h3>{dateLabel(selected, props.today)}</h3><span>{longDate(selected)}</span>
         {!props.readOnly && <button type="button" className="todo-tool" onClick={() => props.onAdd({ dueDate: selected })}>{t('작업 추가')}</button>}</header>
       {selectedEntries.length ? selectedEntries.map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={!props.readOnly} onComplete={completer(props)} />)
-        : <p className="todo-muted">{t('일정이 없습니다')}</p>}
+        : !selectedDone.length && <p className="todo-muted">{t('일정이 없습니다')}</p>}
+      {selectedDone.map(entry => <DoneRow key={entry.completion.id} entry={entry} color={color(entry.task)} onOpen={props.onOpen} />)}
     </section>}
   </>;
 }
@@ -205,10 +247,25 @@ function Block({ entry, placed, color, props, preview }: { entry: CalendarEntry;
   </div>;
 }
 
-function TimeColumn({ date, entries, color, props, dragging }: { date: string; entries: DayEntries | undefined; color: (task: TodoTask) => string; props: CalendarProps; dragging: { id: string; minutes: number } | null }) {
+/** A completion in the week's grid, at the minute it was made: faded and checked, opening its task, never moved. */
+function DoneBlock({ entry, placed, color, onOpen }: { entry: DoneEntry; placed: { start: number; end: number; column: number; columns: number }; color: string; onOpen: (id: string) => void }) {
+  const style = {
+    '--entry-color': color, top: minutesToY(placed.start), height: minutesToY(placed.end - placed.start) - 2,
+    left: `calc(${(placed.column / placed.columns) * 100}% + 2px)`, width: `calc(${100 / placed.columns}% - 4px)`,
+  } as CSSProperties;
+  return <button type="button" className="todo-cal-block done short" style={style} title={doneTitle(entry)} aria-label={doneTitle(entry)} onClick={event => { event.stopPropagation(); onOpen(entry.task.id); }}>
+    <Check size={11} strokeWidth={3} /><time>{timeOf(entry.minutes)}</time><span>{entry.task.content}</span>
+  </button>;
+}
+
+/** Half an hour from the minute it was made, moved up to end by midnight; placed and drawn over the same span. */
+const doneSpan = (entry: DoneEntry) => { const start = Math.min(entry.minutes, DAY_MINUTES - DEFAULT_DURATION); return { start, end: start + DEFAULT_DURATION }; };
+
+function TimeColumn({ date, entries, done, color, props, dragging }: { date: string; entries: DayEntries | undefined; done: DoneEntry[]; color: (task: TodoTask) => string; props: CalendarProps; dragging: { id: string; minutes: number } | null }) {
   const drop = useDroppable({ id: `time:${date}`, data: { drop: { kind: 'time', date } satisfies Drop }, disabled: props.readOnly });
   const timed = entries?.timed ?? [];
-  const placed = new Map(placeBlocks(timed.map(entry => ({ id: `${entry.kind}:${entry.task.id}`, ...spanOf(entry.task) }))).map(item => [item.id, item]));
+  // Completions share the width with the blocks they overlap, as blocks do with each other.
+  const placed = new Map(placeBlocks([...timed.map(entry => ({ id: `${entry.kind}:${entry.task.id}`, ...spanOf(entry.task) })), ...done.map(entry => ({ id: `done:${entry.completion.id}`, ...doneSpan(entry) }))]).map(item => [item.id, item]));
   const now = new Date();
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   return <div ref={drop.setNodeRef} data-time-column={date} className={`todo-cal-column ${date === props.today ? 'today' : ''} ${drop.isOver ? 'drop-target' : ''}`}
@@ -216,10 +273,11 @@ function TimeColumn({ date, entries, color, props, dragging }: { date: string; e
     {date === props.today && <i className="todo-cal-now" style={{ top: minutesToY(nowMinutes) }} />}
     {timed.map(entry => <Block key={`${entry.kind}:${entry.task.id}`} entry={entry} placed={placed.get(`${entry.kind}:${entry.task.id}`)!} color={color(entry.task)} props={props}
       preview={dragging && dragging.id === `block:${entry.task.id}:${entry.date}` ? { minutes: dragging.minutes } : null} />)}
+    {done.map(entry => <DoneBlock key={entry.completion.id} entry={entry} placed={placed.get(`done:${entry.completion.id}`)!} color={color(entry.task)} onOpen={props.onOpen} />)}
   </div>;
 }
 
-function WeekView({ props, days, list, color, dragging }: { props: CalendarProps; days: Map<string, DayEntries>; list: string[]; color: (task: TodoTask) => string; dragging: { id: string; minutes: number } | null }) {
+function WeekView({ props, days, done, list, color, dragging }: { props: CalendarProps; days: Map<string, DayEntries>; done: Map<string, DoneEntry[]>; list: string[]; color: (task: TodoTask) => string; dragging: { id: string; minutes: number } | null }) {
   const scroller = useRef<HTMLDivElement>(null);
   // The grid opens at eight in the morning.
   useLayoutEffect(() => { if (scroller.current) scroller.current.scrollTop = minutesToY(8 * 60) - 8; }, []);
@@ -239,7 +297,7 @@ function WeekView({ props, days, list, color, dragging }: { props: CalendarProps
       </div>
       <div className="todo-cal-grid" style={{ ...columns, height: minutesToY(DAY_MINUTES) }}>
         <div className="todo-cal-hours">{Array.from({ length: 24 }, (_, hour) => <span key={hour} style={{ top: minutesToY(hour * 60) }}>{hour ? `${String(hour).padStart(2, '0')}:00` : ''}</span>)}</div>
-        {list.map(date => <TimeColumn key={date} date={date} entries={days.get(date)} color={color} props={props} dragging={dragging} />)}
+        {list.map(date => <TimeColumn key={date} date={date} entries={days.get(date)} done={done.get(date) ?? NONE} color={color} props={props} dragging={dragging} />)}
       </div>
     </div>
   </div>;
@@ -253,6 +311,8 @@ function Unscheduled({ tasks, color, props }: { tasks: TodoTask[]; color: (task:
     {!props.readOnly && tasks.length > 0 && <p className="todo-muted todo-cal-hint">{t('끌어서 날짜나 시간에 놓으세요')}</p>}
   </aside>;
 }
+
+const NONE: DoneEntry[] = [];
 
 /** `10월 12일 – 18일`, or both months when the days cross one. */
 export function periodTitle(first: string, last: string): string {
@@ -272,6 +332,9 @@ export function CalendarView(props: CalendarProps) {
   const color = useColor(props.colorBy, props.world);
   const range = visibleRange(anchor, mode, span);
   const days = useMemo(() => dayEntries(tasks, range.from, range.to, { future }), [tasks, range.from, range.to, future]);
+  const done = useMemo(() => doneDays(props.done ?? [], range.from, range.to), [props.done, range.from, range.to]);
+  const { onRange } = props;
+  useEffect(() => { onRange?.(range.from, range.to); }, [onRange, range.from, range.to]);
   const undated = useMemo(() => tasks.filter(task => !task.dueDate), [tasks]);
   useEffect(() => { setAnchor(today); setSelected(today); }, [mode, today]);
   const list = gridDays(anchor, span);
@@ -313,6 +376,7 @@ export function CalendarView(props: CalendarProps) {
         <button type="button" className="icon-button" aria-label={mode === 'month' ? t('다음 달') : t('다음')} onClick={() => setAnchor(value => shiftAnchor(value, mode, span, 1))}><ChevronRight size={15} /></button>
       </div>
       <h3 className="todo-cal-title">{title}</h3>
+      {props.doneError && <p className="todo-error todo-cal-done-error" role="alert" title={props.doneError}>{t('완료한 작업을 불러오지 못했습니다')}</p>}
       <div className="todo-segmented" role="radiogroup" aria-label={t('달력 보기')}>
         <button type="button" role="radio" aria-checked={mode === 'month'} onClick={() => props.onMode('month')}>{t('월간')}</button>
         <button type="button" role="radio" aria-checked={mode === 'week'} onClick={() => props.onMode('week')}>{mobile ? t('3일') : t('주간')}</button>
@@ -323,8 +387,8 @@ export function CalendarView(props: CalendarProps) {
       <div className="todo-cal-body">
         {panel && mobile && <Unscheduled tasks={undated} color={color} props={props} />}
         <div className="todo-cal-main">
-          {mode === 'month' ? <MonthView props={props} days={days} anchor={anchor} color={color} selected={selected} onSelect={setSelected} />
-            : <WeekView props={props} days={days} list={list} color={color} dragging={dragging} />}
+          {mode === 'month' ? <MonthView props={props} days={days} done={done} anchor={anchor} color={color} selected={selected} onSelect={setSelected} />
+            : <WeekView props={props} days={days} done={done} list={list} color={color} dragging={dragging} />}
         </div>
         {panel && !mobile && <Unscheduled tasks={undated} color={color} props={props} />}
       </div>

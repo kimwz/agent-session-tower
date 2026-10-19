@@ -11,7 +11,7 @@ import { byteRange } from './sinks.js';
 export interface TodoBackend {
   overview(): TodoOverview;
   detail(id: string): TodoTaskDetail;
-  completed(input: { projectId?: string; labelId?: string; before?: string; limit?: number }): TodoCompletedPage;
+  completed(input: { projectId?: string; labelId?: string; before?: string; since?: string; until?: string; limit?: number }): TodoCompletedPage;
   search(query: string, input: { completed?: boolean; limit?: number }): TodoTask[];
   apply(request: TodoRequest): TodoChanges;
   /** Starts a todo's issue master with the owner's first message (server/todo/agents.ts). */
@@ -91,7 +91,9 @@ export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: 
     if (projectId !== undefined && !ID.test(projectId)) throw new TowerError('invalid', '프로젝트 id가 올바르지 않습니다.');
     if (labelId !== undefined && !ID.test(labelId)) throw new TowerError('invalid', '라벨 id가 올바르지 않습니다.');
     if (before !== undefined && before.length > 60) throw new TowerError('invalid', '완료 목록 커서가 올바르지 않습니다.');
-    json(res, 200, todos.completed({ projectId, labelId, before, limit: number(url.searchParams.get('limit')) }));
+    // The store checks a bound's form (a time as `toISOString` writes it).
+    const since = url.searchParams.get('since') ?? undefined, until = url.searchParams.get('until') ?? undefined;
+    json(res, 200, todos.completed({ projectId, labelId, before, since, until, limit: number(url.searchParams.get('limit')) }));
     return true;
   }
   if (req.method === 'GET' && path === '/api/todos/search') {

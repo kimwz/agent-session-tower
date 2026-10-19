@@ -67,6 +67,10 @@ test('the todo routes take the page token and JSON, check every change, and have
   assert.deepEqual(await done('labelId=call'), ['b']);
   assert.deepEqual(await done(''), ['a', 'b']);
   assert.equal((await fetch(`${base}/api/todos/completed?labelId=${encodeURIComponent('a b')}`)).status, 400);
+  // A period: the calendar's days.
+  assert.deepEqual(await done(`since=${encodeURIComponent('2000-01-01T00:00:00.000Z')}&until=${encodeURIComponent('2999-01-01T00:00:00.000Z')}`), ['a', 'b']);
+  assert.deepEqual(await done(`until=${encodeURIComponent('2000-01-01T00:00:00.000Z')}`), []);
+  assert.equal((await fetch(`${base}/api/todos/completed?since=2026-10-17`)).status, 400);
   const found = (await (await fetch(`${base}/api/todos/search?q=task&completed=1`)).json() as { tasks: { id: string; completedAt: string | null }[] }).tasks;
   assert.deepEqual(found.map(task => [task.id, typeof task.completedAt]).sort(), [['a', 'string'], ['b', 'string']]);
 
