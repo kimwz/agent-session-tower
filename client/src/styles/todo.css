@@ -439,7 +439,6 @@ a.todo-file-name:hover { text-decoration:underline; }
 .todo-cal-more { align-self:flex-start; padding:1px 6px; border-radius:5px; color:#8392a7; font-size:11px; }
 .todo-cal-more:hover { background:#1a2433; color:var(--text); }
 .todo-cal-day-popover { width:260px; display:flex; flex-direction:column; gap:3px; }
-.todo-cal-day-list { display:contents; }
 .todo-cal-day-popover h4 { margin:2px 4px 6px; font-size:12px; color:#a8b6c8; }
 .todo-cal-cell { position:relative; }
 .todo-cal-cell.with-done { padding-right:18px; }
@@ -586,6 +585,7 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-cal-cell { align-items:center; padding:4px 2px; }
   .todo-cal-cell .todo-cal-day { align-self:center; }
   .todo-cal-cell.selected { background:#1a2a40; }
+  .todo-cal-cell.with-done { padding-right:2px; }
   .todo-cal-done-dots { top:8px; right:2px; gap:2px; }
   .todo-cal-done-dots > i { width:5px; height:5px; box-shadow:none; }
   .todo-cal-week-view { flex:none; height:calc(100dvh - 210px); }

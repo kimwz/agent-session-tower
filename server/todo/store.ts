@@ -317,7 +317,7 @@ export class TodoStore {
     const cursor = input.before ? TODO_COMPLETED_CURSOR.exec(input.before) : undefined;
     if (input.before && !cursor) throw new TowerError('invalid', '완료 목록 커서가 올바르지 않습니다.');
     const [at, row] = cursor ? [cursor[1], Number(cursor[2])] : [null, null];
-    const rows = this.all<Record<string, unknown>>(`SELECT c.rowid AS c_row, c.id AS c_id, c.task_id AS c_task_id, c.occurrence_date AS c_occurrence_date, c.completed_at AS c_completed_at, ${TASK_COLUMNS}
+    const rows = this.all<Record<string, unknown>>(`SELECT c.rowid AS c_row, c.id AS c_id, c.task_id AS c_task_id, c.occurrence_date AS c_occurrence_date, c.completed_at AS c_completed_at, c.cause_id AS c_cause_id, ${TASK_COLUMNS}
       FROM todo_completions c JOIN todo_tasks t ON t.id = c.task_id JOIN todo_projects p ON p.id = t.project_id AND p.deleted_at IS NULL
       WHERE c.undone_at IS NULL AND t.deleted_at IS NULL AND (? IS NULL OR t.project_id = ?)
         AND (? IS NULL OR EXISTS (SELECT 1 FROM todo_task_labels tl WHERE tl.task_id = t.id AND tl.label_id = ?))
@@ -328,7 +328,7 @@ export class TodoStore {
     ...(input.since ? [input.since] : []), ...(input.until ? [input.until] : []), limit + 1);
     const page = rows.slice(0, limit);
     const items = page.map(item => ({
-      completion: completionOf({ id: item.c_id, task_id: item.c_task_id, occurrence_date: item.c_occurrence_date, completed_at: item.c_completed_at }), task: taskOf(item),
+      completion: completionOf({ id: item.c_id, task_id: item.c_task_id, occurrence_date: item.c_occurrence_date, completed_at: item.c_completed_at, cause_id: item.c_cause_id }), task: taskOf(item),
     }));
     const last = page[page.length - 1];
     return { items, ...(rows.length > limit && last ? { before: `${String(last.c_completed_at)}~${Number(last.c_row)}` } : {}) };

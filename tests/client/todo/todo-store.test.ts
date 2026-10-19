@@ -309,6 +309,20 @@ test('a period reads at most ten pages, and a page that fails leaves the list wi
   assert.equal(client.getState().completed?.error, '읽지 못했습니다.');
 });
 
+test('a change answered while the completed list is still being read reads it again', async () => {
+  const transport = new FakeTransport();
+  const { client } = await ready(transport);
+  let release!: () => void;
+  transport.completedPages = [() => new Promise(resolve => { release = () => resolve({ items: [] }); })];
+  const first = client.readCompleted('');
+  client.apply([{ op: 'task.update', id: 'a', patch: { priority: 2 } }]);
+  await settle();
+  release();
+  await first;
+  await settle();
+  assert.equal(transport.reads.completed, 2);
+});
+
 test('the completed list is read again when the answer changes a listed task that was not asked for (moved with its parent)', async () => {
   const transport = new FakeTransport();
   transport.current = overview([task('p', { content: 'P' })]);

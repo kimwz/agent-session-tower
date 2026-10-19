@@ -335,6 +335,11 @@ test('the completed list keeps the times from since (included) to until (left ou
   // An occurrence taken back leaves the list.
   apply({ op: 'task.uncomplete', id: 'three', completionId: 'c-three' });
   assert.deepEqual(ids({ since: at.two, until: at.four }), ['two']);
+  // Sub-tasks closed with their parent name its completion as their cause.
+  apply({ op: 'task.create', id: 'p', content: 'P' }, { op: 'task.create', id: 's', parentId: 'p', content: 'S' });
+  apply({ op: 'task.complete', id: 'p', completionId: 'c-p', occurrence: null, today: '2026-10-17' });
+  const causes = Object.fromEntries(store.completed({ since: at.one }).items.map(item => [item.task.id, item.completion.causeId]));
+  assert.deepEqual([causes.p, causes.s, causes.one], [undefined, 'c-p', undefined]);
   for (const bound of ['2026-10-17', '2026-10-17T00:00:00Z', 'x', '2026-99-99T99:99:99.000Z', '2026-02-30T00:00:00.000Z']) assert.throws(() => store.completed({ since: bound }), error => kind(error) === 'invalid');
   assert.throws(() => store.completed({ until: '2026-10-17' }), error => kind(error) === 'invalid');
 });

@@ -42,6 +42,7 @@ export const commentOf = (row: Row): TodoComment => ({ id: text(row.id), taskId:
 
 export const completionOf = (row: Row): TodoCompletion => ({
   id: text(row.id), taskId: text(row.task_id), occurrenceDate: maybe(row.occurrence_date), completedAt: text(row.completed_at),
+  ...(row.cause_id ? { causeId: text(row.cause_id) } : {}),
 });
 
 export const eventOf = (row: Row): TodoEvent => ({

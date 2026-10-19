@@ -156,11 +156,14 @@ test('completions fall on the local day and minute they were made, and a period 
     assert.deepEqual(days.get('2026-10-14')?.map(entry => [entry.completion.id, entry.minutes]), [['early', 570], ['late', 1439]]);
     assert.deepEqual(days.get('2026-10-15')?.map(entry => [entry.completion.id, entry.minutes]), [['next', 0]]);
     assert.equal([...days.values()].flat().some(entry => entry.completion.id === 'out'), false);
-    // Sub-tasks closed with their parent leave the mark to it; one completed on its own keeps its own.
-    const parent = item('p', '2026-10-16T01:00:00.000Z');
-    const withParent = { ...item('s1', '2026-10-16T01:00:00.000Z'), task: task('s1', { parentId: 'p' }) };
-    const alone = { ...item('s2', '2026-10-15T23:00:00.000Z'), task: task('s2', { parentId: 'p' }) };
-    assert.deepEqual(doneDays([parent, withParent, alone], '2026-10-12', '2026-10-18').get('2026-10-16')?.map(entry => entry.completion.id), ['s2', 'p']);
+    // Sub-tasks closed with their parent leave the mark to it, while it shows; one completed on its own, even at the
+    // same moment, keeps its own.
+    const at = '2026-10-16T01:00:00.000Z';
+    const parent = item('p', at);
+    const closed = { completion: { ...item('s1', at).completion, causeId: 'p' }, task: task('s1', { parentId: 'p' }) };
+    const alone = { ...item('s2', at), task: task('s2', { parentId: 'p' }) };
+    assert.deepEqual(doneDays([parent, closed, alone], '2026-10-12', '2026-10-18').get('2026-10-16')?.map(entry => entry.completion.id).sort(), ['p', 's2']);
+    assert.deepEqual(doneDays([closed, alone], '2026-10-12', '2026-10-18').get('2026-10-16')?.map(entry => entry.completion.id).sort(), ['s1', 's2']);
   });
   // The day summer time ends has 25 hours: the period still ends at the next local midnight.
   inZone('America/New_York', () => {

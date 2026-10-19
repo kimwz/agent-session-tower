@@ -172,14 +172,14 @@ export function dayStart(date: string): string {
 export const doneRange = (from: string, to: string) => ({ since: dayStart(from), until: dayStart(addDays(to, 1)) });
 
 /**
- * Completions by the local day they were made on, from `from` to `to`, earliest first. A sub-task closed by completing
- * its parent (the same moment) is left out: the parent's one mark stands for them all.
+ * Completions by the local day they were made on, from `from` to `to`, earliest first. One closed by another that shows
+ * (sub-tasks closed with their parent) is left out: that one's mark stands for them all.
  */
 export function doneDays(items: readonly { completion: TodoCompletion; task: TodoTask }[], from: string, to: string): Map<string, DoneEntry[]> {
   const days = new Map<string, DoneEntry[]>();
-  const moments = new Set(items.map(({ completion, task }) => `${task.id}@${completion.completedAt}`));
+  const listed = new Set(items.map(({ completion }) => completion.id));
   for (const { completion, task } of items) {
-    if (task.parentId && moments.has(`${task.parentId}@${completion.completedAt}`)) continue;
+    if (completion.causeId && listed.has(completion.causeId)) continue;
     const at = new Date(completion.completedAt);
     if (Number.isNaN(at.getTime())) continue;
     const date = formatDate(at.getFullYear(), at.getMonth() + 1, at.getDate());

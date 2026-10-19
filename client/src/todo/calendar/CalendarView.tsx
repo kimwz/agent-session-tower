@@ -143,7 +143,8 @@ function MonthCell({ date, month, today, entries, done, color, props }: { date: 
   const all = [...list, ...deadlines];
   const outside = dateParts(date).month !== month;
   return <div ref={drop.setNodeRef} role="gridcell" aria-label={longDate(date)} className={`todo-cal-cell ${outside ? 'outside' : ''} ${date === today ? 'today' : ''} ${date < today ? 'past' : ''} ${drop.isOver ? 'drop-target' : ''} ${props.mobile && date === props.selected ? 'selected' : ''} ${done.length ? 'with-done' : ''}`}
-    onClick={() => props.mobile ? props.onSelect(date) : !props.readOnly && props.onAdd({ dueDate: date })}>
+    // A press in its day popover (drawn elsewhere, but passed up here by React) is not a press on the day.
+    onClick={event => { if (!event.currentTarget.contains(event.target as Node)) return; if (props.mobile) props.onSelect(date); else if (!props.readOnly) props.onAdd({ dueDate: date }); }}>
     <span className="todo-cal-day">{dateParts(date).day}</span>
     {done.length > 0 && <DoneDots entries={done} color={color} onOpen={props.onOpen} onMore={open} mobile={props.mobile} />}
     {props.mobile
@@ -152,13 +153,10 @@ function MonthCell({ date, month, today, entries, done, color, props }: { date: 
         {all.slice(0, shown).map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={!props.readOnly} compact onComplete={completer(props)} />)}
         {hidden > 0 && <button type="button" className="todo-cal-more" onClick={event => { event.stopPropagation(); open(event.currentTarget); }}>{t('+{0}개', { 0: hidden })}</button>}
         {showAll && <Popover anchor={more} onClose={() => setShowAll(false)} label={longDate(date)} className="todo-cal-day-popover">
-          {/* A press in it is not a press on the day under it (React passes events up through the portal). */}
-          <div className="todo-cal-day-list" onClick={event => event.stopPropagation()}>
           <h4>{longDate(date)}</h4>
           {all.map(entry => <Entry key={`${entry.kind}:${entry.task.id}`} entry={entry} color={color(entry.task)} onOpen={props.onOpen} draggable={false} onComplete={completer(props)} />)}
           {done.length > 0 && <h5>{t('완료됨')}</h5>}
           {done.map(entry => <DoneRow key={entry.completion.id} entry={entry} color={color(entry.task)} onOpen={props.onOpen} />)}
-          </div>
         </Popover>}
       </>}
   </div>;
@@ -251,10 +249,8 @@ function Block({ entry, placed, color, props, preview }: { entry: CalendarEntry;
 
 /** A completion in the week's grid, at the minute it was made: faded and checked, opening its task, never moved. */
 function DoneBlock({ entry, placed, color, onOpen }: { entry: DoneEntry; placed: { start: number; end: number; column: number; columns: number }; color: string; onOpen: (id: string) => void }) {
-  // Drawn over its span, which ends at midnight; a late one starts early enough to stay in the day.
-  const top = Math.min(minutesToY(placed.start), minutesToY(DAY_MINUTES) - 18);
   const style = {
-    '--entry-color': color, top, height: Math.max(18, minutesToY(placed.end - placed.start) - 2),
+    '--entry-color': color, top: minutesToY(placed.start), height: minutesToY(placed.end - placed.start) - 2,
     left: `calc(${(placed.column / placed.columns) * 100}% + 2px)`, width: `calc(${100 / placed.columns}% - 4px)`,
   } as CSSProperties;
   return <button type="button" className="todo-cal-block done short" style={style} title={doneTitle(entry)} aria-label={doneTitle(entry)} onClick={event => { event.stopPropagation(); onOpen(entry.task.id); }}>
@@ -262,7 +258,8 @@ function DoneBlock({ entry, placed, color, onOpen }: { entry: DoneEntry; placed:
   </button>;
 }
 
-const doneSpan = (entry: DoneEntry) => ({ start: entry.minutes, end: Math.min(DAY_MINUTES, entry.minutes + DEFAULT_DURATION) });
+/** Half an hour from the minute it was made, moved up to end by midnight; placed and drawn over the same span. */
+const doneSpan = (entry: DoneEntry) => { const start = Math.min(entry.minutes, DAY_MINUTES - DEFAULT_DURATION); return { start, end: start + DEFAULT_DURATION }; };
 
 function TimeColumn({ date, entries, done, color, props, dragging }: { date: string; entries: DayEntries | undefined; done: DoneEntry[]; color: (task: TodoTask) => string; props: CalendarProps; dragging: { id: string; minutes: number } | null }) {
   const drop = useDroppable({ id: `time:${date}`, data: { drop: { kind: 'time', date } satisfies Drop }, disabled: props.readOnly });

@@ -273,7 +273,8 @@ export class TodoClient {
     this.base = mergeChanges(this.base, changes);
     this.publish();
     if (this.state.detailId && touchesDetail(this.base.detail, changes)) void this.readDetail(this.state.detailId);
-    if (this.state.completed && touchesCompleted(this.state.completed, ops, changes)) this.rereadCompleted();
+    // A list still being read may answer from before this change: it is read again too.
+    if (this.state.completed && (this.state.completed.loading || touchesCompleted(this.state.completed, ops, changes))) this.rereadCompleted();
     this.pump();
   }
 
