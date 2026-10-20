@@ -8,7 +8,7 @@ import { SessionTail } from '../chat/SessionTail';
 import { SLACK_PAGE_SIZE, visibleSlackMentions } from '../graph/slack-graph';
 import { useI18n, translateMessage } from '../i18n/i18n';
 import { SlackReplyProposals } from './SlackReplyProposals';
-import { slackMentionTitle, slackWorkflowLabel, slackWorkflowWorking } from './slack-monitor';
+import { slackActivityAt, slackMentionTitle, slackWorkflowLabel, slackWorkflowWorking } from './slack-monitor';
 
 const FOLLOW_UP_LABELS: Record<NonNullable<SlackWorkflow['followUps']>[number]['status'], string> = { received: '판단 대기', pending: '대화에 전달 대기', delivering: '대화에 전달 중', delivered: '대화에 전달함', skipped: '전달하지 않음', error: '오류', uncertain: '작업 접수 확인 필요' };
 
@@ -23,7 +23,7 @@ export function SlackOverview({ slack, token, unreadIds, onSelectMention }: { sl
     {slack?.error && <p role="alert">{translateMessage(slack.error)}</p>}
     {!slack?.events.length && <p>{t('아직 받은 멘션이 없습니다.')}</p>}
     {visibleSlackMentions(slack?.events || [], mentionLimit).map(event => { const state = slackCardState(event, !!unreadIds?.has(event.id));
-      return <button key={event.id} className={`slack-monitor-entry ${state}`} onClick={() => onSelectMention(event.id)}><strong>{slackMentionTitle(event)}{state === 'replied' && <CornerUpRight className="slack-replied-mark" size={13} aria-label={t('Slack에 전송됨')} />}</strong><span>{slackWorkflowLabel(event.status)}</span><time>{new Date(event.createdAt).toLocaleString()}</time></button>; })}
+      return <button key={event.id} className={`slack-monitor-entry ${state}`} onClick={() => onSelectMention(event.id)}><strong>{slackMentionTitle(event)}{state === 'replied' && <CornerUpRight className="slack-replied-mark" size={13} aria-label={t('Slack에 전송됨')} />}</strong><span>{slackWorkflowLabel(event.status)}</span><time>{new Date(slackActivityAt(event)).toLocaleString()}</time></button>; })}
     {slack && slack.events.length > mentionLimit && <button className="slack-monitor-back" onClick={() => setMentionLimit(limit => limit + SLACK_PAGE_SIZE)}>{t('멘션 더 보기')} ({slack.events.length - mentionLimit})</button>}
   </>;
 }
