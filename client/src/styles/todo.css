@@ -697,7 +697,7 @@ a.todo-file-name:hover { text-decoration:underline; }
 .todo-subtask-list li > button.todo-subtask-chat { flex:none; padding:0; }
 .todo-subtask-chat .agent-orb-wrap.compact, .todo-subtask-chat .agent-orb-wrap.compact .agent-orb { width:16px; height:16px; }
 .todo-subtask-chat .agent-orb-wrap.compact .session-context-ring { width:22px; height:22px; }
-.todo-card-subtasks li > .agent-activity-border { inset:-3px -6px; border-radius:7px; }
+.todo-card-subtasks li > .agent-activity-border { inset:-2px -6px; border-radius:7px; }
 .todo-subtask-list li > .agent-activity-border { inset:-1px -8px; border-radius:7px; }
 .todo-card.selected:has(> .agent-activity-border) { outline:2px solid #3e5c86; outline-offset:2px; }
 .todo-card.file-target > .agent-activity-border { display:none; }
