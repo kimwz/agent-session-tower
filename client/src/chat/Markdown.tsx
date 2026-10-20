@@ -3,13 +3,13 @@ import { ChatImage } from './ChatImages';
 import { translate as t, useI18n } from '../i18n/i18n';
 import { memo, useRef, useState, type ComponentPropsWithoutRef } from 'react';
 import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { Check, Copy } from 'lucide-react';
 import { copyText } from '../common/lib';
 import { localOnlyAddress, useRemoteContent } from '../remote/remote-content';
 import { hrefPath } from '../workspace/workspace-paths';
 import { PATH_ATTRIBUTE, remarkWorkspacePaths } from './markdown-paths';
 import { remarkLineBreaks } from './markdown-breaks';
+import { remarkGfmPlugins } from './markdown-gfm';
 import { useWorkspaceFiles, WorkspacePath } from './WorkspacePath';
 
 function CodeBlock({ children, ...props }: ComponentPropsWithoutRef<'pre'>) {
@@ -36,5 +36,5 @@ function MarkedCode({ node: _, [PATH_ATTRIBUTE]: path, ...props }: Marked<'code'
 /** `lineBreaks`: show single line breaks as written (see remarkLineBreaks). */
 export const Markdown = memo(function Markdown({ children, images, lineBreaks }: { children: string; images?: ChatMessage['images']; lineBreaks?: boolean }) {
   useI18n();
-  return <div className="markdown"><ReactMarkdown remarkPlugins={lineBreaks ? [remarkGfm, remarkLineBreaks, remarkWorkspacePaths] : [remarkGfm, remarkWorkspacePaths]} components={{ pre: CodeBlock, a: Link, span: MarkedSpan, code: MarkedCode, img: ({ alt, src }) => { const image = images?.find(image => image.source === src || encodeURI(image.source) === src); return image ? <ChatImage key={image.url} image={image} alt={alt} /> : <span className="attachment-label">{t("[이미지:")}{' '}{alt || t("첨부 파일")}]</span>; } }}>{children}</ReactMarkdown></div>;
+  return <div className="markdown"><ReactMarkdown remarkPlugins={lineBreaks ? [...remarkGfmPlugins, remarkLineBreaks, remarkWorkspacePaths] : [...remarkGfmPlugins, remarkWorkspacePaths]} components={{ pre: CodeBlock, a: Link, span: MarkedSpan, code: MarkedCode, img: ({ alt, src }) => { const image = images?.find(image => image.source === src || encodeURI(image.source) === src); return image ? <ChatImage key={image.url} image={image} alt={alt} /> : <span className="attachment-label">{t("[이미지:")}{' '}{alt || t("첨부 파일")}]</span>; } }}>{children}</ReactMarkdown></div>;
 });
