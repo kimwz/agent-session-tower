@@ -16,7 +16,7 @@ import type { Snapshot } from '../../../shared/types.js';
 async function web(t: TestContext, dir: string, store: TodoStore, key: string) {
   let changes = 0;
   const calls = { overview: () => store.overview(), detail: (id: string) => store.detail(id), completed: (input: Parameters<TodoStore['completed']>[0]) => store.completed(input),
-    search: (query: string, input: Parameters<TodoStore['search']>[1]) => store.search(query, input), apply: (request: Parameters<TodoStore['apply']>[0]) => { changes++; return store.apply(request); } };
+    search: (query: string, input: Parameters<TodoStore['search']>[1]) => store.search(query, input), apply: (request: Parameters<TodoStore['apply']>[0], by: Parameters<TodoStore['apply']>[1]) => { changes++; return store.apply(request, by); } };
   const snapshot = (): Snapshot => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: new Date().toISOString(), todoRevision: store.revision() });
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, backend: { snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('unused'); }, cancel: async () => {}, subscribe: () => () => {}, todos: calls },
     todoTools: { key, answer: body => answerTodoTools(calls, body) } });

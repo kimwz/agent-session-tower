@@ -174,9 +174,12 @@
 .todo-split .todo-split-main { border-radius:7px 0 0 7px; }
 .todo-split-more { padding:0 7px; border-left:0; border-radius:0 7px 7px 0; }
 .todo-split-main:hover:not(:disabled), .todo-split-more:hover:not(:disabled) { background:#203149; }
-.todo-detail-body { display:grid; grid-template-columns:minmax(0, 1fr) 212px; column-gap:24px; align-content:start; flex:1; padding:22px 22px 48px 26px; overflow-y:auto; }
-.todo-detail-body > * { grid-column:1; min-width:0; }
-.todo-detail-body > .todo-properties { grid-column:2; grid-row:1 / span 20; align-self:start; position:sticky; top:0; }
+.todo-detail-body { flex:1; min-width:0; padding:22px 22px 48px 26px; overflow-y:auto; }
+/* The task itself, with its property card beside it; the card stays in view while the task scrolls, and stops at its end
+   so it never covers the comments below. */
+.todo-detail-main { display:grid; grid-template-columns:minmax(0, 1fr) 212px; column-gap:24px; align-content:start; }
+.todo-detail-main > * { grid-column:1; min-width:0; }
+.todo-detail-main > .todo-properties { grid-column:2; grid-row:1 / span 20; align-self:start; position:sticky; top:0; }
 .todo-detail-empty { display:flex; justify-content:center; padding:40px; color:#6d7c92; }
 .todo-detail-heading { display:flex; align-items:flex-start; gap:12px; }
 .todo-detail-heading .todo-check { width:21px; height:21px; margin-top:5px; }
@@ -235,12 +238,34 @@ select.todo-property-value { border:0; background:none; }
 .todo-unlink { width:22px; height:22px; opacity:0; }
 .todo-flow li:hover .todo-unlink, .todo-unlink:focus-visible { opacity:1; }
 .todo-flow-actions { display:flex; flex-wrap:wrap; gap:4px 14px; }
-.todo-comments { display:flex; flex-direction:column; gap:12px; margin-bottom:10px; }
-.todo-comments > li { padding:10px 12px; border:1px solid #1e2937; border-radius:9px; background:#111a26; }
-.todo-comment-meta { display:flex; align-items:center; gap:2px; margin-bottom:4px; color:#6d7c92; font-size:11px; }
+/*
+ * Comments: a darker region of their own under the task, so where the task ends and the discussion starts shows at a
+ * glance. Each comment is a card beside its writer's avatar: the owner's tinted blue like their chat messages, an
+ * agent's neutral with a teal avatar, one whose writer was not recorded grey.
+ */
+.todo-comments-area { margin-top:26px; padding:14px 14px 16px; border:1px solid #1d2838; border-radius:12px; background:#0a1019; }
+.todo-comments-area > h4 { margin-bottom:14px; color:#aab7c9; font-size:12px; }
+.todo-comments-area > h4 svg { color:#7f8ea4; }
+.todo-comments { display:flex; flex-direction:column; gap:14px; margin-bottom:16px; }
+.todo-comment { display:flex; align-items:flex-start; gap:10px; }
+.todo-comment-avatar { display:inline-flex; flex:none; align-items:center; justify-content:center; width:28px; height:28px; border-radius:50%; border:1px solid #2a3647; background:#161f2c; color:#7c8aa0; }
+.todo-comment-avatar.owner { border-color:#3b5a88; background:#1e3352; color:var(--blue); }
+.todo-comment-avatar.agent { border-color:#2c5a52; background:#132c29; color:var(--teal); }
+.todo-comment-card { flex:1; min-width:0; padding:9px 12px 11px; border:1px solid #222e3e; border-radius:4px 10px 10px 10px; background:#121b27; overflow-wrap:anywhere; }
+.todo-comment.owner .todo-comment-card { border-color:#2d4568; background:#162539; }
+.todo-comment.unknown .todo-comment-card { border-style:dashed; }
+.todo-comment-meta { display:flex; align-items:center; gap:7px; min-height:22px; margin-bottom:5px; color:#6d7c92; font-size:11px; }
+.todo-comment-author { color:#9aa8bb; font-size:12px; font-weight:600; }
+.todo-comment.owner .todo-comment-author { color:#b5cdf4; }
+.todo-comment.agent .todo-comment-author { color:#9fdccd; }
+.todo-comment.unknown .todo-comment-author { color:#7c8aa0; font-weight:500; }
 .todo-comment-actions { display:flex; gap:6px; }
 .todo-comment-meta .icon-button { width:22px; height:22px; opacity:0; }
-.todo-comments > li:hover .todo-comment-meta .icon-button { opacity:1; }
+.todo-comment:hover .todo-comment-meta .icon-button, .todo-comment-meta .icon-button:focus-visible { opacity:1; }
+.todo-comment-compose { display:flex; align-items:flex-start; gap:10px; }
+.todo-comment-compose > .todo-comment-form { flex:1; min-width:0; }
+.todo-comment-compose > .todo-comment-avatar { margin-top:4px; }
+.todo-comments-area .todo-comment-form textarea { background:#0f1722; }
 .todo-comment-form { display:flex; flex-direction:column; gap:6px; }
 .todo-comment-form .todo-comment-actions { align-items:center; }
 .todo-comment-form textarea { width:100%; padding:9px 11px; border:1px solid #2a3546; border-radius:8px; background:#0a111b; color:var(--text); line-height:1.5; resize:vertical; }
@@ -559,9 +584,10 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-detail-back { display:inline-flex; }
   .todo-detail-close { display:none; }
   .todo-detail-bar { padding:0 10px; padding-top:env(safe-area-inset-top); height:calc(52px + env(safe-area-inset-top)); }
-  .todo-detail-body { display:block; padding:16px 16px 40px; }
+  .todo-detail-body { padding:16px 16px 40px; }
+  .todo-detail-main { display:block; }
   /* On a phone the properties are a line of chips under the title; rarely used ones without a value are dashed. */
-  .todo-detail-body > .todo-properties { position:static; }
+  .todo-detail-main > .todo-properties { position:static; }
   .todo-properties { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0 4px; padding:0; border:0; background:none; }
   .todo-property, .todo-property.adding, .todo-property.adding:last-child, .todo-property:not(.adding) + .todo-property.adding { display:block; flex:0 0 auto; min-height:0; margin:0; padding:0; border:0; }
   .todo-property dt { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
@@ -572,6 +598,10 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-property.adding .todo-property-value { min-height:32px; padding:3px 11px; font-size:12.5px; }
   .todo-detail-quiet { margin-left:0; }
   .todo-detail-section, .todo-description, .todo-description-editor { margin-left:0; }
+  .todo-comments-area { margin-left:-6px; margin-right:-6px; padding:12px 10px 14px; }
+  .todo-comment, .todo-comment-compose { gap:8px; }
+  .todo-comment-avatar { width:24px; height:24px; }
+  .todo-comment-card { padding:8px 10px 10px; }
   .todo-description-editor { width:100%; }
   .todo-modal-scrim { align-items:flex-start; padding:calc(8px + env(safe-area-inset-top)) 8px 8px; }
   .todo-quick-add { border-radius:12px; }

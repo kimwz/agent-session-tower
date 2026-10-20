@@ -268,8 +268,8 @@ async function main() {
     completed: (input: Parameters<TodoStore['completed']>[0]) => todos.completed(input),
     search: (query: string, input: Parameters<TodoStore['search']>[1]) => todos.search(query, input),
     // A change that opened or closed todos moves their issue masters at once, and the answer carries them.
-    apply: (request: Parameters<TodoStore['apply']>[0]) => {
-      const changes = todos.apply(request);
+    apply: (request: Parameters<TodoStore['apply']>[0], by: Parameters<TodoStore['apply']>[1]) => {
+      const changes = todos.apply(request, by);
       const agents = todoAgents.settle(changes.tasks.map(task => task.id));
       changed();
       return Object.keys(agents).length ? { ...changes, revision: todos.revision(), agents } : changes;

@@ -1,5 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,7 +19,7 @@ async function fixture(t: TestContext) {
   t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
   let applied = 0;
   const calls = { overview: () => store.overview(), detail: (id: string) => store.detail(id), completed: (input: Parameters<TodoStore['completed']>[0]) => store.completed(input),
-    search: (query: string, input: Parameters<TodoStore['search']>[1]) => store.search(query, input), apply: (request: Parameters<TodoStore['apply']>[0]) => { applied++; return store.apply(request); } };
+    search: (query: string, input: Parameters<TodoStore['search']>[1]) => store.search(query, input), apply: (request: Parameters<TodoStore['apply']>[0], by: Parameters<TodoStore['apply']>[1]) => { applied++; return store.apply(request, by); } };
   const call = (name: string, args: Record<string, unknown> = {}) => callTodoTool(calls, name, args, { now }) as any;
   return { store, call, applied: () => applied };
 }
@@ -111,6 +112,12 @@ test('comments, deletes, and refusals come back as errors with their reason; not
   await call('todos_comment', { id: item.id, body: '**Tomorrow** morning' });
   await assert.rejects(call('todos_comment', { id: 'missing', body: 'x' }), (error: unknown) => error instanceof TowerError && error.kind === 'not-found');
   assert.equal(call('todos_get', { id: item.id }).comments[0].body, '**Tomorrow** morning');
+  // What the tools write is an agent's, however it is sent; the owner's comments say they are the owner's.
+  call('todos_apply', { ops: [{ op: 'comment.create', id: 'via-apply', taskId: item.id, body: 'Applied' }] });
+  store.apply({ requestId: randomUUID(), ops: [{ op: 'comment.create', id: 'owners', taskId: item.id, body: 'Mine' }] }, 'owner');
+  const comments = call('todos_get', { id: item.id }).comments as { body: string; author?: string }[];
+  assert.deepEqual(comments.map(comment => [comment.body, comment.author]), [['**Tomorrow** morning', 'agent'], ['Applied', 'agent'], ['Mine', 'owner']]);
+  assert.equal(call('todos_get', { id: item.id, comment: 'owners' }).comment.author, 'owner');
   const revision = store.revision();
   assert.throws(() => call('todos_apply', { ops: [{ op: 'task.update', id: item.id, patch: { content: 'x' } }, { op: 'task.update', id: 'missing', patch: { content: 'y' } }] }),
     (error: unknown) => error instanceof TowerError && error.kind === 'not-found');
@@ -171,7 +178,7 @@ test('a comment carries screenshots and recordings from this computer, every pat
   const files = new TodoFiles(dir, store);
   await files.start();
   const calls = { overview: () => store.overview(), detail: (id: string) => store.detail(id), completed: (input: Parameters<TodoStore['completed']>[0]) => store.completed(input),
-    search: (query: string, input: Parameters<TodoStore['search']>[1]) => store.search(query, input), apply: (request: Parameters<TodoStore['apply']>[0]) => store.apply(request),
+    search: (query: string, input: Parameters<TodoStore['search']>[1]) => store.search(query, input), apply: (request: Parameters<TodoStore['apply']>[0], by: Parameters<TodoStore['apply']>[1]) => store.apply(request, by),
     attachFile: async (input: { taskId: string; commentId: string | null; path: string }) => (await files.attachLocal(input)).file };
   const withFiles = (args: Record<string, unknown>) => callTodoTool(calls, 'todos_comment', args, { now }) as Promise<any>;
   const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]), Buffer.from('IHDR'), Buffer.alloc(16, 1)]);
