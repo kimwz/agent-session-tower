@@ -5,6 +5,7 @@ import { translate as t } from '../i18n/i18n';
 import { GitHubBindingDialog } from './GitHubBindingDialog';
 import { GitHubMark } from './GitHubMark';
 import { Menu, Popover, type MenuItem } from './Popover';
+import { UnreadDot } from './TaskCard';
 import { colorOf, TODO_COLORS } from './todo-format';
 import type { TodoWorld } from './todo-model';
 import { labelStepOp, parentCandidates, projectStepOp, type Step } from './todo-moves';
@@ -26,6 +27,8 @@ const STEPS: { step: Step; label: string; icon: ReactNode }[] = [
 export interface SidebarProps {
   world: TodoWorld;
   counts: SidebarCounts;
+  /** Projects with a todo whose comments the owner has not seen. */
+  unreadProjects?: ReadonlySet<string>;
   view: TodoView;
   query: string;
   client: TodoClient;
@@ -52,11 +55,11 @@ function ColorGrid({ anchor, value, onPick, onClose }: { anchor: RefObject<HTMLE
   </Popover>;
 }
 
-function Row({ active, icon, label, count, tone, onClick, menu, depth = 0, toggle, badge }: { active: boolean; icon: ReactNode; label: string; count?: number; tone?: string; onClick: (anchor: HTMLElement) => void; menu?: (anchor: HTMLButtonElement) => void; depth?: number; toggle?: ReactNode; badge?: ReactNode }) {
+function Row({ active, icon, label, count, unread, tone, onClick, menu, depth = 0, toggle, badge }: { active: boolean; icon: ReactNode; label: string; count?: number; unread?: boolean; tone?: string; onClick: (anchor: HTMLElement) => void; menu?: (anchor: HTMLButtonElement) => void; depth?: number; toggle?: ReactNode; badge?: ReactNode }) {
   const more = useRef<HTMLButtonElement>(null);
   return <li className={`todo-side-row ${active ? 'active' : ''}`} style={{ paddingLeft: 8 + depth * 14 }}>
     {toggle}
-    <button type="button" className="todo-side-link" aria-current={active ? 'page' : undefined} onClick={event => onClick(event.currentTarget)}>{icon}<span>{label}</span>{badge}</button>
+    <button type="button" className="todo-side-link" aria-current={active ? 'page' : undefined} onClick={event => onClick(event.currentTarget)}>{icon}<span>{label}</span>{badge}{unread && <UnreadDot />}</button>
     {count ? <span className={`todo-side-count ${tone ?? ''}`}>{count}</span> : null}
     {menu && <button ref={more} type="button" className="icon-button todo-side-more" aria-label={t('“{0}” 메뉴', { 0: label })} onClick={() => more.current && menu(more.current)}><MoreHorizontal size={14} /></button>}
   </li>;
@@ -65,7 +68,7 @@ function Row({ active, icon, label, count, tone, onClick, menu, depth = 0, toggl
 /** A project's level in the tree: 1 at the top. */
 const depthOf = (projects: readonly TodoProject[], project: TodoProject) => { let n = 1; for (let up = project.parentId; up && n < 5; up = projects.find(item => item.id === up)?.parentId ?? null) n++; return n; };
 
-export function TodoSidebar({ world, counts, view, query, client, readOnly, searchRef, onNavigate, onAdd }: SidebarProps) {
+export function TodoSidebar({ world, counts, unreadProjects, view, query, client, readOnly, searchRef, onNavigate, onAdd }: SidebarProps) {
   const [editing, setEditing] = useState<Editing>(null);
   const [menu, setMenu] = useState<{ anchor: HTMLElement; items: (MenuItem | 'separator')[]; label: string } | null>(null);
   const [color, setColor] = useState<{ anchor: HTMLElement; value: string; pick: (color: string) => void } | null>(null);
@@ -121,7 +124,7 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
     return <li key={project.id} className="todo-side-group">
       {editing?.kind === 'project' && editing.id === project.id
         ? <NameInput initial={project.name} label={t('프로젝트 이름')} onCancel={() => setEditing(null)} onSave={name => { client.apply([{ op: 'project.update', id: project.id, patch: { name } }]); setEditing(null); }} />
-        : <ul><Row active={current === key} depth={node.depth} icon={<i className="todo-dot" style={{ background: colorOf(project.color) }} />} label={project.name} count={counts.projects[project.id]}
+        : <ul><Row active={current === key} depth={node.depth} icon={<i className="todo-dot" style={{ background: colorOf(project.color) }} />} label={project.name} count={counts.projects[project.id]} unread={unreadProjects?.has(project.id)}
           onClick={() => onNavigate({ kind: 'project', id: project.id })} menu={readOnly ? undefined : anchor => projectMenu(project, anchor, node.depth)}
           badge={githubOf(project.id) && <GitHubMark binding={githubOf(project.id)!} />}
           toggle={node.children.length ? <button type="button" className="todo-side-fold" aria-label={hidden ? t('펼치기') : t('접기')} aria-expanded={!hidden} onClick={() => fold(key)}>{hidden ? <ChevronRight size={12} /> : <ChevronDown size={12} />}</button> : undefined} /></ul>}
@@ -146,12 +149,12 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
     </form>
     <ul className="todo-side-nav">
       <Row active={current === 'all'} icon={<Layers size={15} />} label={t('전체')} onClick={() => onNavigate({ kind: 'all' })} />
-      <Row active={current === 'inbox' || (!!inbox && current === `p:${inbox.id}`)} icon={<Inbox size={15} />} label={t('관리함')} count={counts.inbox} onClick={() => onNavigate({ kind: 'inbox' })} />
+      <Row active={current === 'inbox' || (!!inbox && current === `p:${inbox.id}`)} icon={<Inbox size={15} />} label={t('관리함')} count={counts.inbox} unread={!!inbox && unreadProjects?.has(inbox.id)} onClick={() => onNavigate({ kind: 'inbox' })} />
       <Row active={current === 'today'} icon={<CalendarDays size={15} />} label={t('오늘')} count={counts.today} tone={counts.overdue ? 'overdue' : undefined} onClick={() => onNavigate({ kind: 'today' })} />
       <Row active={current === 'upcoming'} icon={<CalendarRange size={15} />} label={t('다가오는')} onClick={() => onNavigate({ kind: 'upcoming' })} />
     </ul>
     {favorites.length > 0 && section('favorites', t('즐겨찾기'), undefined, <ul>{favorites.map(item => 'inbox' in item
-      ? <Row key={item.id} active={current === `p:${item.id}`} icon={<i className="todo-dot" style={{ background: colorOf(item.color) }} />} label={item.name} count={counts.projects[item.id]} onClick={() => onNavigate({ kind: 'project', id: item.id })} />
+      ? <Row key={item.id} active={current === `p:${item.id}`} icon={<i className="todo-dot" style={{ background: colorOf(item.color) }} />} label={item.name} count={counts.projects[item.id]} unread={unreadProjects?.has(item.id)} onClick={() => onNavigate({ kind: 'project', id: item.id })} />
       : <Row key={item.id} active={current === `l:${item.id}`} icon={<Tag size={14} style={{ color: colorOf(item.color) }} />} label={item.name} count={counts.labels[item.id]} onClick={() => onNavigate({ kind: 'label', id: item.id })} />)}</ul>)}
     {section('projects', t('내 프로젝트'), () => setEditing({ kind: 'new-project', parentId: null }), <>
       <ul>{tree.map(renderProject)}</ul>

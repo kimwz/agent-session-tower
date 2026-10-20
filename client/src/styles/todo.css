@@ -122,6 +122,10 @@
 .todo-card.selected { border-color:#3e5c86; }
 .todo-card:focus-visible { outline:2px solid var(--blue); outline-offset:1px; }
 .todo-card.done .todo-card-title { color:#6d7c92; text-decoration:line-through; }
+/* Comments the owner has not seen (todo-read-state.ts): the sessions list's unread dot, and its card's border. */
+.todo-card.unread:not(.selected) { border-color:#37618e; }
+.todo-card-title > .unread-dot, .todo-subtask-title > .unread-dot { vertical-align:1px; }
+.todo-side-link > .unread-dot { margin:0 0 0 -3px; }
 .todo-card-main { display:flex; align-items:flex-start; gap:10px; }
 .todo-card-body { display:flex; flex-direction:column; gap:4px; flex:1; min-width:0; }
 /* Three lines at most; the whole title is in the card's detail and its hover text. */

@@ -227,12 +227,16 @@ export class TodoStore {
       WHERE c.deleted_at IS NULL AND t.deleted_at IS NULL AND t.completed_at IS NULL GROUP BY c.task_id`).map(row => [row.task_id, Number(row.n)]));
     const fileCounts = Object.fromEntries(this.all<{ task_id: string; n: number }>(`SELECT f.task_id, COUNT(*) AS n FROM todo_files f JOIN todo_tasks t ON t.id = f.task_id
       LEFT JOIN todo_comments c ON c.id = f.comment_id WHERE ${VISIBLE_FILE} AND t.deleted_at IS NULL AND t.completed_at IS NULL GROUP BY f.task_id`).map(row => [row.task_id, Number(row.n)]));
+    // The newest comment the owner did not write, by insertion: GitHub's comments come with GitHub's times, which can be
+    // older than what the owner already read. SQLite takes the bare `id` from the row MAX picks.
+    const outside = Object.fromEntries(this.all<{ task_id: string; id: string }>(`SELECT c.task_id, c.id, MAX(c.rowid) FROM todo_comments c JOIN todo_tasks t ON t.id = c.task_id
+      WHERE c.deleted_at IS NULL AND (c.author IS NULL OR c.author <> 'owner') AND t.deleted_at IS NULL AND t.completed_at IS NULL GROUP BY c.task_id`).map(row => [row.task_id, row.id]));
     return {
       availability: this.state, revision: this.revisionValue,
       projects: this.all('SELECT * FROM todo_projects WHERE deleted_at IS NULL ORDER BY sort_key').map(projectOf),
       sections: this.all('SELECT * FROM todo_sections WHERE deleted_at IS NULL ORDER BY sort_key').map(sectionOf),
       labels: this.all('SELECT * FROM todo_labels WHERE deleted_at IS NULL ORDER BY sort_key').map(labelOf),
-      tasks, links, commentCounts, fileCounts, subtaskCounts: this.subtaskCounts(), doneSubtasks,
+      tasks, links, commentCounts, fileCounts, outside, subtaskCounts: this.subtaskCounts(), doneSubtasks,
       agents: Object.fromEntries(this.all("SELECT * FROM todo_agents WHERE state != 'closed'").map(agentOf).map(agent => [agent.taskId, agent])),
       ...(this.restoreProgress ? { restore: { ...this.restoreProgress } } : {}),
       ...this.savedChatPresets(),

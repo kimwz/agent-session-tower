@@ -311,9 +311,11 @@ export interface CardContext {
   next: ReadonlyMap<string, number>;
   /** Tasks that have a card of their own here: a sub-task among them is not listed again under its parent. */
   shown?: ReadonlySet<string>;
+  /** Tasks with comments the owner has not seen (todo-read-state.ts). */
+  unread?: ReadonlySet<string>;
 }
 
-export function cardContext(world: TodoWorld, today: string, showProject: boolean, shown?: ReadonlySet<string>): CardContext {
+export function cardContext(world: TodoWorld, today: string, showProject: boolean, shown?: ReadonlySet<string>, unread?: ReadonlySet<string>): CardContext {
   const children = new Map<string, TodoTask[]>();
   for (const task of Object.values(world.tasks)) {
     if (!task.parentId || task.deletedAt) continue;
@@ -323,7 +325,7 @@ export function cardContext(world: TodoWorld, today: string, showProject: boolea
   for (const list of children.values()) list.sort(byOrder);
   const next = new Map<string, number>();
   for (const link of Object.values(world.links)) if (isOpen(world.tasks[link.toTaskId]) && !world.tasks[link.fromTaskId]?.deletedAt) next.set(link.fromTaskId, (next.get(link.fromTaskId) ?? 0) + 1);
-  return { world, today, showProject, children, next, ...(shown ? { shown } : {}) };
+  return { world, today, showProject, children, next, ...(shown ? { shown } : {}), ...(unread?.size ? { unread } : {}) };
 }
 
 /** How many sub-tasks a card lists; the rest are in the task's detail. */

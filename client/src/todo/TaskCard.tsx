@@ -121,7 +121,8 @@ export interface TaskCardProps {
 export function TaskCard({ task, context, selected, onOpen, onComplete, onCompleteNext, onReopen, onMenu, onSelect, selectId = task.id, onFiles, readOnly, onChat }: TaskCardProps) {
   // A completed card (the completed list) lists none: its sub-tasks are in its detail.
   const listed = task.completedAt ? [] : (context.children.get(task.id) ?? []).filter(child => !context.shown?.has(child.id));
-  const subtasks: CardSubtasksProps = { task, listed, world: context.world, readOnly, onOpen, onComplete, onReopen, onChat };
+  const subtasks: CardSubtasksProps = { task, listed, world: context.world, unread: context.unread, readOnly, onOpen, onComplete, onReopen, onChat };
+  const unread = !!context.unread?.has(task.id);
   const chips = CARD_META.filter(chip => chip.visible(task, context));
   const agent = context.world.agents[task.id];
   // A file dragged from the computer is not a card being dragged (dnd-kit follows the pointer, not HTML drag events).
@@ -129,7 +130,7 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
   const drop = useFileDrop(files => onFiles?.(task, files), !onFiles || readOnly || !!task.completedAt);
   const { onDragOver, onDragLeave, onDrop } = drop.handlers;
   const dropHandlers = { onDragOver, onDragLeave, onDrop };
-  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''} ${drop.over ? 'file-target' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={task.content}
+  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''} ${drop.over ? 'file-target' : ''} ${unread ? 'unread' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={task.content}
     {...dropHandlers}
     onClick={() => onOpen(task.id)} onFocus={() => onSelect?.(selectId)}
     onPointerMove={event => {
@@ -146,7 +147,7 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
     <div className="todo-card-main">
       <CheckCircle task={task} disabled={readOnly} onComplete={() => onComplete(task)} onCompleteNext={() => onCompleteNext(task)} onReopen={onReopen && (() => onReopen(task))} />
       <div className="todo-card-body">
-        <span className="todo-card-title" title={task.content}>{task.content}</span>
+        <span className="todo-card-title" title={task.content}>{unread && <UnreadDot />}{task.content}</span>
         {task.description && <span className="todo-card-description">{plain(task.description)}</span>}
         {chips.length > 0 && <div className="todo-meta">{chips.map(chip => <span key={chip.key} className="todo-meta-item">{chip.render(task, context)}</span>)}</div>}
       </div>
@@ -166,6 +167,7 @@ interface CardSubtasksProps extends Pick<TaskCardProps, 'task' | 'readOnly' | 'o
   /** The sub-tasks the card lists, in their order. */
   listed: TodoTask[];
   world: TodoWorld;
+  unread?: ReadonlySet<string>;
   /** Sub-tasks at work: never left out of the list. */
   working?: (task: TodoTask) => boolean;
 }
@@ -188,7 +190,7 @@ function LiveSubtasks(props: CardSubtasksProps) {
  * of them show, completed ones struck through, and those at work whatever the fold (`subtaskWindow`); all of them are in
  * the task's detail.
  */
-function CardSubtasks({ task, listed, world, working, readOnly, onOpen, onComplete, onReopen, onChat }: CardSubtasksProps) {
+function CardSubtasks({ task, listed, world, unread, working, readOnly, onOpen, onComplete, onReopen, onChat }: CardSubtasksProps) {
   const [folded, setFolded] = useState(() => subtasksFolded(task.id));
   const { shown, more } = subtaskWindow(listed, working, folded);
   return <div className="todo-card-subtasks">
@@ -197,7 +199,7 @@ function CardSubtasks({ task, listed, world, working, readOnly, onOpen, onComple
     </button>
     {shown.length > 0 && <ul>{shown.map(child => <li key={child.id} className={child.completedAt ? 'done' : undefined}>
       <CheckCircle task={child} size="small" disabled={readOnly} onComplete={() => onComplete(child)} onReopen={onReopen && (() => onReopen(child))} />
-      <button type="button" className="todo-subtask-title" onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{child.content}</button>
+      <button type="button" className="todo-subtask-title" onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{unread?.has(child.id) && <UnreadDot />}{child.content}</button>
       {world.agents[child.id] && <SubtaskAgent task={child} agent={world.agents[child.id]} onChat={onChat} />}
     </li>)}</ul>}
     {more > 0 && <button type="button" className="todo-subtask-more" {...OWN_PRESS} onClick={event => { event.stopPropagation(); onOpen(task.id); }}>{t('{0}건 더 있음', { 0: more })}</button>}
@@ -216,6 +218,9 @@ export function SubtaskAgent({ task, agent, onChat }: { task: TodoTask; agent: T
       : <span className="todo-subtask-chat"><AgentIcon agent={agent} /></span>}
   </>;
 }
+
+/** New comments the owner has not seen, as the sessions list marks new activity. */
+export const UnreadDot = () => <i className="unread-dot" title={t('새 댓글')} aria-label={t('새 댓글')} />;
 
 /** The first line of a Markdown description, without its marks. A single `~` is text (a range: 18~20%); `~~` is a mark. */
 export const plain = (text: string) => (text.split('\n').find(line => line.trim()) ?? '').replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/~~/g, '').replace(/[#>*_`[\]]/g, '').trim().slice(0, 140);
