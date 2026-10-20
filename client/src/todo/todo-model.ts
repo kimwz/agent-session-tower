@@ -20,6 +20,8 @@ export interface TodoWorld {
   commentCounts: Record<string, number>;
   /** Attachments per open task. */
   fileCounts: Record<string, number>;
+  /** The newest comment the owner did not write, per open task (`TodoOverview.outside`). */
+  outside: Record<string, string>;
   /** Sub-tasks per task that has any, completed ones counted apart: the overview's, then each answer's. */
   subtaskCounts: Record<string, TodoSubtaskCount>;
   /** Issue masters of todos, by todo id: those not `closed` (`TodoOverview.agents`). */
@@ -34,7 +36,7 @@ export interface TodoWorld {
 }
 
 export const emptyWorld = (): TodoWorld => ({
-  availability: { state: 'ready' }, revision: 0, projects: [], sections: [], labels: [], tasks: {}, links: {}, commentCounts: {}, fileCounts: {}, subtaskCounts: {}, agents: {}, detail: null,
+  availability: { state: 'ready' }, revision: 0, projects: [], sections: [], labels: [], tasks: {}, links: {}, commentCounts: {}, fileCounts: {}, outside: {}, subtaskCounts: {}, agents: {}, detail: null,
 });
 
 export const isOpen = (task: TodoTask | undefined): boolean => !!task && !task.completedAt && !task.deletedAt;
@@ -57,7 +59,7 @@ export function worldFromOverview(overview: TodoOverview, previous?: TodoWorld):
     availability: overview.availability, revision: overview.revision,
     projects: [...overview.projects].sort(byOrder), sections: [...overview.sections].sort(byOrder), labels: [...overview.labels].sort(byOrder),
     tasks, links: Object.fromEntries(overview.links.map(link => [link.id, link])), commentCounts: { ...overview.commentCounts },
-    fileCounts: { ...(overview.fileCounts ?? {}) }, subtaskCounts: { ...(overview.subtaskCounts ?? {}) }, agents: { ...(overview.agents ?? {}) }, ...(overview.restore ? { restore: overview.restore } : {}),
+    fileCounts: { ...(overview.fileCounts ?? {}) }, outside: { ...(overview.outside ?? {}) }, subtaskCounts: { ...(overview.subtaskCounts ?? {}) }, agents: { ...(overview.agents ?? {}) }, ...(overview.restore ? { restore: overview.restore } : {}),
     ...(overview.chatPresets ? { chatPresets: [...overview.chatPresets] } : {}),
     ...(overview.github ? { github: overview.github } : {}),
     detail: previous?.detail ? syncDetail(previous.detail, tasks) : null,

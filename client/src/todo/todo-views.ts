@@ -311,9 +311,15 @@ export interface CardContext {
   next: ReadonlyMap<string, number>;
   /** Tasks that have a card of their own here: a sub-task among them is not listed again under its parent. */
   shown?: ReadonlySet<string>;
+  /**
+   * Tasks with comments the owner has not seen (todo-read-state.ts), and the tasks above each of them: a sub-task's row
+   * shows the dot for one further down, which has no row of its own on the card.
+   */
+  unread?: ReadonlySet<string>;
+  unreadBelow?: ReadonlySet<string>;
 }
 
-export function cardContext(world: TodoWorld, today: string, showProject: boolean, shown?: ReadonlySet<string>): CardContext {
+export function cardContext(world: TodoWorld, today: string, showProject: boolean, shown?: ReadonlySet<string>, unread?: ReadonlySet<string>): CardContext {
   const children = new Map<string, TodoTask[]>();
   for (const task of Object.values(world.tasks)) {
     if (!task.parentId || task.deletedAt) continue;
@@ -323,7 +329,12 @@ export function cardContext(world: TodoWorld, today: string, showProject: boolea
   for (const list of children.values()) list.sort(byOrder);
   const next = new Map<string, number>();
   for (const link of Object.values(world.links)) if (isOpen(world.tasks[link.toTaskId]) && !world.tasks[link.fromTaskId]?.deletedAt) next.set(link.fromTaskId, (next.get(link.fromTaskId) ?? 0) + 1);
-  return { world, today, showProject, children, next, ...(shown ? { shown } : {}) };
+  const unreadBelow = new Set<string>();
+  for (const id of unread ?? []) {
+    if (!isOpen(world.tasks[id])) continue;
+    for (let up = world.tasks[id]!.parentId, count = 0; up && count < 50 && !unreadBelow.has(up); up = world.tasks[up]?.parentId ?? null, count++) unreadBelow.add(up);
+  }
+  return { world, today, showProject, children, next, ...(shown ? { shown } : {}), ...(unread?.size ? { unread, unreadBelow } : {}) };
 }
 
 /** How many sub-tasks a card lists; the rest are in the task's detail. */
