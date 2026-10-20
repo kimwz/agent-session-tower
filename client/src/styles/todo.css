@@ -214,7 +214,7 @@
 .todo-property-value { display:inline-flex; flex-wrap:wrap; align-items:center; gap:6px; max-width:100%; min-height:28px; padding:3px 7px; border-radius:6px; color:#d0dbe8; font-size:12.5px; text-align:left; }
 select.todo-property-value { border:0; background:none; }
 .todo-property-value:hover:not(:disabled) { background:#1a2533; }
-a.todo-github-link { flex-wrap:nowrap; text-decoration:none; }
+a.todo-github-link { flex-wrap:nowrap; min-width:0; text-decoration:none; }
 a.todo-github-link span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 a.todo-github-link svg { flex:none; color:#7c8aa0; }
 a.todo-github-link:hover span { text-decoration:underline; }
@@ -606,6 +606,7 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-property-icon { display:inline-flex; color:#7c8aa0; }
   .todo-property-value { min-height:32px; padding:3px 11px 3px 6px; border-radius:999px; }
   .todo-property.adding dd { padding-left:0; border-style:dashed; background:none; }
+  .todo-property.github { max-width:100%; }
   .todo-property.adding .todo-property-value { min-height:32px; padding:3px 11px; font-size:12.5px; }
   .todo-detail-quiet { margin-left:0; }
   .todo-detail-section, .todo-description, .todo-description-editor { margin-left:0; }
