@@ -233,7 +233,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   useEffect(() => { if (overview && selectedId && !selectedId.startsWith('done:') && !shown.has(selectedId)) setSelectedId(null); }, [overview, selectedId, shown]);
   const unread = useTodoReadState(world, state.phase === 'ready', openTaskId);
   const context = useMemo(() => cardContext(world, today, showProject, shown, unread), [world, today, showProject, shown, unread]);
-  const unreadProjects = useMemo(() => new Set([...unread].flatMap(id => world.tasks[id] ? [world.tasks[id].projectId] : [])), [unread, world.tasks]);
+  const unreadProjects = useMemo(() => new Set([...unread].flatMap(id => isOpen(world.tasks[id]) ? [world.tasks[id].projectId] : [])), [unread, world.tasks]);
   const counts = useMemo(() => sidebarCounts(world, today), [world, today]);
 
   const openAdd = useCallback((preset?: QuickAddPreset) => {

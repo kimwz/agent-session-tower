@@ -17,6 +17,7 @@ export function parseTodoReadState(value: string | null): TodoReadState | null {
     const saved: unknown = JSON.parse(value);
     if (!saved || Array.isArray(saved) || typeof saved !== 'object') return {};
     return Object.fromEntries(Object.entries(saved).filter(([id, mark]) => id.length > 0 && typeof mark === 'string'));
+  // best-effort: damaged marks start over as all unread rather than breaking the page.
   } catch { return {}; }
 }
 
@@ -40,9 +41,14 @@ export function unreadTodos(outside: Readonly<Record<string, string>>, state: To
  * once the overview is in.
  */
 export function useTodoReadState(world: Pick<TodoWorld, 'outside' | 'availability' | 'detail'>, ready: boolean, openId: string | null): ReadonlySet<string> {
-  const [read, setRead] = useState<TodoReadState | null>(() => { try { return parseTodoReadState(localStorage.getItem(TODO_READ_KEY)); } catch { return {}; } });
+  const [read, setRead] = useState<TodoReadState | null>(() => {
+    try { return parseTodoReadState(localStorage.getItem(TODO_READ_KEY)); }
+    // best-effort: without browser storage the marks live in memory only.
+    catch { return {}; }
+  });
   const save = useCallback((update: (previous: TodoReadState | null) => TodoReadState) => setRead(previous => {
     const next = update(previous);
+    // best-effort: the marks stay usable in memory when browser storage refuses them.
     if (next !== previous) try { localStorage.setItem(TODO_READ_KEY, JSON.stringify(next)); } catch { /* Memory state remains usable. */ }
     return next;
   }), []);
