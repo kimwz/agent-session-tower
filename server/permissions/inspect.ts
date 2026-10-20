@@ -326,9 +326,6 @@ export async function reviewScope(input: { cwd: string; command?: string; stateD
   const home = input.home ?? homedir();
   const denied = await deniedPaths(input.stateDir, home, input.env ?? process.env);
   const roots: ScopeRoot[] = [];
-  // Added as is: it is the one tree allowed right under the top. Credential stores in it are still refused by name.
-  const temp = input.temp === null ? undefined : await real(input.temp ?? '/tmp');
-  if (temp && !isDenied(temp, denied, true)) roots.push({ path: temp, kind: 'tree' });
   const realHome = await real(home) ?? home;
   const add = (root: ScopeRoot | undefined) => {
     if (!root || roots.length >= MAX_ROOTS || isDenied(root.path, denied, root.kind !== 'file') || roots.some(item => covers(item, root.path) && (item.kind === 'tree' || root.kind === 'file'))) return;
@@ -348,6 +345,10 @@ export async function reviewScope(input: { cwd: string; command?: string; stateD
   const command = await named(input.command ?? '', [cwd], home, true);
   for (const folder of command.cds) add({ path: folder.real, kind: 'tree' });
   for (const root of command.roots) add(root);
+  // Last, past add's rule against trees right under the top, so the repositories and worktrees in it stay their own
+  // trees (watchable). Credential stores and Tower's own folders in it are still refused by name.
+  const temp = input.temp === null ? undefined : await real(input.temp ?? '/tmp');
+  if (temp && !isDenied(temp, denied, true)) roots.push({ path: temp, kind: 'tree' });
   // The request folder too, unless it lies in a denied place (a Slack or GitHub coordinator's folder in Tower's state).
   // A request folder that is gone binds nothing (the run fails on its own).
   const places = await real(input.cwd) ? [{ path: resolve(input.cwd), real: cwd }].filter(place => !isDenied(place.path, denied, true) && !isDenied(place.real, denied, true)) : [];
