@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.169.0] - 2026-10-20
+
+- **GitHub 이슈와 연결된 할 일은 상세 패널의 속성 카드 맨 위에 그 이슈 링크가 보입니다.** 날짜·우선순위·라벨 위에 `GitHub` 행으로 `owner/name#번호`가 보이고, 누르면 이슈가 새 창에서 열립니다. 완료된 할 일과 읽기 전용 화면에서도 보이며, 동기화에 문제가 있으면 빨간색으로 보이고 마우스를 올리면 사유가 나옵니다. 휴대폰에서는 GitHub 아이콘이 붙은 칩으로 보입니다.
+
 ## [1.168.0] - 2026-10-20
 
 - **할 일에 내가 아직 보지 않은 댓글이 달리면 밖에서 보입니다.** 이슈 마스터·에이전트가 남긴 댓글이나 GitHub에서 들어온 댓글처럼 소유자가 쓰지 않은 새 댓글이 있으면, 보드와 목록의 카드 제목 앞에 세션 목록의 "새 활동"과 같은 파란 점이 붙고 카드 테두리가 파랗게 됩니다. 하위 작업이면 상위 카드의 하위 작업 줄에도 점이 붙고, 사이드바에서 그 할 일이 있는 프로젝트(관리함 포함) 이름 옆에도 점이 붙습니다.
