@@ -241,7 +241,7 @@ export class TodoGitHubSync {
       map = await this.createIssue(view, repo);
     }
     if (view.deleted) { await this.updateIssue(map, false); return; }
-    const uploaded = await this.uploadFiles(map);
+    const uploaded = await this.uploadFiles(map, binding.account);
     await this.updateIssue(map, uploaded);
     await this.linkParent(map);
     await this.pushComments(map);
@@ -305,13 +305,13 @@ export class TodoGitHubSync {
    * Uploads the task's images and videos not yet in this repository, one at a time: gh adds each to the issue's body,
    * and the address it adds is kept. Answers whether any went up (the body then holds gh's lines until it is sent again).
    */
-  private async uploadFiles(map: IssueMap): Promise<boolean> {
+  private async uploadFiles(map: IssueMap, account: string): Promise<boolean> {
     const files = this.store.githubRead(ctx => taskView(ctx, map.task_id, map.repo))?.files ?? [];
     let uploaded = false;
     for (const file of files) {
       if (file.gh_url || this.failedUploads.has(file.id) || !uploadable({ mimeType: file.mime, size: file.size })) continue;
       try {
-        await withUploadCopy(todoFilePath(this.options.stateDir, file.sha256), file.id, UPLOADABLE[file.mime].ext, path => this.github.attach(map.repo, map.number, path));
+        await withUploadCopy(todoFilePath(this.options.stateDir, file.sha256), file.id, UPLOADABLE[file.mime].ext, path => this.github.attach(map.repo, map.number, path, account));
         uploaded = true;
         const issue = await this.github.call<GitHubIssue>('GET', `/repos/${map.repo}/issues/${map.number}`);
         const url = lastAssetUrl(issue.body);

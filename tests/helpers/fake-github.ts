@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { GitHubCallError, type TodoGitHub } from '../../server/todo/github/client.js';
+import { GitHubError } from '../../server/triggers/github.js';
 
 /**
  * GitHub's issues, comments, labels and sub-issues as the todo sync calls them, in memory. Times are whole seconds as
@@ -146,8 +147,9 @@ export class FakeGitHub implements TodoGitHub {
     throw new Error(`FakeGitHub: no route for ${method} ${path}`);
   }
 
-  async attach(repo: string, number: number, path: string): Promise<void> {
+  async attach(repo: string, number: number, path: string, account: string): Promise<void> {
     this.calls.push(`gh issue edit ${number} --attach`);
+    if (account !== this.account) throw new GitHubError(`gh is signed in as ${this.account}, not ${account}`);
     const issue = this.issue(repo, number);
     this.uploads.push({ repo, issue: number, bytes: await readFile(path) });
     issue.body = `${issue.body}\n\n![${path.split('/').at(-1)}](https://github.com/user-attachments/assets/${randomUUID()})`;

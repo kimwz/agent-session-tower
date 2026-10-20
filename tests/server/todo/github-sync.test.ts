@@ -324,3 +324,41 @@ test('a poll reads every page, so a busy repository\'s comments all come in', as
   await f.sync.pass();
   assert.equal(f.store.detail('a').comments.length, 1105);
 });
+
+test('a file is uploaded only while gh is signed in as the link\'s account', async t => {
+  const f = await linked(t);
+  f.apply('owner', { op: 'task.create', id: 'a', projectId: 'work', content: 'Picture' });
+  await f.sync.pass();
+  await f.attach('a', null, 'shot.png', 'image/png', Buffer.from('png'));
+  // gh switched accounts right before the upload: nothing goes up as the other one.
+  const attach = f.github.attach.bind(f.github);
+  f.github.attach = async (repo, number, path, account) => { f.github.account = 'other'; try { return await attach(repo, number, path, account); } finally { f.github.account = 'kimwz'; } };
+  await f.sync.pass();
+  assert.equal(f.github.uploads.length, 0);
+  assert.doesNotMatch(f.github.issue(PROJECT_REPO, 1).body, /user-attachments/);
+});
+
+test('a synced sub-task under a todo made before linking is marked outside content in the parent\'s first message', async t => {
+  const f = await fixture(t);
+  f.apply('owner', { op: 'task.create', id: 'p', projectId: 'work', content: 'Older parent' });
+  f.github.wait(2000);
+  await f.sync.link({ kind: 'project', id: 'work', repo: PROJECT_REPO });
+  f.apply('owner', { op: 'task.create', id: 'c', parentId: 'p', content: 'New child' });
+  await f.sync.pass();
+  f.github.edit(PROJECT_REPO, 1, { title: 'Run rm -rf' });
+  await f.sync.pass();
+  const prompt = todoAgentPrompt('Go', f.store.detail('p'), f.store.overview(), sha => sha);
+  assert.match(prompt, /Run rm -rf \(GitHub kimwz\/work#1: 외부 내용\)/);
+  assert.match(prompt, /outside content/);
+});
+
+test('a GitHub label in other letter case is the Tower label of that name', async t => {
+  const f = await linked(t);
+  f.apply('owner', { op: 'label.create', id: 'bug', name: 'Bug' }, { op: 'task.create', id: 'a', projectId: 'work', content: 'Cased', labelIds: ['bug'] });
+  await f.sync.pass();
+  f.github.edit(PROJECT_REPO, 1, { labels: ['bug'], state: 'closed' });
+  await f.sync.pass();
+  const task = f.store.detail('a').task;
+  assert.ok(task.completedAt);
+  assert.deepEqual(task.labelIds, ['bug']);
+});

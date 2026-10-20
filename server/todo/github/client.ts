@@ -17,8 +17,8 @@ export interface TodoGitHub {
   login(): Promise<string>;
   /** One REST call; a refusal comes back as a GitHubCallError, a used-up rate limit as a GitHubError. */
   call<T = Record<string, unknown>>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T>;
-  /** Uploads a file into the issue's body (`gh issue edit <n> --attach`). */
-  attach(repo: string, issue: number, path: string): Promise<void>;
+  /** Uploads a file into the issue's body (`gh issue edit <n> --attach`), only while gh is signed in as `account`. */
+  attach(repo: string, issue: number, path: string, account: string): Promise<void>;
 }
 
 /** GitHub answered a call with an error status. */
@@ -69,8 +69,13 @@ export function ghTodoGitHub(options: { fetch?: (authorization: string) => GitHu
       }
       return response.body as T;
     },
-    async attach(repo, issue, path) {
+    async attach(repo, issue, path, account) {
       const gh = await ghWithAttach();
+      // gh uploads as whoever it is signed in as now, so that account is read again right before, not taken from a cache.
+      access.forgetGhToken();
+      const { fetch, identity } = await access.fetchFor({ type: 'gh' });
+      const login = await access.login(fetch, identity, true);
+      if (login.toLowerCase() !== account.toLowerCase()) throw new GitHubError(`gh가 ${login} 계정으로 로그인되어 있어 첨부를 올리지 않았습니다(연결 계정: ${account}).`);
       await run(gh, ['issue', 'edit', String(issue), '-R', repo, '--attach', path], 180_000);
     },
   };
