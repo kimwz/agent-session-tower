@@ -85,6 +85,29 @@ test('a drop sets the day, clears the time in the all-day row, and gives a slot 
   assert.equal(dropPatch(timed, { kind: 'time', date: '2026-10-14' }, 540), null);
 });
 
+test('a dragged deadline takes the day it is dropped on and nothing else, wherever on that day it lands', () => {
+  const timed = task('t', { dueDate: '2026-10-14', dueTime: '09:00', durationMin: 90, deadlineDate: '2026-10-16' });
+  for (const kind of ['day', 'allday', 'time'] as const) {
+    assert.deepEqual(dropPatch(timed, { kind, date: '2026-10-20' }, 600, 'deadline'), { deadlineDate: '2026-10-20' }, kind);
+    assert.equal(dropPatch(timed, { kind, date: '2026-10-16' }, 600, 'deadline'), null, `${kind}: its own day`);
+  }
+  // The task's own date, time and length are the due drag's, which is unchanged.
+  assert.deepEqual(dropPatch(timed, { kind: 'day', date: '2026-10-20' }), { dueDate: '2026-10-20' });
+});
+
+test('deadlines can be dragged wherever dated tasks can, and nothing can when read-only', () => {
+  const world = worldFromOverview(overview([]));
+  const tasks = [task('a', { dueDate: '2026-10-14', deadlineDate: '2026-10-16', content: '보고서' })];
+  const base = { tasks, world, today: '2026-10-14', future: false, colorBy: 'priority' as const, mobile: false, onMode() {}, onOpen() {}, onAdd() {}, onChange() {} };
+  // A disabled draggable says so.
+  const deadline = (markup: string) => /<button[^>]*class="todo-cal-entry deadline[^"]*"[^>]*>/.exec(markup)?.[0] ?? '';
+  for (const mode of ['month', 'week'] as const) {
+    const markup = renderToStaticMarkup(createElement(CalendarView, { ...base, mode, readOnly: false }));
+    assert.match(deadline(markup), /aria-disabled="false"/, mode);
+    assert.match(deadline(renderToStaticMarkup(createElement(CalendarView, { ...base, mode, readOnly: true }))), /aria-disabled="true"/, `${mode}, read-only`);
+  }
+});
+
 test('the calendar draws a month with +n and faded repeats, and a week with blocks sized by duration', () => {
   const world = worldFromOverview(overview([]));
   const tasks = [
