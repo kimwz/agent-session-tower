@@ -571,3 +571,17 @@ test('a comment is recorded as written by whoever sent it; editing keeps that, a
   t.after(() => reopened.close());
   assert.deepEqual(Object.fromEntries(reopened.detail('a').comments.map(comment => [comment.id, comment.author])), { mine: 'owner', theirs: 'agent', old: null });
 });
+
+test('a restored backup keeps its comments’ authors: none from an older build, and a wrong one refuses the restore whole', async t => {
+  const { store, apply } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'Discussed' }, { op: 'comment.create', id: 'mine', taskId: 'a', body: 'From the page' });
+  const backup = store.backupData()!;
+  const author = () => store.detail('a').comments.map(comment => comment.author);
+  // A 1.161 backup has no author column.
+  store.restoreData(5, { ...backup.tables, todo_comments: backup.tables.todo_comments.map(({ author: _, ...row }) => row) });
+  assert.deepEqual(author(), [null]);
+  assert.throws(() => store.restoreData(TODO_SCHEMA_STEP, { ...backup.tables, todo_comments: backup.tables.todo_comments.map(row => ({ ...row, author: 'master' })) }));
+  assert.deepEqual(author(), [null], 'nothing of the refused restore stays');
+  store.restoreData(TODO_SCHEMA_STEP, backup.tables);
+  assert.deepEqual(author(), ['owner']);
+});

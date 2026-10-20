@@ -140,7 +140,7 @@ test('the comments are a region of their own after the task, each card saying wh
   const comment = (id: string, author: TodoComment['author']): TodoComment => ({ id, taskId: 'a', body: `body ${id}`, author, createdAt: at, updatedAt: at, deletedAt: null });
   const markup = render(task('a'), { comments: [comment('c1', 'owner'), comment('c2', 'agent'), comment('c3', null)] });
   const region = markup.indexOf('todo-comments-area');
-  assert.ok(markup.indexOf('>하위 작업<') < region, 'after the task itself');
+  assert.ok(markup.indexOf('>하위 작업<') < region && markup.indexOf('todo-flow-actions') < region, 'after the task itself, its flow included');
   assert.deepEqual([...markup.matchAll(/<li class="todo-comment (\w+)">/g)].map(match => match[1]), ['owner', 'agent', 'unknown'], 'oldest first, each marked with its writer');
   assert.deepEqual([...markup.matchAll(/class="todo-comment-author"[^>]*>([^<]+)</g)].map(match => match[1]), ['나', '에이전트', '작성자 기록 없음']);
   assert.match(markup, /title="이 댓글에는 작성자 정보가 저장되어 있지 않습니다"/);

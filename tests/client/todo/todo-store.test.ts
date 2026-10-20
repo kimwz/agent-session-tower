@@ -400,6 +400,9 @@ test('the open task’s file count follows its detail, so answers arriving out o
   assert.equal(world.fileCounts.a, 3);
   world = applyOps(world, [{ op: 'comment.delete', id: 'c' }], { now: at, today: '2026-10-14' });
   assert.equal(world.fileCounts.a, 2, 'a deleted comment’s file stops counting');
+  // A comment the page writes shows as the owner's at once, before the server's answer says so too.
+  world = applyOps(world, [{ op: 'comment.create', id: 'n', taskId: 'a', body: 'new' }], { now: at, today: '2026-10-14' });
+  assert.equal(world.detail?.comments.find(comment => comment.id === 'n')?.author, 'owner');
 });
 
 test('an upload answer older than the overview is not counted again, and the overview is read to be sure', async () => {
