@@ -6,7 +6,8 @@ import { ReactFlowProvider } from '@xyflow/react';
 import { parseSlackPosition, visibleSlackMentions, SLACK_PAGE_SIZE, slackMentionLayout } from '../../../client/src/graph/slack-graph.js';
 import { SlackMentionNode } from '../../../client/src/graph/SlackGraphNodes.js';
 import { TriggerMonitorNode } from '../../../client/src/graph/TriggerGraphNodes.js';
-import type { SlackWorkflow } from '../../../shared/slack.js';
+import type { SlackFollowUp, SlackWorkflow } from '../../../shared/slack.js';
+import { slackActivityAt } from '../../../client/src/slack/slack-monitor.js';
 const event = (id: string, status: SlackWorkflow['status'] = 'running'): SlackWorkflow => ({ id, status, createdAt: `2026-09-${id.padStart(2, '0')}T00:00:00Z`, updatedAt: '2026-09-22T00:00:00Z', rules: [], mention: { id, teamId: 'team', channel: 'channel', user: 'user', ts: '1', threadTs: '1', text: 'Please review this PR' } });
 const node = (component: unknown, data: unknown) => renderToStaticMarkup(createElement(ReactFlowProvider, null, createElement(component as FunctionComponent<{ data: unknown }>, { data })));
 test('Slack position accepts finite coordinates and ignores corrupt storage', () => {
@@ -32,6 +33,34 @@ test('compact mention list pages five newest conversations and expands without l
   for (let index = 1; index < layout.positions.length; index++) assert.equal(layout.positions[index].y - layout.positions[index - 1].y, 78);
   assert.ok(layout.positions.at(-1)!.y + 70 < layout.height - 30, 'last card leaves room for the More button');
   assert.ok(slackMentionLayout(0, false).height >= 190, 'empty state retains usable canvas space');
+});
+const followUp = (status: SlackFollowUp['status'], receivedAt: string): SlackFollowUp => ({ ts: receivedAt, user: 'other', text: 'And this?', status, receivedAt });
+test('conversations are ordered by their latest activity: a later message they took up moves them to the front', () => {
+  const events = Array.from({ length: 12 }, (_, index) => event(String(index + 1)));
+  for (const status of ['pending', 'delivering', 'delivered', 'uncertain'] as const) {
+    const followed = events.map(item => item.id === '1' ? { ...item, followUps: [followUp(status, '2026-09-30T00:00:00Z')] } : item);
+    assert.deepEqual(visibleSlackMentions(followed, SLACK_PAGE_SIZE).map(item => item.id), ['1', '12', '11', '10', '9'], status);
+    assert.equal(slackActivityAt(followed[0]), '2026-09-30T00:00:00Z');
+    // More pages continue the same order.
+    assert.deepEqual(visibleSlackMentions(followed, SLACK_PAGE_SIZE * 2).map(item => item.id), ['1', '12', '11', '10', '9', '8', '7', '6', '5', '4'], status);
+  }
+  // Messages it has not taken up leave it where its mention put it.
+  for (const status of ['received', 'skipped', 'error'] as const) {
+    const ignored = events.map(item => item.id === '1' ? { ...item, followUps: [followUp(status, '2026-09-30T00:00:00Z')] } : item);
+    assert.equal(slackActivityAt(ignored[0]), ignored[0].createdAt, status);
+    assert.deepEqual(visibleSlackMentions(ignored, SLACK_PAGE_SIZE).map(item => item.id), ['12', '11', '10', '9', '8'], status);
+  }
+  // The latest taken-up message counts, not the last one in the list; an older one does not lower the mention's time.
+  const mixed = { ...event('5'), followUps: [followUp('delivered', '2026-09-20T00:00:00Z'), followUp('skipped', '2026-09-29T00:00:00Z'), followUp('delivered', '2026-09-01T00:00:00Z')] };
+  assert.equal(slackActivityAt(mixed), '2026-09-20T00:00:00Z');
+  assert.equal(slackActivityAt({ ...event('5'), followUps: [followUp('delivered', '2026-09-01T00:00:00Z')] }), event('5').createdAt);
+  // Equal activity is settled by id, whatever order the snapshot sent.
+  const same = (id: string) => ({ ...event('3'), id });
+  assert.deepEqual(visibleSlackMentions([same('a'), same('c'), same('b')], 3).map(item => item.id), ['c', 'b', 'a']);
+  assert.deepEqual(visibleSlackMentions([same('b'), same('a'), same('c')], 3).map(item => item.id), ['c', 'b', 'a']);
+  // The card shows the time it is ordered by.
+  const markup = node(SlackMentionNode, { event: { ...event('1'), followUps: [followUp('delivered', '2026-09-30T00:00:00Z')] }, selected: false });
+  assert.match(markup, /dateTime="2026-09-30T00:00:00Z"/);
 });
 test('the trigger monitor offers a draggable header, overview and empty state even with no sessions', () => {
   const markup = node(TriggerMonitorNode, { enabledTriggers: 0, count: 0, active: 0, remaining: 0, more: false, onMore() {} });

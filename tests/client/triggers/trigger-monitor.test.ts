@@ -33,6 +33,15 @@ test('the monitor lists Slack mentions and trigger runs together, newest first, 
   assert.deepEqual(mergeTriggerEvents([run('x', 5), run('y', 5)], []).map(item => item.id), ['y', 'x']);
 });
 
+test('a Slack conversation takes its place in the lane from the latest message it took up', () => {
+  const followed = { ...mention('m1', 1), followUps: [{ ts: '2', user: 'U2', text: 'One more question', mentioned: true, status: 'delivered' as const, receivedAt: '2026-09-24T00:50:00Z' }] };
+  const items = monitorItems([followed, mention('m3', 30)], [run('r4', 40)], 2);
+  assert.deepEqual(items.map(item => `${item.kind}:${item.id}`), ['slack:m1', 'trigger:r4']);
+  assert.equal(items[0].at, '2026-09-24T00:50:00Z');
+  // Items at the same moment keep one order across snapshots.
+  assert.deepEqual(monitorItems([mention('m1', 40)], [run('r4', 40)], 2).map(item => item.id), ['r4', 'm1']);
+});
+
 test('the lane appears for Slack or any trigger, and takes over where the Slack monitor was left', () => {
   assert.equal(monitorVisible(false, undefined), false);
   assert.equal(monitorVisible(false, { triggers: [{ id: 's', name: 'Slack', enabled: true, kind: 'slack', revision: 0, updatedAt: '', updatedBy: { kind: 'owner', via: 'ui' } }], recent: [] }), false);
