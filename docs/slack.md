@@ -27,7 +27,7 @@ Connecting an account adds a **Slack monitor** to the canvas. Drag its header to
 
 Completed threads you have not opened have an unread border. Opening the thread marks its current result as read in that browser; a later completed result becomes unread again. Threads with a confirmed sent reply use a success border. Active work keeps its animated border.
 
-The monitor shows the latest five mentions as short cards in descending order. **Show more** loads five older conversations at a time. Click a card to open the ordinary session chat, including its composer and active-run controls. Follow-up instructions remain in the same dedicated conversation. These one-off coordinator sessions stay out of the ordinary session list and project canvas; their histories remain available through Slack monitor. Records created before this conversation feature retain their previous detail view and are not replayed.
+The monitor shows five conversations as short cards, the most recent activity first: a conversation moves up when a later message in its thread reaches it, not only when it starts. **Show more** loads five older conversations at a time. Click a card to open the ordinary session chat, including its composer and active-run controls. Follow-up instructions remain in the same dedicated conversation. These one-off coordinator sessions stay out of the ordinary session list and project canvas; their histories remain available through Slack monitor. Records created before this conversation feature retain their previous detail view and are not replayed.
 
 ## Writing style collection
 

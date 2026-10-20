@@ -1,6 +1,7 @@
 import type { SlackWorkflow } from '../../../shared/slack';
 import type { TriggerEvent, TriggerOverview } from '../../../shared/triggers';
 import { parseSlackPosition, SLACK_POSITION_KEY } from '../graph/slack-graph';
+import { slackActivityAt } from '../slack/slack-monitor';
 
 /** One lane on the canvas for everything triggers do, Slack mentions included. */
 export const TRIGGER_MONITOR_ID = 'trigger:monitor';
@@ -24,12 +25,12 @@ export function triggerEventRevision(event: Pick<TriggerEvent, 'status' | 'updat
   return event.status === 'completed' || event.status === 'error' || event.status === 'uncertain' ? `${event.status}:${event.updatedAt}` : '';
 }
 
-/** Newest first across both sources; a selected item stays visible even when it is older than the page. */
+/** Newest first across both sources (a Slack conversation by its latest activity, a run by its receipt); a selected item stays visible even when it is older than the page. */
 export function monitorItems(slack: SlackWorkflow[], triggers: TriggerEvent[], limit: number, selected?: string | null): MonitorItem[] {
   const all: MonitorItem[] = [
-    ...slack.map(event => ({ kind: 'slack' as const, id: event.id, at: event.createdAt, event })),
+    ...slack.map(event => ({ kind: 'slack' as const, id: event.id, at: slackActivityAt(event), event })),
     ...triggers.map(event => ({ kind: 'trigger' as const, id: event.id, at: event.receivedAt, event })),
-  ].sort((a, b) => b.at.localeCompare(a.at));
+  ].sort((a, b) => b.at.localeCompare(a.at) || b.id.localeCompare(a.id));
   const shown = all.slice(0, limit);
   const chosen = selected ? all.find(item => item.id === selected) : undefined;
   if (chosen && !shown.includes(chosen)) shown.push(chosen);
