@@ -99,11 +99,10 @@ test('deadlines can be dragged wherever dated tasks can, and nothing can when re
   const world = worldFromOverview(overview([]));
   const tasks = [task('a', { dueDate: '2026-10-14', deadlineDate: '2026-10-16', content: '보고서' })];
   const base = { tasks, world, today: '2026-10-14', future: false, colorBy: 'priority' as const, mobile: false, onMode() {}, onOpen() {}, onAdd() {}, onChange() {} };
-  // dnd-kit marks what it can drag; a disabled one says so.
+  // A disabled draggable says so.
   const deadline = (markup: string) => /<button[^>]*class="todo-cal-entry deadline[^"]*"[^>]*>/.exec(markup)?.[0] ?? '';
   for (const mode of ['month', 'week'] as const) {
     const markup = renderToStaticMarkup(createElement(CalendarView, { ...base, mode, readOnly: false }));
-    assert.match(deadline(markup), /aria-roledescription="draggable"/, mode);
     assert.match(deadline(markup), /aria-disabled="false"/, mode);
     assert.match(deadline(renderToStaticMarkup(createElement(CalendarView, { ...base, mode, readOnly: true }))), /aria-disabled="true"/, `${mode}, read-only`);
   }

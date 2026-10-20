@@ -14,9 +14,9 @@ import { cellEntries, DOTS_PER_LINE, dotRows, dotsPerLine, doneDays, resizeCommi
 
 /**
  * The calendar layout of a list: a month of days, or a week (three days on a phone) with an all-day row over a time
- * grid. Tasks are dragged to another day, time or the all-day row, and deadlines to another day; a block's bottom edge sets its duration; an empty
- * day or slot adds a task there; undated tasks wait in a side panel to be dragged in. Later occurrences of repeating
- * tasks show faded and cannot be moved. A task's small check circle, beside the button that opens it, completes it.
+ * grid. Tasks are dragged to another day, time or the all-day row, and deadlines to another day; a block's bottom
+ * edge sets its duration; an empty day or slot adds a task there; undated tasks wait in a side panel to be dragged in.
+ * Later occurrences of repeating tasks show faded and cannot be moved. A task's small check circle, beside the button that opens it, completes it.
  * Completed tasks, when given, show where they were completed: as dots down a month day's right edge, or at their time
  * in the week's grid; each opens its task.
  */
@@ -48,15 +48,14 @@ const MONTH_FIT = 4;
 
 
 type Drop = { kind: 'day' | 'allday' | 'time'; date: string };
-/** What a dragged entry moves: the task's date (and time), or its deadline. */
-type DragField = 'due' | 'deadline';
 
 /**
- * The patch a drop makes, or null when nothing changes. A deadline has a date only, so wherever it is dropped on a day
- * (the day, its all-day row or a time in it) it takes that day and nothing else.
+ * The patch a drop of an entry of `kind` makes (a task's date and time by default), or null when nothing changes. A
+ * deadline has a date only, so wherever it is dropped on a day (the day, its all-day row or a time in it) it takes that
+ * day and nothing else.
  */
-export function dropPatch(task: TodoTask, drop: Drop, start?: number, field: DragField = 'due'): Extract<TodoOp, { op: 'task.update' }>['patch'] | null {
-  if (field === 'deadline') return task.deadlineDate === drop.date ? null : { deadlineDate: drop.date };
+export function dropPatch(task: TodoTask, drop: Drop, start?: number, kind?: CalendarEntry['kind']): Extract<TodoOp, { op: 'task.update' }>['patch'] | null {
+  if (kind === 'deadline') return task.deadlineDate === drop.date ? null : { deadlineDate: drop.date };
   if (drop.kind === 'day') return task.dueDate === drop.date ? null : { dueDate: drop.date };
   if (drop.kind === 'allday') return task.dueDate === drop.date && !task.dueTime ? null : { dueDate: drop.date, dueTime: null };
   const dueTime = timeOf(start ?? 0);
@@ -99,7 +98,9 @@ function FutureEntry({ entry, color, compact }: { entry: CalendarEntry; color: s
 
 function TaskEntry({ entry, color, onOpen, draggable, compact }: { entry: CalendarEntry; color: string; onOpen: (id: string) => void; draggable: boolean; compact?: boolean }) {
   const { task } = entry;
-  const drag = useDraggable({ id: `${entry.kind}:${task.id}:${entry.date}`, data: { task, field: entry.kind === 'deadline' ? 'deadline' : 'due' }, disabled: !draggable || entry.kind === 'future' });
+  // dnd-kit keeps one node per id: a copy that is only shown (a day's "+n" list) has its own, or closing the list would
+  // take the id of the entry still in the day with it, and that entry could no longer be dragged.
+  const drag = useDraggable({ id: `${draggable ? '' : 'shown:'}${entry.kind}:${task.id}:${entry.date}`, data: { task, kind: entry.kind }, disabled: !draggable });
   return <button ref={drag.setNodeRef} type="button" className={`todo-cal-entry ${entry.kind} ${drag.isDragging ? 'dragging' : ''} ${compact ? 'compact' : ''}`} style={{ '--entry-color': color } as CSSProperties}
     title={task.content} onClick={event => { event.stopPropagation(); onOpen(task.id); }} {...drag.attributes} {...drag.listeners}>
     {entry.kind === 'deadline' ? <Flag size={10} /> : <i />}
@@ -357,7 +358,7 @@ export function CalendarView(props: CalendarProps) {
   const [anchor, setAnchor] = useState(today);
   const [selected, setSelected] = useState(today);
   const [panel, setPanel] = useState(false);
-  const [active, setActive] = useState<{ task: TodoTask; block: boolean; field: DragField } | null>(null);
+  const [active, setActive] = useState<{ task: TodoTask; block: boolean; kind?: CalendarEntry['kind'] } | null>(null);
   const [dragging, setDragging] = useState<{ id: string; minutes: number } | null>(null);
   const sensors = useTodoSensors('free');
   const color = useColor(props.colorBy, props.world);
@@ -380,8 +381,8 @@ export function CalendarView(props: CalendarProps) {
     return column && top !== undefined ? yToMinutes(top - column.top, task.durationMin ?? DEFAULT_DURATION) : undefined;
   };
   const onStart = (event: DragStartEvent) => {
-    const data = event.active.data.current as { task: TodoTask; block?: boolean; field?: DragField } | undefined;
-    if (data) setActive({ task: data.task, block: !!data.block, field: data.field ?? 'due' });
+    const data = event.active.data.current as { task: TodoTask; block?: boolean; kind?: CalendarEntry['kind'] } | undefined;
+    if (data) setActive({ task: data.task, block: !!data.block, kind: data.kind });
   };
   const onMove = (event: { active: DragEndEvent['active']; over: DragEndEvent['over'] }) => {
     const data = event.active.data.current as { task: TodoTask; block?: boolean } | undefined;
@@ -392,11 +393,10 @@ export function CalendarView(props: CalendarProps) {
   };
   const onEnd = (event: DragEndEvent) => {
     setActive(null); setDragging(null);
-    const data = event.active.data.current as { task: TodoTask; field?: DragField } | undefined;
+    const data = event.active.data.current as { task: TodoTask; kind?: CalendarEntry['kind'] } | undefined;
     const drop = event.over?.data.current?.drop as Drop | undefined;
     if (!data || !drop) return;
-    const field = data.field ?? 'due';
-    const patch = dropPatch(data.task, drop, field === 'due' && drop.kind === 'time' ? startMinutes(event, drop.date, data.task) : undefined, field);
+    const patch = dropPatch(data.task, drop, drop.kind === 'time' ? startMinutes(event, drop.date, data.task) : undefined, data.kind);
     if (patch) props.onChange([{ op: 'task.update', id: data.task.id, patch }]);
   };
 
@@ -424,8 +424,8 @@ export function CalendarView(props: CalendarProps) {
         </div>
         {panel && !mobile && <Unscheduled tasks={undated} color={color} props={props} />}
       </div>
-      <DragOverlay dropAnimation={null}>{active && !active.block && <div className={`todo-cal-entry overlay ${active.field === 'deadline' ? 'deadline' : ''}`} style={{ '--entry-color': color(active.task) } as CSSProperties}>
-        {active.field === 'deadline' ? <><Flag size={10} /><span>{t('마감: {0}', { 0: active.task.content })}</span></> : <><i /><span>{active.task.content}</span></>}
+      <DragOverlay dropAnimation={null}>{active && !active.block && <div className={`todo-cal-entry overlay ${active.kind === 'deadline' ? 'deadline' : ''}`} style={{ '--entry-color': color(active.task) } as CSSProperties}>
+        {active.kind === 'deadline' ? <><Flag size={10} /><span>{t('마감: {0}', { 0: active.task.content })}</span></> : <><i /><span>{active.task.content}</span></>}
       </div>}</DragOverlay>
     </DndContext>
   </div>;
