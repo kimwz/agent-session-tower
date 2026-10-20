@@ -22,6 +22,7 @@ import { httpTransport, localToday, newId, TodoClient, useTodoState } from './to
 import { isTodoPage, readTodoLocation, todoSearch, viewKey, type TodoLocation, type TodoView } from './todo-url';
 import { isOpen } from './todo-model';
 import { doneRange } from './calendar/calendar-layout';
+import { backgroundClose } from './todo-background';
 import { archivedColumns, calendarDone as calendarDoneItems, foldGroups, overviewGroups, shapeSections, shownTasks, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
 import { CalendarView } from './calendar/CalendarView';
 import type { TodoLayout } from '../../../shared/todo/types';
@@ -41,6 +42,8 @@ export interface TodoPageProps {
   onSidebarOpen: (open: boolean) => void;
   /** A task is opened (its detail or its chat): the master's conversation over the page, if shown, makes way for it. */
   onTaskOpen?: () => void;
+  /** The master's conversation is shown over the page: a click on the page's empty space closes it, as the canvas's pane closes its own. */
+  onBackgroundClick?: () => void;
 }
 
 /**
@@ -71,7 +74,7 @@ function SectionRename({ anchor, name, onSave, onClose }: { anchor: RefObject<HT
   </form></Popover>;
 }
 
-export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, onTaskOpen }: TodoPageProps) {
+export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, onTaskOpen, onBackgroundClick }: TodoPageProps) {
   useI18n();
   const tokenRef = useRef(token);
   tokenRef.current = token;
@@ -454,14 +457,14 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
     {drawer && sidebarOpen && <button type="button" className="todo-scrim" aria-label={t('목록 닫기')} onClick={() => onSidebarOpen(false)} />}
     {sidebarOpen && state.phase === 'ready' && <TodoSidebar world={world} counts={counts} view={view} query={query} client={client} readOnly={readOnly} searchRef={searchRef} onNavigate={goTo} onAdd={() => { openAdd(); if (drawer) onSidebarOpen(false); }} />}
     <main className="todo-main" aria-label={title} onClickCapture={event => {
-      // With a task open, a click on the page's empty space closes it and does nothing else; a card opens that card. A
-      // click that closed a popover, or that ends somewhere else than it began (a drop), is not one.
-      const press = pressed.current;
-      if (press.popover || press.target !== event.target) return;
-      if (!openTaskId || !(event.target instanceof Element) || !event.currentTarget.contains(event.target)) return;
-      if (event.target.closest('.todo-card, .todo-cal-entry, .todo-cal-block, button, a, input, textarea, select, label, summary, [role="button"], [role="tab"], [role="radio"], .todo-popover')) return;
+      // A click on the page's empty space closes the master's conversation over it, else the open task, and does
+      // nothing else (todo-background).
+      const target = event.target instanceof Element && event.currentTarget.contains(event.target) ? event.target : null;
+      const close = backgroundClose({ target, plain: !pressed.current.popover && pressed.current.target === event.target },
+        { conversation: onBackgroundClick, task: openTaskId ? closeTask : undefined });
+      if (!close) return;
       event.preventDefault(); event.stopPropagation();
-      closeTask();
+      close();
     }}>
       <header className="todo-main-head">
         <div className="todo-title">{/* The popover leaves presses on its anchor to it: one on the title closes the list too. */}
