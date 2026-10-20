@@ -315,14 +315,20 @@ async function expand(reach: Reach, file: string, text: string): Promise<{ place
 /**
  * The reviewer's reading scope for one request: the repository of its folder and that repository's worktrees, the
  * folders the command changes into, and the files it names. Files the reviewer reads add the files they name
- * (see `ReviewFiles`).
+ * (see `ReviewFiles`). The shared temporary folder is always readable whole: agents keep worktrees and fixtures of
+ * other repositories there.
  */
 export async function reviewScope(input: { cwd: string; command?: string; stateDir: string; log: string; home?: string; env?: NodeJS.ProcessEnv;
   /** Scripts Tower already read for the reviewer (commandEvidence): what they name is open from the start. */
-  evidence?: { path: string; text: string }[] }): Promise<ReviewScopeSpec> {
+  evidence?: { path: string; text: string }[];
+  /** The temporary folder read whole (`/tmp`, `/private/tmp` on macOS); null: none. */
+  temp?: string | null }): Promise<ReviewScopeSpec> {
   const home = input.home ?? homedir();
   const denied = await deniedPaths(input.stateDir, home, input.env ?? process.env);
   const roots: ScopeRoot[] = [];
+  // Added as is: it is the one tree allowed right under the top. Credential stores in it are still refused by name.
+  const temp = input.temp === null ? undefined : await real(input.temp ?? '/tmp');
+  if (temp && !isDenied(temp, denied, true)) roots.push({ path: temp, kind: 'tree' });
   const realHome = await real(home) ?? home;
   const add = (root: ScopeRoot | undefined) => {
     if (!root || roots.length >= MAX_ROOTS || isDenied(root.path, denied, root.kind !== 'file') || roots.some(item => covers(item, root.path) && (item.kind === 'tree' || root.kind === 'file'))) return;
@@ -564,7 +570,7 @@ async function sharedFolder(folder: string): Promise<boolean> {
 function explain(status: ReadStatus): string {
   switch (status) {
     case 'denied': return 'Credential stores and Tower\'s own state are never read.';
-    case 'outside': return 'Outside the review scope: the request folder\'s repository and worktrees, paths the command names and paths the files you read name.';
+    case 'outside': return 'Outside the review scope: the request folder\'s repository and worktrees, the temporary folder, paths the command names and paths the files you read name.';
     case 'missing': return 'No such file.';
     case 'unreadable': return 'The file is there but could not be opened (permissions).';
     case 'not-text': return 'Not a text file.';
