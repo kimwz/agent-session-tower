@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { english } from '../../../client/src/i18n/messages.js';
 import { getLanguage, setLanguage } from '../../../client/src/i18n/i18n.js';
 import { applyOps, inverseOps, worldFromOverview } from '../../../client/src/todo/todo-model.js';
-import { layoutFor, readShortcut, readSwitchKey } from '../../../client/src/todo/todo-shortcuts.js';
+import { calendarFor, layoutFor, readShortcut, readSwitchKey } from '../../../client/src/todo/todo-shortcuts.js';
 import { moveSelection } from '../../../client/src/todo/todo-views.js';
 import { isTodoPage, pageSearch, readTodoLocation, todoSearch } from '../../../client/src/todo/todo-url.js';
 import { boardColumns, calendarDone, calendarTasks, cardContext, defaultDisplay, subtaskWindow, dropOps, dropPlace, foldGroups, groupingsFor, sectionDropAfter, shownTasks, manualOrder, overviewGroups, projectOrder, sectionMoveTarget, shapeSections, sidebarCounts, switchIndex, switchTargets, viewTitle, type ViewContext } from '../../../client/src/todo/todo-views.js';
@@ -196,7 +196,7 @@ test('keys: a G chord, task keys, and undo', () => {
   }
   assert.deepEqual(readShortcut(key('b'), true), { pending: false }, 'after G only A, T, U and I count');
   // A held layout key does not flip the page back and forth; a held arrow still moves.
-  for (const held of [key('b'), key('c'), key('V', { shiftKey: true })]) assert.deepEqual(readShortcut({ ...held, repeat: true }, false), { pending: false });
+  for (const held of [key('b'), key('c'), key('w'), key('m'), key('V', { shiftKey: true })]) assert.deepEqual(readShortcut({ ...held, repeat: true }, false), { pending: false });
   assert.deepEqual(readShortcut({ ...key('ArrowDown'), repeat: true }, false), { shortcut: { action: 'move', direction: 'down' }, pending: false });
   assert.deepEqual(readShortcut(key('M', { shiftKey: true }), false), { pending: false }, 'Shift+M stays the master\'s');
   assert.deepEqual(readShortcut(key('ArrowDown'), false), { shortcut: { action: 'move', direction: 'down' }, pending: false });
@@ -210,6 +210,18 @@ test('B and C go to their layout, and pressed there go back to the other', () =>
   assert.equal(layoutFor('calendar', 'calendar'), 'board');
   assert.equal(layoutFor('calendar', 'board'), 'board');
   assert.equal(layoutFor('board', 'board'), 'calendar');
+});
+
+test('W and M open their calendar view, and pressed on the calendar showing it go back to the other', () => {
+  assert.equal(calendarFor('calendar', 'month', 'week'), 'week');
+  assert.equal(calendarFor('calendar', 'week', 'week'), 'month');
+  assert.equal(calendarFor('calendar', 'week', 'month'), 'month');
+  assert.equal(calendarFor('calendar', 'month', 'month'), 'week');
+  // From the board the key opens the calendar on its own view, whatever the calendar last showed.
+  assert.equal(calendarFor('board', 'week', 'week'), 'week');
+  assert.equal(calendarFor('board', 'month', 'month'), 'month');
+  assert.equal(calendarFor('board', 'month', 'week'), 'week');
+  assert.equal(calendarFor('board', 'week', 'month'), 'month');
 });
 
 test('every message the Todo page shows has an English version', () => {

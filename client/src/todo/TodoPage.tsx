@@ -17,7 +17,7 @@ import { createActions, type FollowUp } from './todo-actions';
 import { httpUploadIO } from './attachments/upload-io';
 import { TodoUploads } from './attachments/uploads';
 import { longDate, priorityName } from './todo-format';
-import { layoutFor, otherLayout, readShortcut, typingIn } from './todo-shortcuts';
+import { calendarFor, layoutFor, otherLayout, readShortcut, typingIn } from './todo-shortcuts';
 import { httpTransport, localToday, newId, TodoClient, useTodoState } from './todo-store';
 import { isTodoPage, readTodoLocation, todoSearch, viewKey, type TodoLocation, type TodoView } from './todo-url';
 import { isOpen } from './todo-model';
@@ -274,7 +274,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   const setCalendar = (mode: DisplaySettings['calendar']) => { setLayout('calendar'); if (display.calendar !== mode) setDisplay({ ...display, calendar: mode }); };
   // The columns the arrow keys go through: the board's, and the completed list when it shows.
   const navColumns = completedItems.length ? [...visibleColumns, { tasks: completedItems.map(item => ({ ...item.task, id: doneKey(item.completion.id) })) }] : visibleColumns;
-  const shortcuts = { ready: state.phase === 'ready', setSwitcher, target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout, setCalendar, navColumns, selectedId, choose, letGo, world, locked, lockedTask };
+  const shortcuts = { ready: state.phase === 'ready', setSwitcher, target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout, calendar: display.calendar, setCalendar, navColumns, selectedId, choose, letGo, world, locked, lockedTask };
   const shortcutState = useRef(shortcuts);
   shortcutState.current = shortcuts;
   useEffect(() => {
@@ -356,8 +356,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
         case 'undo': if (!current.client.undo()) return; break;
         case 'layout': current.setLayout(otherLayout(current.layout)); break;
         case 'board': case 'calendar': current.setLayout(layoutFor(current.layout, shortcut.action)); break;
-        case 'week': current.setCalendar('week'); break;
-        case 'month': current.setCalendar('month'); break;
+        case 'week': case 'month': current.setCalendar(calendarFor(current.layout, current.calendar, shortcut.action)); break;
       }
       event.preventDefault();
     };

@@ -2712,7 +2712,7 @@ export const english: Record<string, string> = {
   "순서를 바꿨습니다": "Put in order",
   "캔버스·할 일 전환": "Canvas or todos",
   "보드·캘린더 (다시 누르면 돌아감)": "Board or calendar (again to go back)",
-  "캘린더 주·월": "Calendar by week or month",
+  "캘린더 주·월 (다시 누르면 돌아감)": "Calendar by week or month (again to switch back)",
   "작업 고르기": "Choose a task",
   "고른 작업 열기": "Open the chosen task",
   "닫기·선택 해제": "Close, or let go of the choice",
