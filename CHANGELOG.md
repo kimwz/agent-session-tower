@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.168.1] - 2026-10-20
+## [1.168.1] - 2026-10-21
 
 - **자동 권한 검토자가 `/private/tmp`(`/tmp`) 아래 모든 파일을 언제나 읽습니다.** 에이전트가 다른 저장소의 작업 사본이나 테스트 fixture를 임시 폴더에 두면, 지금까지는 그 파일들이 요청 폴더의 저장소 밖이라 "검토 범위 밖"으로 거부되었고, 검토자가 테스트 설정이나 프로세스 종료 범위를 확인하지 못해 명령이 소유자 승인으로 넘어갔습니다. 이제 임시 폴더는 깊이와 상관없이 읽기·목록·검색이 되며, `/tmp/...`와 실제 경로 `/private/tmp/...` 어느 쪽으로 물어도 같습니다. 읽기만 넓어졌습니다. 쓰기·실행이나 명령의 자동 승인 기준은 그대로이고, 임시 폴더 안의 `.env`·키 같은 자격 증명 파일과 Tower 상태, 그리고 Tower가 임시 폴더에 두는 자체 폴더(실행 워커·마스터 토큰이 있는 `tower-runner-*`, 턴별 도구 권한의 `tower-owned-*`, 브라우저 프로필)는 여전히 읽지 않으며 목록과 검색에도 나오지 않습니다. 검토자 안내문에도 임시 폴더가 읽기 범위로 적힙니다. macOS의 사용자별 임시 폴더(`/var/folders/...`)는 포함되지 않습니다.
 
