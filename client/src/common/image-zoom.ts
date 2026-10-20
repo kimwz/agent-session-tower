@@ -32,21 +32,30 @@ export function clampView(view: View, stage: Size, image: Size): View {
 }
 
 /**
+ * A pinch that began with `start` around `from` and is now `factor` apart around `to`: the part of the image that was
+ * under `from` is under `to`, scaled and moved in one step and then kept in bounds, so the fingers never slip on it.
+ */
+export function pinchView(start: View, factor: number, from: Point, to: Point, stage: Size, image: Size): View {
+  const fit = fitScale(stage, image);
+  const scale = Math.min(Math.max(start.scale * factor, fit), maxScale(fit));
+  const ratio = scale / start.scale;
+  return clampView({ scale, x: to.x - (from.x - start.x) * ratio, y: to.y - (from.y - start.y) * ratio }, stage, image);
+}
+
+/**
  * The view scaled by `factor` around `point` (from the stage's centre): the part of the image under that point stays
  * under it, as far as the bounds allow.
  */
-export function zoomAt(view: View, factor: number, point: Point, stage: Size, image: Size): View {
-  const fit = fitScale(stage, image);
-  const scale = Math.min(Math.max(view.scale * factor, fit), maxScale(fit));
-  const ratio = scale / view.scale;
-  return clampView({ scale, x: point.x - (point.x - view.x) * ratio, y: point.y - (point.y - view.y) * ratio }, stage, image);
-}
+export const zoomAt = (view: View, factor: number, point: Point, stage: Size, image: Size): View => pinchView(view, factor, point, point, stage, image);
 
-/** A double click or tap: back to the fit when zoomed in, otherwise to the image's own size (twice the fit for a small one) at `point`. */
-export function toggleZoom(view: View, point: Point, stage: Size, image: Size): View {
+/**
+ * Back to the fit when zoomed in, otherwise to the image's own size (1:1) at `point`. `small` is what a double click or
+ * tap does with an image already at its own size when fitted: twice that; the toolbar's button leaves it as it is.
+ */
+export function toggleZoom(view: View, point: Point, stage: Size, image: Size, { small = 2 }: { small?: number } = {}): View {
   const fit = fitScale(stage, image);
   if (zoomedIn(view, fit)) return fitView(stage, image);
-  const target = fit < 1 ? 1 : fit * 2;
+  const target = fit < 1 ? 1 : fit * small;
   return zoomAt(view, target / view.scale, point, stage, image);
 }
 

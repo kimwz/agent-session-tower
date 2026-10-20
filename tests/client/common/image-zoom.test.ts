@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clampView, fitScale, fitView, maxScale, panBy, swipeStep, toggleZoom, zoomAt, zoomedIn } from '../../../client/src/common/image-zoom.js';
+import { clampView, fitScale, fitView, maxScale, panBy, pinchView, swipeStep, toggleZoom, zoomAt, zoomedIn } from '../../../client/src/common/image-zoom.js';
 
 const stage = { width: 400, height: 800 };
 const shot = { width: 1200, height: 2400 };
@@ -39,6 +39,17 @@ test('zooming keeps the part of the picture under the pointer or pinch under it'
   assert.equal(zoomedIn(start, fitScale(stage, shot)), false);
 });
 
+test('a pinch that zooms and moves at once keeps the picture under the fingers', () => {
+  // At its own size, pulled to the right edge; the fingers close to half while their middle moves 100 px left.
+  const start = { scale: 1, x: 400, y: 0 }, from = { x: 0, y: 0 }, to = { x: -100, y: 0 };
+  const view = pinchView(start, 0.5, from, to, stage, shot);
+  assert.deepEqual(view, { scale: 0.5, x: 100, y: 0 });
+  const before = under(start, from), after = under(view, to);
+  assert.ok(Math.abs(before.x - after.x) < 1e-9 && Math.abs(before.y - after.y) < 1e-9);
+  // Past the bounds it stops at the edge rather than drifting.
+  assert.deepEqual(pinchView(start, 1, from, { x: 500, y: 0 }, stage, shot), { scale: 1, x: 400, y: 0 });
+});
+
 test('a double click goes to the picture’s own size there, and back to the fit', () => {
   const start = fitView(stage, shot);
   const own = toggleZoom(start, { x: 0, y: 0 }, stage, shot);
@@ -47,6 +58,8 @@ test('a double click goes to the picture’s own size there, and back to the fit
   // A small picture, already at its own size, doubles.
   const icon = { width: 100, height: 50 };
   assert.equal(toggleZoom(fitView(stage, icon), { x: 0, y: 0 }, stage, icon).scale, 2);
+  // The toolbar's actual size is 1:1, which a small picture already is.
+  assert.deepEqual(toggleZoom(fitView(stage, icon), { x: 0, y: 0 }, stage, icon, { small: 1 }), fitView(stage, icon));
 });
 
 test('dragging moves a zoomed picture within its edges', () => {

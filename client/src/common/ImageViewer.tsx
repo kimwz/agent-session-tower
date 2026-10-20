@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type 
 import { createPortal } from 'react-dom';
 import { ChevronLeft, ChevronRight, Download, ExternalLink, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { translate as t, useI18n } from '../i18n/i18n';
-import { clampView, fitScale, fitView, panBy, swipeStep, toggleZoom, zoomAt, zoomedIn, type Point, type Size, type View } from './image-zoom';
+import { clampView, fitScale, fitView, panBy, pinchView, swipeStep, toggleZoom, zoomAt, zoomedIn, type Point, type Size, type View } from './image-zoom';
 
 /** An image the viewer shows: its address, its name, and where to download it (when it can be). */
 export interface ViewerImage { src: string; name: string; download?: string }
@@ -95,8 +95,11 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
     setNatural(null); setFailed(false);
     pointers.current.clear(); gesture.current = null; lastTap.current = null;
   };
+  const fit = natural ? fitScale(stage, natural) : 1;
+  const zoomed = zoomedIn(view, fit);
   const zoomBy = (factor: number) => { if (natural) setView(current => zoomAt(current, factor, { x: 0, y: 0 }, stage, natural)); };
-  const toggleAt = (point: Point) => { if (natural) setView(current => toggleZoom(current, point, stage, natural)); };
+  const toggleAt = (point: Point, small?: number) => { if (natural) setView(current => toggleZoom(current, point, stage, natural, { small })); };
+  const panKeys = (dx: number, dy: number) => { if (natural) setView(current => panBy(current, dx, dy, stage, natural)); };
 
   const down = (event: PointerEvent<HTMLDivElement>) => {
     if (event.pointerType === 'mouse' && event.button !== 0) return;
@@ -117,8 +120,7 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
     if (current.kind === 'pinch') {
       const [a, b] = [...pointers.current.values()];
       if (!b) return;
-      const now = middle(a, b);
-      setView(panBy(zoomAt(current.view, distance(a, b) / current.distance, current.middle, stage, natural), now.x - current.middle.x, now.y - current.middle.y, stage, natural));
+      setView(pinchView(current.view, distance(a, b) / current.distance, current.middle, middle(a, b), stage, natural));
       return;
     }
     const dx = point.x - current.start.x, dy = point.y - current.start.y;
@@ -147,9 +149,14 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
 
   const keys = (event: KeyboardEvent<HTMLDialogElement>) => {
     if (event.metaKey || event.ctrlKey || event.altKey || event.nativeEvent.isComposing) return;
+    // Zoomed in, the arrow keys move the picture (a picture the keyboard could not see all of otherwise); fitted, left and
+    // right go through the pictures.
+    const step = 80, moving = zoomed;
     const actions: Record<string, () => void> = {
       // Esc is the viewer's alone: the page's own Esc handlers (its help, the task's detail) never see it.
-      Escape: onClose, ArrowLeft: () => go(-1), ArrowRight: () => go(1), '+': () => zoomBy(1.25), '=': () => zoomBy(1.25), '-': () => zoomBy(0.8),
+      Escape: onClose, ArrowLeft: () => moving ? panKeys(step, 0) : go(-1), ArrowRight: () => moving ? panKeys(-step, 0) : go(1),
+      ArrowUp: () => { if (moving) panKeys(0, step); }, ArrowDown: () => { if (moving) panKeys(0, -step); },
+      '+': () => zoomBy(1.25), '=': () => zoomBy(1.25), '-': () => zoomBy(0.8),
       '0': () => { if (natural) setView(fitView(stage, natural)); },
     };
     const action = actions[event.key];
@@ -159,8 +166,6 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
   };
 
   if (!image) return null;
-  const fit = natural ? fitScale(stage, natural) : 1;
-  const zoomed = zoomedIn(view, fit);
   return createPortal(<dialog ref={dialog} className="image-viewer" aria-label={image.name} onKeyDown={keys}
     // A close request without a key (Android's back gesture).
     onCancel={event => { event.preventDefault(); onClose(); }}
@@ -170,8 +175,8 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
       <span className="image-viewer-name" title={image.name}>{image.name}</span>
       {count > 1 && <span className="image-viewer-count">{index + 1} / {count}</span>}
       <button type="button" className="icon-button" aria-label={t('축소')} title={t('축소')} disabled={!natural || !zoomed} onClick={() => zoomBy(0.8)}><ZoomOut size={16} /></button>
-      <button type="button" className="image-viewer-scale" disabled={!natural} aria-label={zoomed ? t('화면에 맞추기') : t('원본 크기로 보기')} title={zoomed ? t('화면에 맞추기') : t('원본 크기로 보기')}
-        onClick={() => toggleAt({ x: 0, y: 0 })}>{natural ? `${Math.round(view.scale * 100)}%` : '–'}</button>
+      <button type="button" className="image-viewer-scale" disabled={!natural || (fit >= 1 && !zoomed)} aria-label={zoomed ? t('화면에 맞추기') : t('원본 크기로 보기')} title={zoomed ? t('화면에 맞추기') : t('원본 크기로 보기')}
+        onClick={() => toggleAt({ x: 0, y: 0 }, 1)}>{natural ? `${Math.round(view.scale * 100)}%` : '–'}</button>
       <button type="button" className="icon-button" aria-label={t('확대')} title={t('확대')} disabled={!natural} onClick={() => zoomBy(1.25)}><ZoomIn size={16} /></button>
       <a className="icon-button" href={image.src} target="_blank" rel="noreferrer noopener" aria-label={t('새 탭에서 원본 열기')} title={t('새 탭에서 원본 열기')}><ExternalLink size={16} /></a>
       {image.download && <a className="icon-button" href={image.download} download={image.name} aria-label={t('“{0}” 내려받기', { 0: image.name })} title={t('“{0}” 내려받기', { 0: image.name })}><Download size={16} /></a>}
