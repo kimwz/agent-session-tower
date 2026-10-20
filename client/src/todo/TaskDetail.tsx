@@ -1,8 +1,8 @@
 import { useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { closestCenter, DndContext, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
-import { ArrowLeft, ArrowRight, ArrowUpFromLine, CalendarDays, Check, CheckCheck, ChevronDown, Clock3, Copy, CornerDownRight, Flag, GripVertical, History, Link, Link2, LoaderCircle, MoreHorizontal, Paperclip, Pencil, Plus, Send, Tag, Trash2, X } from 'lucide-react';
-import type { TodoAgent, TodoEvent, TodoFile, TodoPriority, TodoTask } from '../../../shared/todo/types';
+import { ArrowLeft, ArrowRight, ArrowUpFromLine, Bot, CalendarDays, Check, CheckCheck, ChevronDown, Clock3, Copy, CornerDownRight, Flag, GripVertical, History, Link, Link2, LoaderCircle, MessageSquare, MoreHorizontal, Paperclip, Pencil, Plus, Send, Tag, Trash2, User, X } from 'lucide-react';
+import type { TodoAgent, TodoComment, TodoEvent, TodoFile, TodoPriority, TodoTask } from '../../../shared/todo/types';
 import { liveProjectIds } from '../../../shared/todo/compose';
 import { relativeTime } from '../common/lib';
 import { PanelResizeHandle, usePanelWidth } from '../common/panel-resize';
@@ -25,8 +25,9 @@ import { newId, type TodoClient } from './todo-store';
 import { archivedSectionIds, projectTree } from './todo-views';
 
 /**
- * One task, what is used most first and largest: its title, properties, description, sub-tasks and comments; then the
- * tasks before and after it and its activity, small. Properties are a list of rows (`DETAIL_PROPERTIES`), so a new
+ * One task, what is used most first and largest: its title, properties, description, sub-tasks and the tasks before and
+ * after it; then its comments, in a region of their own, each saying who wrote it; then its completions and activity,
+ * small. Properties are a list of rows (`DETAIL_PROPERTIES`), so a new
  * property is one entry; a rarely used one shows only with a value, and otherwise as one small "add" among the others.
  * On a phone the same rows read as a line of chips under the title (todo.css). Every edit is an operation through the
  * store, shown at once.
@@ -337,6 +338,20 @@ function CommentEditor({ initial, onSave, onCancel }: { initial: string; onSave:
   </form>;
 }
 
+/** How a comment shows who wrote it: the owner, an agent, or neither where that was not recorded (TodoComment.author). */
+type CommentAuthorKey = NonNullable<TodoComment['author']> | 'unknown';
+const COMMENT_AUTHORS: Record<CommentAuthorKey, { name: string; icon: ReactNode; title?: string }> = {
+  owner: { name: '나', icon: <User size={14} /> },
+  agent: { name: '에이전트', icon: <Bot size={15} /> },
+  unknown: { name: '작성자 기록 없음', icon: <MessageSquare size={13} />, title: '이 댓글에는 작성자 정보가 저장되어 있지 않습니다' },
+};
+
+const CommentAvatar = ({ author }: { author: CommentAuthorKey }) => <span className={`todo-comment-avatar ${author}`} aria-hidden="true">{COMMENT_AUTHORS[author].icon}</span>;
+
+/**
+ * The comments: a region of their own under the task, one card per comment with its writer's avatar, name and colour
+ * (todo.css), oldest first, and the box to write one, marked as the owner's, at the end.
+ */
 function Comments({ task, world, client, readOnly, uploads }: DetailContext) {
   const [body, setBody] = useState('');
   const [pending, setPending] = useState<File[]>([]);
@@ -363,33 +378,44 @@ function Comments({ task, world, client, readOnly, uploads }: DetailContext) {
     setPending(current => current.filter(file => !attach.includes(file)));
     if (attach.length) uploads.add(attach, { taskId: task.id, commentId: id });
   };
-  return <section className="todo-detail-section">
-    <h4>{t('댓글')}{comments.length > 0 && <span>{comments.length}</span>}</h4>
-    {comments.length > 0 && <ul className="todo-comments">{comments.map(comment => <li key={comment.id}>
-      <div className="todo-comment-meta"><time dateTime={comment.createdAt} title={new Date(comment.createdAt).toLocaleString()}>{relativeTime(comment.createdAt)}{comment.updatedAt !== comment.createdAt && ` · ${t('고침')}`}</time>
-        <span className="todo-spacer" />
-        {!readOnly && editing !== comment.id && <button type="button" className="icon-button" aria-label={t('댓글 편집')} onClick={() => setEditing(comment.id)}><Pencil size={12} /></button>}
-        {!readOnly && <button type="button" className="icon-button" aria-label={t('댓글 삭제')} onClick={() => { if (client.apply([{ op: 'comment.delete', id: comment.id }])) client.toast(t('댓글을 지웠습니다.'), 'info', client.undoActions()); }}><Trash2 size={12} /></button>}
-      </div>
-      {editing === comment.id
-        ? <CommentEditor initial={comment.body} onCancel={() => setEditing(null)} onSave={text => { client.apply([{ op: 'comment.update', id: comment.id, body: text }]); setEditing(null); }} />
-        : <TodoMarkdown>{comment.body}</TodoMarkdown>}
-      <AttachmentList files={files.filter(file => file.commentId === comment.id)} onDelete={readOnly ? undefined : file => removeFile(client, file)} />
-      <UploadRows jobs={jobs.filter(job => job.commentId === comment.id)} onCancel={key => uploads.cancel(key)} onRetry={key => uploads.retry(key)} />
-    </li>)}</ul>}
-    {!readOnly && <form className={`todo-comment-form ${drop.over ? 'drop-target' : ''}`} onSubmit={event => { event.preventDefault(); void send(); }} {...drop.handlers}>
-      <textarea value={body} rows={body.includes('\n') ? 4 : 2} maxLength={15_000} placeholder={t('댓글 쓰기 (Markdown)')} aria-label={t('댓글')} onChange={event => setBody(event.target.value)}
-        onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }} />
-      {pending.length > 0 && <ul className="todo-pending-files">{pending.map((file, index) => <li key={`${file.name}-${index}`}>
-        <Paperclip size={12} /><span>{file.name}</span><small>{sizeLabel(file.size)}</small>
-        <button type="button" className="icon-button" aria-label={t('“{0}” 빼기', { 0: file.name })} onClick={() => setPending(previous => previous.filter((_, position) => position !== index))}><X size={12} /></button>
-      </li>)}</ul>}
-      <div className="todo-comment-actions">
-        <AttachButton onFiles={add} compact />
-        <span className="todo-spacer" />
-        {(body.trim() || pending.length > 0) && <button type="submit" className="todo-primary" disabled={sending}>{t('댓글 달기')}</button>}
-      </div>
-    </form>}
+  return <section className="todo-detail-section todo-comments-area" aria-label={t('댓글')}>
+    <h4><MessageSquare size={13} />{t('댓글')}{comments.length > 0 && <span>{comments.length}</span>}</h4>
+    {comments.length > 0 && <ul className="todo-comments">{comments.map(comment => {
+      const author: CommentAuthorKey = comment.author ?? 'unknown', who = COMMENT_AUTHORS[author];
+      return <li key={comment.id} className={`todo-comment ${author}`}>
+        <CommentAvatar author={author} />
+        <div className="todo-comment-card">
+          <div className="todo-comment-meta">
+            <strong className="todo-comment-author" title={who.title && t(who.title)}>{t(who.name)}</strong>
+            <time dateTime={comment.createdAt} title={new Date(comment.createdAt).toLocaleString()}>{relativeTime(comment.createdAt)}{comment.updatedAt !== comment.createdAt && ` · ${t('고침')}`}</time>
+            <span className="todo-spacer" />
+            {!readOnly && editing !== comment.id && <button type="button" className="icon-button" aria-label={t('댓글 편집')} onClick={() => setEditing(comment.id)}><Pencil size={12} /></button>}
+            {!readOnly && <button type="button" className="icon-button" aria-label={t('댓글 삭제')} onClick={() => { if (client.apply([{ op: 'comment.delete', id: comment.id }])) client.toast(t('댓글을 지웠습니다.'), 'info', client.undoActions()); }}><Trash2 size={12} /></button>}
+          </div>
+          {editing === comment.id
+            ? <CommentEditor initial={comment.body} onCancel={() => setEditing(null)} onSave={text => { client.apply([{ op: 'comment.update', id: comment.id, body: text }]); setEditing(null); }} />
+            : <TodoMarkdown>{comment.body}</TodoMarkdown>}
+          <AttachmentList files={files.filter(file => file.commentId === comment.id)} onDelete={readOnly ? undefined : file => removeFile(client, file)} />
+          <UploadRows jobs={jobs.filter(job => job.commentId === comment.id)} onCancel={key => uploads.cancel(key)} onRetry={key => uploads.retry(key)} />
+        </div>
+      </li>;
+    })}</ul>}
+    {!readOnly && <div className="todo-comment-compose">
+      <CommentAvatar author="owner" />
+      <form className={`todo-comment-form ${drop.over ? 'drop-target' : ''}`} onSubmit={event => { event.preventDefault(); void send(); }} {...drop.handlers}>
+        <textarea value={body} rows={body.includes('\n') ? 4 : 2} maxLength={15_000} placeholder={t('댓글 쓰기 (Markdown)')} aria-label={t('댓글')} onChange={event => setBody(event.target.value)}
+          onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(); } }} />
+        {pending.length > 0 && <ul className="todo-pending-files">{pending.map((file, index) => <li key={`${file.name}-${index}`}>
+          <Paperclip size={12} /><span>{file.name}</span><small>{sizeLabel(file.size)}</small>
+          <button type="button" className="icon-button" aria-label={t('“{0}” 빼기', { 0: file.name })} onClick={() => setPending(previous => previous.filter((_, position) => position !== index))}><X size={12} /></button>
+        </li>)}</ul>}
+        <div className="todo-comment-actions">
+          <AttachButton onFiles={add} compact />
+          <span className="todo-spacer" />
+          {(body.trim() || pending.length > 0) && <button type="submit" className="todo-primary" disabled={sending}>{t('댓글 달기')}</button>}
+        </div>
+      </form>
+    </div>}
   </section>;
 }
 
@@ -600,18 +626,21 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
     {chatting && task ? <AgentChat task={task} agent={agent} presets={world.chatPresets} client={client} readOnly={readOnly} onLeave={() => onTab('detail')} />
     : !task || !context ? <div className="todo-detail-empty">{error ? <p className="todo-error" role="alert">{error}</p> : <LoaderCircle className="spin" size={18} />}</div> : <div key={task.id} className="todo-detail-body">
       {/* A wide panel puts the properties in a card on the right; a phone shows them as chips under the title (todo.css). */}
-      <div className="todo-detail-heading">
-        <CheckCircle task={task} disabled={readOnly} onComplete={() => actions.complete(task)} onCompleteNext={() => onFollowUp(task, true)} onReopen={() => void actions.reopen(task)} />
-        <EditableTitle key={task.id} task={task} actions={actions} readOnly={readOnly} />
+      <div className="todo-detail-main">
+        <div className="todo-detail-heading">
+          <CheckCircle task={task} disabled={readOnly} onComplete={() => actions.complete(task)} onCompleteNext={() => onFollowUp(task, true)} onReopen={() => void actions.reopen(task)} />
+          <EditableTitle key={task.id} task={task} actions={actions} readOnly={readOnly} />
+        </div>
+        <Properties {...context} />
+        <div className="todo-description-area">
+          <Description key={`d-${task.id}`} task={task} client={client} readOnly={readOnly} />
+          <DescriptionFiles {...context} />
+        </div>
+        <Subtasks {...context} onOpen={onOpen} />
+        <Flow {...context} onOpen={onOpen} onFollowUp={onFollowUp} />
       </div>
-      <Properties {...context} />
-      <div className="todo-description-area">
-        <Description key={`d-${task.id}`} task={task} client={client} readOnly={readOnly} />
-        <DescriptionFiles {...context} />
-      </div>
-      <Subtasks {...context} onOpen={onOpen} />
+      {/* The whole width under the task, the property card included: the discussion and its captures. */}
       <Comments {...context} />
-      <Flow {...context} onOpen={onOpen} onFollowUp={onFollowUp} />
       <Completions {...context} />
       <Activity {...context} />
       {error && <p className="todo-error" role="alert">{error}</p>}

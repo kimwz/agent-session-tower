@@ -19,7 +19,7 @@ async function fixture(t: TestContext, prepare?: (dir: string) => void) {
   const store = make();
   store.start();
   t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
-  const apply = (...ops: TodoOp[]) => store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }));
+  const apply = (...ops: TodoOp[]) => store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }), 'owner');
   /** The open tasks of `date` in the order a date column shows them. */
   const day = (date: string) => store.overview().tasks.filter(task => task.dueDate === date).sort(compareDay).map(task => task.id);
   const task = (id: string) => store.overview().tasks.find(item => item.id === id) as TodoTask;

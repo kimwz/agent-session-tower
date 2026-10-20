@@ -18,7 +18,7 @@ async function fixture(t: TestContext, options: { runtime?: () => string | undef
   store.start();
   t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
   // Every request goes through the schema the HTTP route applies, so tests send only what the page can send.
-  const apply = (...ops: TodoOp[]) => store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }));
+  const apply = (...ops: TodoOp[]) => store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }), 'owner');
   const tick = (ms = 1000) => { clock = new Date(clock.getTime() + ms); };
   const task = (id: string) => store.overview().tasks.find(item => item.id === id);
   return { dir, store, make, apply, tick, task };
@@ -63,8 +63,8 @@ test('a request applies all of its operations or none, may refer to what it crea
   ), error => kind(error) === 'not-found');
   assert.deepEqual(store.overview(), before);
   const request = { requestId: randomUUID(), ops: [{ op: 'task.create', id: 't4', content: 'Once' }] as TodoOp[] };
-  const first = store.apply(request);
-  const second = store.apply(request);
+  const first = store.apply(request, 'owner');
+  const second = store.apply(request, 'owner');
   assert.deepEqual(second, first);
   assert.equal(store.overview().tasks.filter(task => task.id === 't4').length, 1);
   assert.equal(store.revision(), first.revision);
@@ -202,8 +202,8 @@ test('"complete and add the next task" is one request: all of it happens, or non
   assert.ok(task('a'));
   assert.equal(task('b'), undefined);
   const request = { requestId: randomUUID(), ops: [complete, { op: 'task.create', id: 'b', content: 'Review' }, { op: 'link.create', id: 'ab', fromTaskId: 'a', toTaskId: 'b' }] as TodoOp[] };
-  store.apply(request);
-  store.apply(request);
+  store.apply(request, 'owner');
+  store.apply(request, 'owner');
   assert.equal(task('a'), undefined);
   assert.deepEqual(store.overview().tasks.map(item => item.id), ['b']);
   assert.deepEqual(store.detail('b').previous.map(item => [item.task.id, Boolean(item.task.completedAt)]), [['a', true]]);
@@ -259,7 +259,7 @@ test('a file a newer Tower changed in meaning opens read-only; one it only added
   const additive = make();
   additive.start();
   assert.deepEqual(additive.availability(), { state: 'ready' });
-  additive.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'n', content: 'Written by an older build' }] });
+  additive.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'n', content: 'Written by an older build' }] }, 'owner');
   assert.equal(additive.overview().tasks.length, 1);
   additive.close();
   const raise = new DatabaseSync(join(dir, 'todos.sqlite'));
@@ -270,14 +270,14 @@ test('a file a newer Tower changed in meaning opens read-only; one it only added
   t.after(() => locked.close());
   assert.equal(locked.availability().state, 'read-only');
   assert.equal(locked.overview().tasks.length, 1);
-  assert.throws(() => locked.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'm', content: 'No' }] }), error => kind(error) === 'locked');
+  assert.throws(() => locked.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'm', content: 'No' }] }, 'owner'), error => kind(error) === 'locked');
 });
 
 test('an unusable runtime, a symlink or another program holding the file makes only todos unavailable, at once', async t => {
   const { store: refused } = await fixture(t, { runtime: () => 'SQLite is too old.' });
   assert.deepEqual(refused.availability(), { state: 'unavailable', reason: 'SQLite is too old.' });
   assert.equal(refused.overview().availability.state, 'unavailable');
-  assert.throws(() => refused.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'No' }] }), error => kind(error) === 'unavailable');
+  assert.throws(() => refused.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'No' }] }, 'owner'), error => kind(error) === 'unavailable');
 
   const linked = await mkdtemp(join(tmpdir(), 'tower-todos-link-'));
   t.after(() => rm(linked, { recursive: true, force: true }));
@@ -292,10 +292,10 @@ test('an unusable runtime, a symlink or another program holding the file makes o
   t.after(() => other.close());
   other.exec('BEGIN IMMEDIATE');
   const started = Date.now();
-  assert.throws(() => store.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'Blocked' }] }), error => kind(error) === 'unavailable');
+  assert.throws(() => store.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'Blocked' }] }, 'owner'), error => kind(error) === 'unavailable');
   assert.ok(Date.now() - started < 900, 'a held file is reported at once instead of stalling the web');
   other.exec('ROLLBACK');
-  store.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'Free again' }] });
+  store.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'Free again' }] }, 'owner');
 });
 
 test('completed tasks page newest first and search finds open tasks before done ones', async t => {
@@ -548,4 +548,26 @@ test('projects keep to three levels, never nest in themselves, and restore only 
   const tasks = store.overview().tasks.map(item => item.id);
   assert.ok(tasks.includes('m'));
   assert.ok(!tasks.includes('k'));
+});
+
+test('a comment is recorded as written by whoever sent it; editing keeps that, and one without a record reads as not recorded', async t => {
+  const { dir, store, make, apply } = await fixture(t);
+  apply({ op: 'task.create', id: 'a', content: 'Discussed' });
+  apply({ op: 'comment.create', id: 'mine', taskId: 'a', body: 'From the page' });
+  store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'comment.create', id: 'theirs', taskId: 'a', body: 'From a tool' }] }), 'agent');
+  // Not something a request can say: the schema refuses an author in it.
+  assert.equal(TodoRequestSchema.safeParse({ requestId: randomUUID(), ops: [{ op: 'comment.create', id: 'x', taskId: 'a', body: 'Me', author: 'owner' }] }).success, false);
+  store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'comment.update', id: 'mine', body: 'Edited by an agent' }] }), 'agent');
+  const authors = () => Object.fromEntries(store.detail('a').comments.map(comment => [comment.id, comment.author]));
+  assert.deepEqual(authors(), { mine: 'owner', theirs: 'agent' });
+  // What an older build writes (it names no author), or anything a file holds that is not one of the two.
+  store.close();
+  const db = new DatabaseSync(join(dir, 'todos.sqlite'));
+  db.prepare('INSERT INTO todo_comments (id, task_id, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run('old', 'a', 'Before authors', '2026-10-17T09:00:01.000Z', '2026-10-17T09:00:01.000Z');
+  assert.throws(() => db.prepare("UPDATE todo_comments SET author = 'master' WHERE id = 'old'").run(), /CHECK/);
+  db.close();
+  const reopened = make();
+  reopened.start();
+  t.after(() => reopened.close());
+  assert.deepEqual(Object.fromEntries(reopened.detail('a').comments.map(comment => [comment.id, comment.author])), { mine: 'owner', theirs: 'agent', old: null });
 });

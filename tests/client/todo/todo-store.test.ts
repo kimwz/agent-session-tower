@@ -394,7 +394,7 @@ test('the open task’s file count follows its detail, so answers arriving out o
   const file = (id: string, commentId: string | null = null): TodoFile => ({ id, taskId: 'a', commentId, name: id, mimeType: 'text/plain', size: 1, sha256: 'x'.repeat(64), createdAt: at, deletedAt: null });
   // The overview was read before the second upload finished; the detail after.
   let world = worldFromOverview(overview([task('a')], { fileCounts: { a: 1 } }));
-  world = withDetail(world, { task: world.tasks.a, subtasks: [], comments: [{ id: 'c', taskId: 'a', body: 'x', createdAt: at, updatedAt: at, deletedAt: null }], completions: [], events: [], previous: [], next: [], files: [file('f1'), file('f2'), file('f3', 'c')] });
+  world = withDetail(world, { task: world.tasks.a, subtasks: [], comments: [{ id: 'c', taskId: 'a', body: 'x', author: 'owner', createdAt: at, updatedAt: at, deletedAt: null }], completions: [], events: [], previous: [], next: [], files: [file('f1'), file('f2'), file('f3', 'c')] });
   assert.equal(world.fileCounts.a, 3);
   world = mergeChanges(world, changes(5, { files: [file('f2')] }));
   assert.equal(world.fileCounts.a, 3);

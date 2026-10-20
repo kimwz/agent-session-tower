@@ -74,7 +74,7 @@ async function fixture(t: TestContext) {
   t.after(async () => { agents.close(); store.close(); await rm(dir, { recursive: true, force: true }); });
   // As the web answers a change (server/index.ts): the masters it moved, at the revision that moved them.
   const apply = (...ops: TodoOp[]) => {
-    const answer = store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }));
+    const answer = store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }), 'owner');
     const moved = agents.settle(answer.tasks.map(task => task.id));
     return { ...answer, revision: Object.keys(moved).length ? store.revision() : answer.revision, agents: moved };
   };
@@ -239,13 +239,13 @@ test('a request sent again answers what it did first and moves no master', async
   apply({ op: 'task.create', id: 'a', content: 'A' });
   await agents.begin('a', 'go');
   const request = TodoRequestSchema.parse({ requestId: randomUUID(), ops: [complete('a', 'ca')] });
-  const first = store.apply(request);
+  const first = store.apply(request, 'owner');
   assert.equal(agents.settle(first.tasks.map(task => task.id)).a?.state, 'closing');
   await agents.schedule();
   apply({ op: 'task.uncomplete', id: 'a', completionId: 'ca' });
   await agents.schedule();
   assert.equal(store.agent('a')!.state, 'active');
-  const again = store.apply(request);
+  const again = store.apply(request, 'owner');
   assert.deepEqual(agents.settle(again.tasks.map(task => task.id)), {});
   assert.equal(store.agent('a')!.state, 'active');
 });
@@ -277,7 +277,7 @@ test('a pass compares only the masters not closed; a change only the todos it to
   await agents.schedule();
   assert.equal(store.agent('a')!.state, 'closed');
   // Reopened behind the web's back (an older build, a copy put back): an ordinary pass does not look at closed masters…
-  store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'task.uncomplete', id: 'a', completionId: 'ca' }] }));
+  store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'task.uncomplete', id: 'a', completionId: 'ca' }] }), 'owner');
   assert.deepEqual(agents.settle(['other']), {});
   await agents.schedule();
   assert.equal(store.agent('a')!.state, 'closed');
@@ -395,7 +395,7 @@ test('nothing is decided while the sessions cannot be known', async t => {
   const agents = new TodoAgents({ stateDir: dir, store, sessions: () => undefined, run: () => undefined,
     reopen: async () => { asked++; }, requestArchive: async () => { asked++; }, withdrawArchive: async () => { asked++; }, createSession: async () => { throw new Error('unused'); }, uncertain: () => false,
     model: async () => ({ provider: 'codex' }), writeGuide: async () => {}, removeGuide: async () => {}, startHost: async () => {}, onChange: () => {} });
-  store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'A' }] }));
+  store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'A' }] }), 'owner');
   store.changeAgent('a', null, { state: 'active', sessionId: 's', provider: 'codex' });
   await agents.schedule();
   assert.equal(asked, 0);
@@ -408,7 +408,7 @@ const detail = (overrides: Partial<TodoTaskDetail['task']> = {}, extra: Partial<
   subtasks: [], comments: [], files: [], ...extra,
 });
 const names = { projects: [{ id: 'work', name: 'Work', inbox: false }], sections: [{ id: 'doing', name: 'Doing' }], labels: [{ id: 'l1', name: 'urgent' }] } as never;
-const comment = (index: number, body: string) => ({ id: `c${index}`, taskId: 't1', body, createdAt: `2026-10-17T09:${String(index % 60).padStart(2, '0')}:00.000Z`, updatedAt: '', deletedAt: null });
+const comment = (index: number, body: string, author: 'owner' | 'agent' | null = null) => ({ id: `c${index}`, taskId: 't1', body, author, createdAt: `2026-10-17T09:${String(index % 60).padStart(2, '0')}:00.000Z`, updatedAt: '', deletedAt: null });
 
 test('the first prompt carries the todo as data: names, dates, sub-tasks, the latest 20 comments and attachments at their paths', () => {
   const prompt = todoAgentPrompt('봐줘', detail({}, {
@@ -427,6 +427,11 @@ test('the first prompt carries the todo as data: names, dates, sub-tasks, the la
   assert.match(prompt, /- gone.pdf \(10 B, 댓글 첨부\): 이 컴퓨터에 없음/);
   assert.match(prompt, /시작하기 전에 첨부 파일\(이미지·문서\)을 먼저 읽으세요\./);
   assert.doesNotMatch(prompt, /todos_get/);
+});
+
+test('each comment in the first prompt says who wrote it, where that was recorded', () => {
+  const prompt = todoAgentPrompt('봐줘', detail({}, { comments: [comment(1, 'mine', 'owner'), comment(2, 'report', 'agent'), comment(3, 'old')] }), names, sha256 => sha256);
+  assert.match(prompt, /- 2026-10-17T09:01:00.000Z · 소유자\n  mine\n- 2026-10-17T09:02:00.000Z · 에이전트\n  report\n- 2026-10-17T09:03:00.000Z\n  old/);
 });
 
 test('a prompt too long for the limit cuts the description and the oldest comments, and says where the rest is', () => {
@@ -472,7 +477,7 @@ test('a closed master keeps collecting: a late start in its folder is handed ove
 test('after a restart, an open todo\'s master is taken back from retention once, in case a hand-over was left', async t => {
   const { dir, store, sessions } = await fixture(t);
   const calls: string[] = [];
-  store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'A' }] }));
+  store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 'a', content: 'A' }] }), 'owner');
   store.changeAgent('a', null, { state: 'active', sessionId: 'm', provider: 'claude' });
   sessions.push({ id: 'm', cwd: todoMasterFolder(dir, 'a'), provider: 'claude', status: 'idle', createdAt: '2026-10-17T09:00:00.000Z', isSubagent: false });
   // A family member not marked as leaving is not asked about (an older worker would refuse the question).

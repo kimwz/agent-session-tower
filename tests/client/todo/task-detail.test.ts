@@ -11,12 +11,13 @@ import { forgetFoldedForTests } from '../../../client/src/todo/todo-prefs.js';
 import { movePreset, presetsDirty, presetsToSave, shownChatPresets } from '../../../client/src/todo/chat-presets.js';
 import { setLanguage } from '../../../client/src/i18n/i18n.js';
 import { overview, task } from './fixtures.js';
+import type { TodoComment } from '../../../shared/todo/types.js';
 
 // Each test brings its own browser stub (storage, window size) and leaves none behind.
 afterEach(() => { delete (globalThis as { window?: unknown }).window; });
 
-const render = (item: ReturnType<typeof task>, options: { tab?: 'detail' | 'chat'; chatPresets?: string[]; readOnly?: boolean } = {}) => {
-  const world = withDetail(worldFromOverview({ ...overview([item]), ...(options.chatPresets ? { chatPresets: options.chatPresets } : {}) }, emptyWorld()), { task: item, subtasks: [], comments: [], files: [], completions: [], events: [], previous: [], next: [] });
+const render = (item: ReturnType<typeof task>, options: { tab?: 'detail' | 'chat'; chatPresets?: string[]; readOnly?: boolean; comments?: TodoComment[] } = {}) => {
+  const world = withDetail(worldFromOverview({ ...overview([item]), ...(options.chatPresets ? { chatPresets: options.chatPresets } : {}) }, emptyWorld()), { task: item, subtasks: [], comments: options.comments ?? [], files: [], completions: [], events: [], previous: [], next: [] });
   const uploads = { subscribe: () => () => undefined, getJobs: () => [], add() {}, cancel() {}, retry() {} };
   return renderToStaticMarkup(createElement(TaskDetail, { taskId: item.id, world, error: '', today: '2026-10-14', client: { today: () => '2026-10-14' } as never, actions: {} as never,
     readOnly: options.readOnly ?? false, uploads: uploads as never, onClose() {}, onOpen() {}, onProject() {}, onFollowUp() {}, tab: options.tab ?? 'detail', onTab() {} }));
@@ -132,4 +133,19 @@ test('the presets editor saves trimmed rows without blanks, and a drag moves one
   assert.equal(presetsDirty(['설계 해줘', '작업 시작 해줘'], start), true, 'a new order is an edit');
   assert.equal(presetsDirty(['작업 시작 해줘 ', '설계 해줘'], start), false, 'spaces around are trimmed on saving');
   assert.equal(presetsDirty(['작업 시작 해줘'], start), true);
+});
+
+test('the comments are a region of their own after the task, each card saying who wrote it, and the box writes as the owner', () => {
+  const at = '2026-10-14T01:00:00.000Z';
+  const comment = (id: string, author: TodoComment['author']): TodoComment => ({ id, taskId: 'a', body: `body ${id}`, author, createdAt: at, updatedAt: at, deletedAt: null });
+  const markup = render(task('a'), { comments: [comment('c1', 'owner'), comment('c2', 'agent'), comment('c3', null)] });
+  const region = markup.indexOf('todo-comments-area');
+  assert.ok(markup.indexOf('>하위 작업<') < region, 'after the task itself');
+  assert.deepEqual([...markup.matchAll(/<li class="todo-comment (\w+)">/g)].map(match => match[1]), ['owner', 'agent', 'unknown'], 'oldest first, each marked with its writer');
+  assert.deepEqual([...markup.matchAll(/class="todo-comment-author"[^>]*>([^<]+)</g)].map(match => match[1]), ['나', '에이전트', '작성자 기록 없음']);
+  assert.match(markup, /title="이 댓글에는 작성자 정보가 저장되어 있지 않습니다"/);
+  assert.match(markup, /<div class="todo-comment-compose"><span class="todo-comment-avatar owner"/, 'the box is the owner’s');
+  const readOnly = render(task('a'), { comments: [comment('c1', 'agent')], readOnly: true });
+  assert.doesNotMatch(readOnly, /todo-comment-compose|aria-label="댓글 삭제"/);
+  assert.match(readOnly, /<li class="todo-comment agent">/);
 });

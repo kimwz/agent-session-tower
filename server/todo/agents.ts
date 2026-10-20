@@ -503,6 +503,7 @@ const indent = (text: string) => text.split('\n').map(line => `  ${line}`).join(
 const size = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 const MARK = '--- 이 할 일의 내용 (Tower가 붙인 참고 데이터) ---';
 const CUT = '(길어서 일부를 줄였습니다. todos_get으로 전체를 읽으세요.)';
+const COMMENT_AUTHORS = { owner: '소유자', agent: '에이전트' } as const;
 
 /**
  * The first message of an issue master: the owner's text, then the todo as data (what it is, sub-tasks, recent
@@ -535,7 +536,8 @@ export function todoAgentPrompt(text: string, detail: Pick<TodoTaskDetail, 'task
     ...files.length ? ['첨부 파일:', ...files, read] : [],
     ...cut ? [CUT] : [],
   ].join('\n');
-  const all = comments.map(comment => ({ at: comment.createdAt, body: comment.body }));
+  // Its line says who wrote it, where that was recorded, so the owner's words stand apart from agents' reports.
+  const all = comments.map(comment => ({ at: `${comment.createdAt}${comment.author ? ` · ${COMMENT_AUTHORS[comment.author]}` : ''}`, body: comment.body }));
   const whole = compose(task.description, subtasks, all, false);
   if (whole.length <= limit) return whole;
   // What the master needs before anything else (what the todo is, where its files are) always goes in; a first

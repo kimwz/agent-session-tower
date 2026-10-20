@@ -379,7 +379,8 @@ const OPTIMISTIC: { [N in TodoOp['op']]?: (world: TodoWorld, op: TodoOpOf<N>, co
     ...(op.patch.favorite !== undefined ? { favorite: op.patch.favorite } : {}), updatedAt: now,
   }) }),
   'label.delete': (world, op) => ({ ...world, labels: world.labels.filter(label => label.id !== op.id) }),
-  'comment.create': (world, op, { now }) => withComments(world, [{ id: op.id, taskId: op.taskId, body: op.body, createdAt: now, updatedAt: now, deletedAt: null }]),
+  // The page is the owner's own, so its comment is theirs (the server records it so too).
+  'comment.create': (world, op, { now }) => withComments(world, [{ id: op.id, taskId: op.taskId, body: op.body, author: 'owner', createdAt: now, updatedAt: now, deletedAt: null }]),
   'comment.update': (world, op, { now }) => {
     const comment = world.detail?.comments.find(item => item.id === op.id);
     return comment ? withComments(world, [{ ...comment, body: op.body, updatedAt: now }]) : world;
