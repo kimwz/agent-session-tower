@@ -9,7 +9,7 @@ import { PanelResizeHandle, usePanelWidth } from '../common/panel-resize';
 import { getLanguage, translate as t } from '../i18n/i18n';
 import { DatePicker, type DateValue } from './DatePicker';
 import { Menu, Popover, usePopover, type MenuItem } from './Popover';
-import { AgentIcon, CheckCircle } from './TaskCard';
+import { AgentIcon, CheckCircle, SubtaskAgent } from './TaskCard';
 import { shownChatPresets } from './chat-presets';
 import { TodoAgentContext } from './todo-agents';
 import { TodoMarkdown } from './TodoMarkdown';
@@ -200,8 +200,8 @@ function Description({ task, client, readOnly }: { task: TodoTask; client: TodoC
   </div>;
 }
 
-/** A sub-task's row, put in order among its siblings by its grip. */
-function SubtaskRow({ task, depth, readOnly, actions, client, onOpen }: { task: TodoTask; depth: number; readOnly: boolean; actions: TodoActions; client: TodoClient; onOpen: (id: string) => void }) {
+/** A sub-task's row, put in order among its siblings by its grip; with an issue master, it shows it as a card does. */
+function SubtaskRow({ task, depth, readOnly, actions, client, onOpen, onChat, agent }: { task: TodoTask; depth: number; readOnly: boolean; actions: TodoActions; client: TodoClient; onOpen: (id: string) => void; onChat: (id: string) => void; agent: TodoAgent | undefined }) {
   const sortable = useSortable({ id: task.id, data: { parentId: task.parentId }, disabled: readOnly });
   const style: CSSProperties = { paddingLeft: depth * 20, transform: sortable.transform ? `translate3d(0, ${Math.round(sortable.transform.y)}px, 0)` : undefined, transition: sortable.transition, opacity: sortable.isDragging ? 0.4 : undefined };
   return <li ref={sortable.setNodeRef} className={task.completedAt ? 'done' : ''} style={style}>
@@ -209,10 +209,11 @@ function SubtaskRow({ task, depth, readOnly, actions, client, onOpen }: { task: 
     <CheckCircle task={task} size="small" disabled={readOnly} onComplete={() => actions.complete(task)} onReopen={() => void actions.reopen(task)} />
     <button type="button" onClick={() => onOpen(task.id)}>{task.content}</button>
     {task.dueDate && <span className="todo-chip">{dateLabel(task.dueDate, client.today())}</span>}
+    {agent && <SubtaskAgent task={task} agent={agent} onChat={onChat} />}
   </li>;
 }
 
-function Subtasks({ task, world, actions, client, onOpen, readOnly }: DetailContext & { onOpen: (id: string) => void }) {
+function Subtasks({ task, world, actions, client, onOpen, onChat, readOnly }: DetailContext & { onOpen: (id: string) => void; onChat: (id: string) => void }) {
   const [name, setName] = useState('');
   const [adding, setAdding] = useState(false);
   const sensors = useTodoSensors();
@@ -240,7 +241,7 @@ function Subtasks({ task, world, actions, client, onOpen, readOnly }: DetailCont
     <h4>{t('하위 작업')}{own.length > 0 && <span>{own.length - open}/{own.length}</span>}</h4>
     {rows.length > 0 && <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onEnd}>
       <SortableContext items={rows.map(row => row.task.id)} strategy={verticalListSortingStrategy}>
-        <ul className="todo-subtask-list">{rows.map(({ task: child, depth }) => <SubtaskRow key={child.id} task={child} depth={depth} readOnly={readOnly} actions={actions} client={client} onOpen={onOpen} />)}</ul>
+        <ul className="todo-subtask-list">{rows.map(({ task: child, depth }) => <SubtaskRow key={child.id} task={child} depth={depth} readOnly={readOnly} actions={actions} client={client} onOpen={onOpen} onChat={onChat} agent={world.agents[child.id]} />)}</ul>
       </SortableContext>
     </DndContext>}
     {!readOnly && !task.completedAt && (adding ? <form className="todo-inline-add" onSubmit={event => { event.preventDefault(); add(); }}>
@@ -636,7 +637,8 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
           <Description key={`d-${task.id}`} task={task} client={client} readOnly={readOnly} />
           <DescriptionFiles {...context} />
         </div>
-        <Subtasks {...context} onOpen={onOpen} />
+        {/* A sub-task's icon opens its chat, as a card's does. */}
+        <Subtasks {...context} onOpen={onOpen} onChat={id => { onOpen(id); onTab('chat'); }} />
         <Flow {...context} onOpen={onOpen} onFollowUp={onFollowUp} />
       </div>
       {/* The whole width under the task, the property card included: the discussion and its captures. */}

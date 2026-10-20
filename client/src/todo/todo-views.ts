@@ -333,13 +333,17 @@ export const SUBTASKS_SHOWN = 3;
  * The sub-tasks a card lists, a run of them in their order: from the completed one just before the first open one, so
  * a card shows where its work stands (1–6 with 1 and 2 done lists 2, 3, 4). The run moves back to end with the last
  * one when fewer follow, and with none open it is the last ones. `more` is how many are left out.
+ *
+ * Open sub-tasks `kept` (at work) are never left out: outside the run they show too, in their order, and a folded card
+ * (`folded`) lists only them, with nothing counted as more.
  */
-export function subtaskWindow<T extends Pick<TodoTask, 'completedAt'>>(subtasks: readonly T[]): { shown: T[]; more: number } {
+export function subtaskWindow<T extends Pick<TodoTask, 'completedAt'>>(subtasks: readonly T[], kept: (task: T) => boolean = () => false, folded = false): { shown: T[]; more: number } {
   const last = subtasks.length - SUBTASKS_SHOWN;
-  if (last <= 0) return { shown: [...subtasks], more: 0 };
   const open = subtasks.findIndex(task => !task.completedAt);
-  const start = open < 0 ? last : Math.min(Math.max(open - 1, 0), last);
-  return { shown: subtasks.slice(start, start + SUBTASKS_SHOWN), more: last };
+  const start = last <= 0 ? 0 : open < 0 ? last : Math.min(Math.max(open - 1, 0), last);
+  const inRun = (index: number) => !folded && index >= start && index < start + SUBTASKS_SHOWN;
+  const shown = subtasks.filter((task, index) => inRun(index) || (!task.completedAt && kept(task)));
+  return { shown, more: folded ? 0 : subtasks.length - shown.length };
 }
 
 /**

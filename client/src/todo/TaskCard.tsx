@@ -116,12 +116,9 @@ export interface TaskCardProps {
 }
 
 export function TaskCard({ task, context, selected, onOpen, onComplete, onCompleteNext, onReopen, onMenu, onSelect, selectId = task.id, onFiles, readOnly, onChat }: TaskCardProps) {
-  // Sub-tasks show unless the owner folded them on this card; the fold is remembered (todo-prefs.ts). A few of them
-  // show, completed ones struck through (`subtaskWindow`); all of them are in the task's detail.
-  const [folded, setFolded] = useState(() => subtasksFolded(task.id));
   // A completed card (the completed list) lists none: its sub-tasks are in its detail.
   const listed = task.completedAt ? [] : (context.children.get(task.id) ?? []).filter(child => !context.shown?.has(child.id));
-  const { shown: children, more } = subtaskWindow(listed);
+  const subtasks: CardSubtasksProps = { task, listed, world: context.world, readOnly, onOpen, onComplete, onReopen, onChat };
   const chips = CARD_META.filter(chip => chip.visible(task, context));
   const agent = context.world.agents[task.id];
   // A file dragged from the computer is not a card being dragged (dnd-kit follows the pointer, not HTML drag events).
@@ -157,17 +154,64 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
       </button>}
       {onMenu && !readOnly && <button type="button" className="todo-card-more icon-button" aria-label={t('작업 메뉴')} onClick={event => { event.stopPropagation(); onMenu(task, event.currentTarget); }}><MoreHorizontal size={15} /></button>}
     </div>
-    {(children.length > 0 || (!task.completedAt && (context.world.subtaskCounts[task.id]?.total ?? 0) > 0)) && <div className="todo-card-subtasks">
-      <button type="button" className="todo-subtask-toggle" aria-expanded={!folded} onClick={event => { event.stopPropagation(); setSubtasksFolded(task.id, !folded); setFolded(!folded); }}>
-        <ChevronRight size={12} />{subtaskToggleText(context.world, task.id, listed.filter(isOpen).length)}
-      </button>
-      {!folded && <ul>{children.map(child => <li key={child.id} className={child.completedAt ? 'done' : undefined}>
-        <CheckCircle task={child} size="small" disabled={readOnly} onComplete={() => onComplete(child)} onReopen={onReopen && (() => onReopen(child))} />
-        <button type="button" className="todo-subtask-title" onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{child.content}</button>
-      </li>)}</ul>}
-      {!folded && more > 0 && <button type="button" className="todo-subtask-more" {...OWN_PRESS} onClick={event => { event.stopPropagation(); onOpen(task.id); }}>{t('{0}건 더 있음', { 0: more })}</button>}
-    </div>}
+    {(listed.length > 0 || (!task.completedAt && (context.world.subtaskCounts[task.id]?.total ?? 0) > 0)) &&
+      (listed.some(child => context.world.agents[child.id]) ? <LiveSubtasks {...subtasks} /> : <CardSubtasks {...subtasks} />)}
   </div>;
+}
+
+interface CardSubtasksProps extends Pick<TaskCardProps, 'task' | 'readOnly' | 'onOpen' | 'onComplete' | 'onReopen' | 'onChat'> {
+  /** The sub-tasks the card lists, in their order. */
+  listed: TodoTask[];
+  world: TodoWorld;
+  /** Sub-tasks at work: never left out of the list. */
+  working?: (task: TodoTask) => boolean;
+}
+
+/**
+ * The list of a card that has a sub-task with an issue master: it reads the sessions to know which of them work, so only
+ * such cards draw again on a session's update.
+ */
+function LiveSubtasks(props: CardSubtasksProps) {
+  const { session, running } = useContext(TodoAgentContext);
+  const working = (child: TodoTask) => {
+    const agent = props.world.agents[child.id];
+    return !!agent && agentLook(agent, agent.sessionId ? session(agent.sessionId) : undefined, running(child.id)).status === 'working';
+  };
+  return <CardSubtasks {...props} working={working} />;
+}
+
+/**
+ * A card's sub-tasks. They show unless the owner folded them on this card; the fold is remembered (todo-prefs.ts). A few
+ * of them show, completed ones struck through, and those at work whatever the fold (`subtaskWindow`); all of them are in
+ * the task's detail.
+ */
+function CardSubtasks({ task, listed, world, working, readOnly, onOpen, onComplete, onReopen, onChat }: CardSubtasksProps) {
+  const [folded, setFolded] = useState(() => subtasksFolded(task.id));
+  const { shown, more } = subtaskWindow(listed, working, folded);
+  return <div className="todo-card-subtasks">
+    <button type="button" className="todo-subtask-toggle" aria-expanded={!folded} onClick={event => { event.stopPropagation(); setSubtasksFolded(task.id, !folded); setFolded(!folded); }}>
+      <ChevronRight size={12} />{subtaskToggleText(world, task.id, listed.filter(isOpen).length)}
+    </button>
+    {shown.length > 0 && <ul>{shown.map(child => <li key={child.id} className={child.completedAt ? 'done' : undefined}>
+      <CheckCircle task={child} size="small" disabled={readOnly} onComplete={() => onComplete(child)} onReopen={onReopen && (() => onReopen(child))} />
+      <button type="button" className="todo-subtask-title" onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{child.content}</button>
+      {world.agents[child.id] && <SubtaskAgent task={child} agent={world.agents[child.id]} onChat={onChat} />}
+    </li>)}</ul>}
+    {more > 0 && <button type="button" className="todo-subtask-more" {...OWN_PRESS} onClick={event => { event.stopPropagation(); onOpen(task.id); }}>{t('{0}건 더 있음', { 0: more })}</button>}
+  </div>;
+}
+
+/**
+ * A sub-task's issue master on its row (a card's list, the parent's detail), as a card shows its own: the moving border
+ * while it works (not on a completed one), and its icon, which opens that sub-task's chat.
+ */
+export function SubtaskAgent({ task, agent, onChat }: { task: TodoTask; agent: TodoAgent; onChat?: (id: string) => void }) {
+  return <>
+    {!task.completedAt && <AgentActivity agent={agent} />}
+    {onChat ? <button type="button" className="todo-subtask-chat icon-button" aria-label={t('이슈 채팅')} title={t('이슈 채팅')}
+      {...OWN_PRESS} onClick={event => { event.stopPropagation(); onChat(task.id); }}><AgentIcon agent={agent} /></button>
+      : <span className="todo-subtask-chat"><AgentIcon agent={agent} /></span>}
+  </>;
 }
 
 /** The first line of a Markdown description, without its marks. */
