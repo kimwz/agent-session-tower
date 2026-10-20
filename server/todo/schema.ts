@@ -106,6 +106,27 @@ export const TODO_SCHEMA: readonly TodoSchemaStep[] = [
   { sql: 'CREATE TABLE todo_agent_jobs (job_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, created_at TEXT NOT NULL) STRICT;' },
   // Who wrote a comment (TodoCommentAuthor). An older build's comments, and every earlier one, leave it NULL: not recorded.
   { sql: "ALTER TABLE todo_comments ADD COLUMN author TEXT CHECK (author IN ('owner', 'agent'));" },
+  // GitHub sync (server/todo/github/): repositories linked to projects or sections, and which issue, comment and
+  // uploaded file each todo thing is. `synced_hash` is what Tower last knew GitHub to show; NULL sends it again.
+  { sql: `
+    CREATE TABLE todo_github_bindings (
+      id TEXT PRIMARY KEY, scope_kind TEXT NOT NULL CHECK (scope_kind IN ('project', 'section')), scope_id TEXT NOT NULL,
+      repo TEXT NOT NULL, account TEXT NOT NULL, polled_at TEXT, error TEXT, created_at TEXT NOT NULL, deleted_at TEXT
+    ) STRICT;
+    CREATE UNIQUE INDEX todo_github_bindings_scope ON todo_github_bindings(scope_kind, scope_id) WHERE deleted_at IS NULL;
+    CREATE TABLE todo_github_issues (
+      task_id TEXT PRIMARY KEY, repo TEXT NOT NULL, number INTEGER NOT NULL, issue_id INTEGER NOT NULL, url TEXT NOT NULL,
+      synced_hash TEXT, gh_updated_at TEXT NOT NULL, extra_labels TEXT NOT NULL DEFAULT '[]', parent_number INTEGER, error TEXT
+    ) STRICT;
+    CREATE INDEX todo_github_issues_number ON todo_github_issues(repo, number);
+    CREATE TABLE todo_github_comments (
+      comment_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, github_id INTEGER NOT NULL, url TEXT NOT NULL,
+      origin TEXT NOT NULL CHECK (origin IN ('tower', 'github')), login TEXT, synced_hash TEXT, gh_updated_at TEXT NOT NULL, error TEXT
+    ) STRICT;
+    CREATE UNIQUE INDEX todo_github_comments_github ON todo_github_comments(github_id);
+    CREATE INDEX todo_github_comments_task ON todo_github_comments(task_id);
+    CREATE TABLE todo_github_files (file_id TEXT NOT NULL, repo TEXT NOT NULL, url TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (file_id, repo)) STRICT;
+  ` },
 ];
 
 export const TODO_SCHEMA_STEP = TODO_SCHEMA.length;
@@ -116,7 +137,7 @@ export const TODO_SCHEMA_STEP = TODO_SCHEMA.length;
  * belong to.
  */
 export const TODO_DATA_TABLES = ['todo_projects', 'todo_sections', 'todo_labels', 'todo_tasks', 'todo_task_labels', 'todo_links', 'todo_comments',
-  'todo_completions', 'todo_events', 'todo_files'] as const;
+  'todo_completions', 'todo_events', 'todo_files', 'todo_github_bindings', 'todo_github_issues', 'todo_github_comments', 'todo_github_files'] as const;
 
 /** The lowest step whose code may write a file at `step` applied steps. */
 export const minWriterAt = (step: number) => TODO_SCHEMA.slice(0, step).reduce((min, item) => Math.max(min, item.minWriter ?? 1), 1);

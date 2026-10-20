@@ -22,7 +22,16 @@ export interface TodoTransport {
   apply(request: TodoRequest): Promise<TodoChanges>;
   /** Starts a todo's issue master with the owner's first message; the answer may name the agent it recorded. */
   startAgent(taskId: string, text: string): Promise<{ agent?: TodoAgent } | undefined>;
+  /** Linking projects and sections to GitHub repositories (the owner's page only). */
+  github?: {
+    check(repo: string): Promise<TodoGitHubCheck>;
+    link(kind: 'project' | 'section', id: string, repo: string): Promise<unknown>;
+    unlink(id: string): Promise<unknown>;
+  };
 }
+
+/** Who gh is signed in as on the Tower's computer, and what that account may do in a repository. */
+export interface TodoGitHubCheck { login: string; repo: string; private: boolean; canPush: boolean }
 
 export function httpTransport(token: () => string): TodoTransport {
   const post = (path: string, body: unknown) => api<TodoChanges>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token() }, body: JSON.stringify(body) });
@@ -41,6 +50,11 @@ export function httpTransport(token: () => string): TodoTransport {
     search: async (query, completed) => (await api<{ tasks: TodoTask[] }>(`/api/todos/search?${new URLSearchParams({ q: query, ...(completed ? { completed: '1' } : {}) })}`)).tasks,
     apply: request => post('/api/todos/ops', request),
     startAgent: (taskId, text) => api<{ agent?: TodoAgent } | undefined>(`/api/todos/tasks/${encodeURIComponent(taskId)}/agent`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token() }, body: JSON.stringify({ text }) }),
+    github: {
+      check: repo => api<TodoGitHubCheck>('/api/todos/github/check', { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token() }, body: JSON.stringify({ repo }) }),
+      link: (kind, id, repo) => api('/api/todos/github/bindings', { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token() }, body: JSON.stringify({ kind, id, repo }) }),
+      unlink: id => api(`/api/todos/github/bindings/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { [REQUEST_TOKEN_HEADER]: token() } }),
+    },
   };
 }
 
@@ -352,6 +366,27 @@ export class TodoClient {
       this.base = { ...this.base, agents: withAgents(this.base.agents, { [taskId]: agent }) };
       this.publish();
     }
+    this.wantRead = true;
+    this.pump();
+  }
+
+  /** Who gh is signed in as and what it may do in `repo`; a refusal throws with GitHub's words. */
+  githubCheck(repo: string): Promise<TodoGitHubCheck> {
+    if (!this.transport.github) return Promise.reject(new Error(t('GitHub 연결을 사용할 수 없습니다.')));
+    return this.transport.github.check(repo);
+  }
+
+  /** Links a project or section (or ends a link); the overview is read again for what the server recorded. */
+  async githubLink(kind: 'project' | 'section', id: string, repo: string): Promise<void> {
+    if (!this.transport.github) throw new Error(t('GitHub 연결을 사용할 수 없습니다.'));
+    await this.transport.github.link(kind, id, repo);
+    this.wantRead = true;
+    this.pump();
+  }
+
+  async githubUnlink(id: string): Promise<void> {
+    if (!this.transport.github) throw new Error(t('GitHub 연결을 사용할 수 없습니다.'));
+    await this.transport.github.unlink(id);
     this.wantRead = true;
     this.pump();
   }

@@ -1,7 +1,7 @@
 import { useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { closestCenter, DndContext, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
-import { ArrowLeft, ArrowRight, ArrowUpFromLine, Bot, CalendarDays, Check, CheckCheck, ChevronDown, Clock3, Copy, CornerDownRight, CornerLeftUp, Flag, GripVertical, History, Link, Link2, LoaderCircle, MessageSquare, MoreHorizontal, Paperclip, Pencil, Plus, Send, Tag, Trash2, User, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowUpFromLine, Bot, CalendarDays, Check, CheckCheck, ChevronDown, Clock3, Copy, CornerDownRight, CornerLeftUp, Flag, Github, GripVertical, History, Link, Link2, LoaderCircle, MessageSquare, MoreHorizontal, Paperclip, Pencil, Plus, Send, Tag, Trash2, User, X } from 'lucide-react';
 import type { TodoAgent, TodoComment, TodoEvent, TodoFile, TodoPriority, TodoTask } from '../../../shared/todo/types';
 import { liveProjectIds } from '../../../shared/todo/compose';
 import { relativeTime } from '../common/lib';
@@ -340,10 +340,11 @@ function CommentEditor({ initial, onSave, onCancel }: { initial: string; onSave:
 }
 
 /** How a comment shows who wrote it: the owner, an agent, or neither where that was not recorded (TodoComment.author). */
-type CommentAuthorKey = NonNullable<TodoComment['author']> | 'unknown';
+type CommentAuthorKey = NonNullable<TodoComment['author']> | 'github' | 'unknown';
 const COMMENT_AUTHORS: Record<CommentAuthorKey, { name: string; icon: ReactNode; title?: string }> = {
   owner: { name: '나', icon: <User size={14} /> },
   agent: { name: '에이전트', icon: <Bot size={15} /> },
+  github: { name: 'GitHub', icon: <Github size={14} />, title: 'GitHub 이슈에서 온 댓글입니다. GitHub에서만 고칠 수 있습니다.' },
   unknown: { name: '작성자 기록 없음', icon: <MessageSquare size={13} />, title: '이 댓글에는 작성자 정보가 저장되어 있지 않습니다' },
 };
 
@@ -382,16 +383,19 @@ function Comments({ task, world, client, readOnly, uploads }: DetailContext) {
   return <section className="todo-detail-section todo-comments-area" aria-label={t('댓글')}>
     <h4><MessageSquare size={13} />{t('댓글')}{comments.length > 0 && <span>{comments.length}</span>}</h4>
     {comments.length > 0 && <ul className="todo-comments">{comments.map(comment => {
-      const author: CommentAuthorKey = comment.author ?? 'unknown', who = COMMENT_AUTHORS[author];
+      const author: CommentAuthorKey = comment.external ? 'github' : comment.author ?? 'unknown', who = COMMENT_AUTHORS[author];
+      // A comment from GitHub is someone's words there: it is changed only on GitHub.
+      const fixed = readOnly || !!comment.external;
       return <li key={comment.id} className={`todo-comment ${author}`}>
         <CommentAvatar author={author} />
         <div className="todo-comment-card">
           <div className="todo-comment-meta">
-            <strong className="todo-comment-author" title={who.title && t(who.title)}>{t(who.name)}</strong>
+            <strong className="todo-comment-author" title={who.title && t(who.title)}>{comment.external
+              ? <a href={comment.external.url} target="_blank" rel="noreferrer">GitHub · @{comment.external.login}</a> : t(who.name)}</strong>
             <time dateTime={comment.createdAt} title={new Date(comment.createdAt).toLocaleString()}>{relativeTime(comment.createdAt)}{comment.updatedAt !== comment.createdAt && ` · ${t('고침')}`}</time>
             <span className="todo-spacer" />
-            {!readOnly && editing !== comment.id && <button type="button" className="icon-button" aria-label={t('댓글 편집')} onClick={() => setEditing(comment.id)}><Pencil size={12} /></button>}
-            {!readOnly && <button type="button" className="icon-button" aria-label={t('댓글 삭제')} onClick={() => { if (client.apply([{ op: 'comment.delete', id: comment.id }])) client.toast(t('댓글을 지웠습니다.'), 'info', client.undoActions()); }}><Trash2 size={12} /></button>}
+            {!fixed && editing !== comment.id && <button type="button" className="icon-button" aria-label={t('댓글 편집')} onClick={() => setEditing(comment.id)}><Pencil size={12} /></button>}
+            {!fixed && <button type="button" className="icon-button" aria-label={t('댓글 삭제')} onClick={() => { if (client.apply([{ op: 'comment.delete', id: comment.id }])) client.toast(t('댓글을 지웠습니다.'), 'info', client.undoActions()); }}><Trash2 size={12} /></button>}
           </div>
           {editing === comment.id
             ? <CommentEditor initial={comment.body} onCancel={() => setEditing(null)} onSave={text => { client.apply([{ op: 'comment.update', id: comment.id, body: text }]); setEditing(null); }} />

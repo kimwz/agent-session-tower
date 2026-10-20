@@ -1,4 +1,4 @@
-import type { TodoAgent, TodoAgentState, TodoComment, TodoCommentAuthor, TodoCompletion, TodoEvent, TodoEventKind, TodoFile, TodoLabel, TodoLayout, TodoLink, TodoPriority, TodoProject, TodoRecurrence, TodoSection, TodoTask } from '../../shared/todo/types.js';
+import type { TodoAgent, TodoAgentState, TodoComment, TodoCommentAuthor, TodoCompletion, TodoEvent, TodoEventKind, TodoFile, TodoGitHubBinding, TodoLabel, TodoLayout, TodoLink, TodoPriority, TodoProject, TodoRecurrence, TodoSection, TodoTask } from '../../shared/todo/types.js';
 
 /** Each table's row and the value the page sees, converted in one place per table. */
 
@@ -29,17 +29,30 @@ export const taskOf = (row: Row): TodoTask => ({
   dueDate: maybe(row.due_date), dueTime: maybe(row.due_time), recurrence: row.recurrence ? JSON.parse(text(row.recurrence)) as TodoRecurrence : null,
   durationMin: row.duration_min === null || row.duration_min === undefined ? null : Number(row.duration_min), deadlineDate: maybe(row.deadline_date),
   labelIds: row.labels ? text(row.labels).split(',').sort() : [], sortKey: text(row.sort_key), dayOrder: maybe(row.day_order), completedAt: maybe(row.completed_at), ...stamps(row),
+  ...(row.gh_issue ? { github: text(row.gh_issue) } : {}),
 });
 
 /** A task's columns with its live labels, for `SELECT ${TASK_COLUMNS} FROM todo_tasks t …`. */
-export const TASK_COLUMNS = `t.*, (SELECT group_concat(tl.label_id) FROM todo_task_labels tl JOIN todo_labels l ON l.id = tl.label_id AND l.deleted_at IS NULL WHERE tl.task_id = t.id) AS labels`;
+export const TASK_COLUMNS = `t.*, (SELECT group_concat(tl.label_id) FROM todo_task_labels tl JOIN todo_labels l ON l.id = tl.label_id AND l.deleted_at IS NULL WHERE tl.task_id = t.id) AS labels,
+  (SELECT g.repo || '#' || g.number FROM todo_github_issues g WHERE g.task_id = t.id) AS gh_issue`;
 
 export const linkOf = (row: Row): TodoLink => ({
   id: text(row.id), fromTaskId: text(row.from_task_id), toTaskId: text(row.to_task_id), kind: text(row.kind) as 'next', createdAt: text(row.created_at),
 });
 
+/** `gh_login` and `gh_url` come with a comment GitHub sent (see COMMENT_COLUMNS). */
 export const commentOf = (row: Row): TodoComment => ({
   id: text(row.id), taskId: text(row.task_id), body: text(row.body), author: row.author === 'owner' || row.author === 'agent' ? row.author as TodoCommentAuthor : null, ...stamps(row),
+  ...(row.gh_login ? { external: { source: 'github' as const, login: text(row.gh_login), url: text(row.gh_url) } } : {}),
+});
+
+/** A comment's columns with where GitHub sent it from, for `SELECT ${COMMENT_COLUMNS} FROM todo_comments c …`. */
+export const COMMENT_COLUMNS = `c.*, (SELECT g.login FROM todo_github_comments g WHERE g.comment_id = c.id AND g.origin = 'github') AS gh_login,
+  (SELECT g.url FROM todo_github_comments g WHERE g.comment_id = c.id AND g.origin = 'github') AS gh_url`;
+
+export const githubBindingOf = (row: Row): TodoGitHubBinding => ({
+  id: text(row.id), scope: { kind: text(row.scope_kind) as TodoGitHubBinding['scope']['kind'], id: text(row.scope_id) }, repo: text(row.repo),
+  account: text(row.account), error: maybe(row.error), createdAt: text(row.created_at),
 });
 
 export const completionOf = (row: Row): TodoCompletion => ({

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from 'react';
-import { Archive, ArchiveRestore, ArrowRight, CalendarDays, Check, CheckCheck, ChevronsDownUp, ChevronsUpDown, Columns3, ChevronLeft, ChevronRight, Flag, LoaderCircle, Pencil, Plus, RefreshCw, Trash2, TriangleAlert, X } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowRight, CalendarDays, Check, CheckCheck, ChevronsDownUp, ChevronsUpDown, Columns3, ChevronLeft, ChevronRight, Flag, Github, LoaderCircle, Pencil, Plus, RefreshCw, Trash2, TriangleAlert, X } from 'lucide-react';
 import { liveProjectIds } from '../../../shared/todo/compose';
 import { addDays } from '../../../shared/todo/dates';
 import type { TodoProject, TodoTask } from '../../../shared/todo/types';
@@ -7,6 +7,7 @@ import { useMediaQuery } from '../common/use-media-query';
 import { translate as t, useI18n } from '../i18n/i18n';
 import { BoardView } from './BoardView';
 import { DisplayMenu, loadDisplay, saveDisplay } from './DisplayMenu';
+import { GitHubBindingDialog } from './GitHubBindingDialog';
 import { Menu, Popover, type MenuItem } from './Popover';
 import { QuickAdd, type QuickAddPreset } from './QuickAdd';
 import { TaskCard } from './TaskCard';
@@ -93,6 +94,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   const [quick, setQuick] = useState<{ preset: QuickAddPreset; follow: FollowUp | null } | null>(null);
   const [cardMenu, setCardMenu] = useState<{ task: TodoTask; anchor: HTMLElement } | null>(null);
   const [sectionMenu, setSectionMenu] = useState<string | null>(null);
+  // A section's GitHub link dialog, opened from its menu once the menu has closed.
+  const [sectionGithub, setSectionGithub] = useState<string | null>(null);
   // Renaming opens after the menu closes, so the menu's closing never undoes it.
   const [sectionRename, setSectionRename] = useState<string | null>(null);
   const [showArchivedSections, setShowArchivedSections] = useState(false);
@@ -428,7 +431,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   const total = columns.reduce((sum, column) => sum + column.tasks.length, 0);
   const emptyBoard = total === 0 && !project && !overview && !completedColumn && !doneResults.length;
   const title = viewTitle(view, world, query);
-  const section = world.sections.find(item => item.id === (sectionMenu ?? sectionRename));
+  const section = world.sections.find(item => item.id === (sectionMenu ?? sectionRename ?? sectionGithub));
+  const sectionBinding = (sectionId: string) => world.github?.bindings.find(binding => binding.scope.kind === 'section' && binding.scope.id === sectionId);
   const siblings = section ? world.sections.filter(item => item.projectId === section.projectId && !item.archivedAt) : [];
   const holder = locked && project ? archivedHolder(world.projects, project) : undefined;
 
@@ -450,7 +454,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
     onDayMove={(task, afterId) => { if (!locked && !isLocked(task)) client.apply([{ op: 'task.move', id: task.id, dayAfterId: afterId }]); }} taskLocked={isLocked}
     onSectionMove={(id, afterId) => client.apply([{ op: 'section.move', id, afterId }])}
     onAddSection={name => project && client.apply([{ op: 'section.create', id: newId(), projectId: project.id, name }])}
-    onSectionMenu={(id, anchor) => { if (locked) return; menuAnchor.current = anchor; setSectionRename(null); setSectionMenu(id); }} completed={doneColumn} />;
+    onSectionMenu={(id, anchor) => { if (locked) return; menuAnchor.current = anchor; setSectionRename(null); setSectionGithub(null); setSectionMenu(id); }} sectionBinding={sectionBinding} completed={doneColumn} />;
 
   return <div className={`todo-page ${sidebarOpen ? 'with-sidebar' : ''} ${drawer ? 'drawer' : ''} ${openTaskId ? 'with-detail' : ''}`}>
     {drawer && sidebarOpen && <button type="button" className="todo-scrim" aria-label={t('목록 닫기')} onClick={() => onSidebarOpen(false)} />}
@@ -509,9 +513,11 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
       section.archivedAt
         ? { key: 'unarchive', label: t('보관 해제'), icon: <ArchiveRestore size={13} />, run: () => client.apply([{ op: 'section.update', id: section.id, patch: { archived: false } }]) }
         : { key: 'archive', label: t('보관'), icon: <Archive size={13} />, run: () => { if (client.apply([{ op: 'section.update', id: section.id, patch: { archived: true } }])) client.toast(t('“{0}” 보관', { 0: section.name }), 'info', client.undoActions()); } },
+      { key: 'github', label: sectionBinding(section.id) ? t('GitHub 연결 바꾸기…') : t('GitHub 연결…'), icon: <Github size={13} />, run: () => setSectionGithub(section.id) },
       'separator',
       { key: 'delete', label: t('섹션과 작업 삭제'), danger: true, icon: <Trash2 size={13} />, run: () => { if (client.apply([{ op: 'section.delete', id: section.id }])) client.toast(t('“{0}” 삭제', { 0: section.name }), 'info', client.undoActions()); } },
     ]} />}
+    {sectionGithub && !sectionMenu && section && <GitHubBindingDialog anchor={menuAnchor} client={client} scope={{ kind: 'section', id: section.id }} name={section.name} binding={sectionBinding(section.id)} onClose={() => setSectionGithub(null)} />}
     {sectionRename && !sectionMenu && section && <SectionRename anchor={menuAnchor} name={section.name} onClose={() => setSectionRename(null)} onSave={name => client.apply([{ op: 'section.update', id: section.id, patch: { name } }])} />}
     {state.toasts.length > 0 && <div className="todo-toasts" role="status" aria-live="polite">{state.toasts.map(toast => <div key={toast.id} className={`todo-toast ${toast.tone}`}>
       <span>{toast.message}</span>

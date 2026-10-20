@@ -98,7 +98,8 @@ export function createTask(ctx: TodoContext, op: TodoOpOf<'task.create'>, inbox:
   dueDate, dueTime, recurrence, op.durationMin ?? null, op.deadlineDate ?? null, key, ctx.now, ctx.now);
   if (op.labelIds?.length) setLabels(ctx, op.id, op.labelIds);
   ctx.touched.tasks.add(op.id);
-  ctx.event(op.id, 'created');
+  // Who made it, as the request's sender (TodoStore.apply): GitHub sync marks an agent's todo in its issue.
+  ctx.event(op.id, 'created', ctx.by ? { by: ctx.by } : {});
 }
 
 export function updateTask(ctx: TodoContext, op: TodoOpOf<'task.update'>): void {
@@ -206,7 +207,7 @@ export function duplicateTask(ctx: TodoContext, op: TodoOpOf<'task.duplicate'>):
     ctx.run(`INSERT INTO todo_task_labels (task_id, label_id) SELECT ?, tl.label_id FROM todo_task_labels tl JOIN todo_labels l ON l.id = tl.label_id AND l.deleted_at IS NULL
       WHERE tl.task_id = ?`, id, row.id);
     ctx.touched.tasks.add(id);
-    ctx.event(id, 'created', { copyOf: row.id });
+    ctx.event(id, 'created', { copyOf: row.id, ...(ctx.by ? { by: ctx.by } : {}) });
   }
 }
 

@@ -3,7 +3,7 @@ import type { GitHubWatch, IssueWatch } from '../../shared/triggers.js';
 /** One GitHub API answer, reduced to what checking needs. */
 export interface GitHubResponse { status: number; body: unknown; etag?: string; truncated?: boolean; remaining?: number; reset?: number }
 /** Reads by default; `send` makes it a write, whose failure may mean it arrived (`uncertain` on the error). */
-export type GitHubFetch = (path: string, etag?: string, send?: { method: 'POST' | 'PATCH'; body: unknown }) => Promise<GitHubResponse>;
+export type GitHubFetch = (path: string, etag?: string, send?: { method: 'POST' | 'PATCH' | 'DELETE'; body?: unknown }) => Promise<GitHubResponse>;
 
 /** An issue as a run receives it: outside content, shortened. */
 export interface GitHubIssue {

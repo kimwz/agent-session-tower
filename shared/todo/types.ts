@@ -79,6 +79,8 @@ export interface TodoTask extends Stamped {
    */
   dayOrder: string | null;
   completedAt: string | null;
+  /** The GitHub issue it is synced with (`owner/name#number`, server/todo/github/): its text may come from outside. */
+  github?: string;
 }
 
 /** A task's direct sub-tasks that are not deleted, and how many of them are completed. */
@@ -102,6 +104,8 @@ export interface TodoComment extends Stamped {
   body: string;
   /** Decided by the server from how the comment arrived; null where it was not recorded (before 1.162.0, or an older build). */
   author: TodoCommentAuthor | null;
+  /** Written on GitHub and brought in by the GitHub sync (author null): outside content, read-only here. */
+  external?: { source: 'github'; login: string; url: string };
 }
 
 export interface TodoCompletion {
@@ -177,6 +181,22 @@ export interface TodoAgent {
   updatedAt: string;
 }
 
+/** A GitHub repository linked to a project or a section: todos made there after `createdAt` become its issues. */
+export interface TodoGitHubBinding {
+  id: string;
+  scope: { kind: 'project' | 'section'; id: string };
+  /** `owner/name`. */
+  repo: string;
+  /** The gh login the owner linked with; nothing is sent while gh is signed in as another account. */
+  account: string;
+  /** The last sync's problem with this link, if any. */
+  error: string | null;
+  createdAt: string;
+}
+
+/** The GitHub issue a todo is synced with. */
+export interface TodoGitHubIssue { repo: string; number: number; url: string; error: string | null }
+
 /** Everything open, for the Todo page. Archived projects are included; deleted things are not. */
 export interface TodoOverview {
   availability: TodoAvailability;
@@ -202,6 +222,8 @@ export interface TodoOverview {
   restore?: TodoRestoreProgress;
   /** The empty issue chat's first-message buttons, once the owner saved a list (shared/todo/chat-presets.ts). */
   chatPresets?: string[];
+  /** GitHub links and the issues of open todos, by todo id. Absent from older servers. */
+  github?: { bindings: TodoGitHubBinding[]; issues: Record<string, TodoGitHubIssue> };
 }
 
 /** What one request changed, including what it deleted (with `deletedAt`) or completed (with `completedAt`). */
@@ -235,6 +257,8 @@ export interface TodoTaskDetail {
   /** Tasks this one follows, and tasks that follow it, completed ones included. */
   previous: { link: TodoLink; task: TodoTask }[];
   next: { link: TodoLink; task: TodoTask }[];
+  /** The GitHub issue it is or was synced with (server/todo/github/): what is in it may come from outside. */
+  github?: { repo: string; number: number; url: string };
 }
 
 export interface TodoCompletedPage {

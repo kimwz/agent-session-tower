@@ -54,7 +54,7 @@ test('a copy holds the task and its open sub-tasks, right after it, without comm
   for (const task of detail.subtasks) assert.match(task.id, ID);
   assert.equal(detail.subtasks.find(task => task.content === 'First, part')!.parentId, detail.subtasks.find(task => task.content === 'First')!.id);
   assert.deepEqual([detail.comments, detail.completions, detail.previous, detail.next], [[], [], [], []]);
-  assert.deepEqual(detail.events.map(event => [event.kind, event.detail]), [['created', { copyOf: 'p' }]]);
+  assert.deepEqual(detail.events.map(event => [event.kind, event.detail]), [['created', { copyOf: 'p', by: 'owner' }]]);
   assert.deepEqual(changes.subtaskCounts?.p2, { done: 0, total: 2 });
   assert.throws(() => apply({ op: 'task.duplicate', id: 'q', copyId: 'p2' }), error => kind(error) === 'invalid');
   assert.throws(() => apply({ op: 'task.duplicate', id: 'missing', copyId: 'x' }), error => kind(error) === 'not-found');
@@ -176,12 +176,12 @@ test('completed tasks can be listed by label, and search with completed ones giv
   assert.deepEqual(store.search('report'), []);
 });
 
-test('activity names the fields an update changed and where a move went', async t => {
+test('activity names the fields an update changed, where a move went, and who made the task', async t => {
   const { store, apply } = await fixture(t);
   apply({ op: 'task.create', id: 'a', content: 'A', dueDate: '2026-10-17' }, { op: 'task.create', id: 'b', content: 'B', dueDate: '2026-10-17' });
   apply({ op: 'task.update', id: 'a', patch: { dueDate: '2026-10-18', priority: 1 } });
   apply({ op: 'task.update', id: 'b', patch: { content: 'Bee' } });
   apply({ op: 'task.move', id: 'b', dayAfterId: null });
-  assert.deepEqual(store.detail('a').events.map(event => [event.kind, event.detail]), [['updated', { fields: ['priority', 'dueDate'] }], ['created', {}]]);
-  assert.deepEqual(store.detail('b').events.map(event => [event.kind, event.detail]), [['moved', { day: '2026-10-17' }], ['updated', { fields: ['content'] }], ['created', {}]]);
+  assert.deepEqual(store.detail('a').events.map(event => [event.kind, event.detail]), [['updated', { fields: ['priority', 'dueDate'] }], ['created', { by: 'owner' }]]);
+  assert.deepEqual(store.detail('b').events.map(event => [event.kind, event.detail]), [['moved', { day: '2026-10-17' }], ['updated', { fields: ['content'] }], ['created', { by: 'owner' }]]);
 });

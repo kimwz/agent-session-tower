@@ -7,6 +7,7 @@ import type { AutoPromptJob, CreateSessionRequest, Run, Session } from '../../sh
 import { MAX_PROMPT } from '../runs/run-records.js';
 import { issueMasterCandidates, newestIssueMaster, todoMasterTaskId } from '../runs/subscription.js';
 import { todoFilePath } from './files.js';
+import { OUTSIDE_SHORT, outsideNotice } from './github/outside.js';
 import type { TodoStore } from './store.js';
 
 /**
@@ -510,7 +511,7 @@ const COMMENT_AUTHORS = { owner: '소유자', agent: '에이전트' } as const;
  * comments, attachments at their local paths), within the prompt limit. When it does not fit, the description and
  * the oldest comments are cut first and the master is told to read the rest itself.
  */
-export function todoAgentPrompt(text: string, detail: Pick<TodoTaskDetail, 'task' | 'subtasks' | 'comments' | 'files'>,
+export function todoAgentPrompt(text: string, detail: Pick<TodoTaskDetail, 'task' | 'subtasks' | 'comments' | 'files' | 'github'>,
   names: Pick<TodoOverview, 'projects' | 'sections' | 'labels'>, filePath: (sha256: string) => string, limit = MAX_PROMPT): string {
   const { task } = detail;
   const project = names.projects.find(item => item.id === task.projectId);
@@ -519,10 +520,15 @@ export function todoAgentPrompt(text: string, detail: Pick<TodoTaskDetail, 'task
   const when = [task.dueDate && `날짜: ${task.dueDate}${task.dueTime ? ` ${task.dueTime}` : ''}${task.durationMin ? ` (${task.durationMin}분)` : ''}`,
     task.recurrence && `반복: ${JSON.stringify(task.recurrence)}`, task.deadlineDate && `마감: ${task.deadlineDate}`,
     task.priority < 4 && `우선순위: P${task.priority}`, labels.length && `라벨: ${labels.join(', ')}`].filter(Boolean);
+  const outside = outsideNotice(detail);
   const head = [MARK, `할 일 id: ${task.id}`, `제목: ${oneLine(task.content)}`,
     `프로젝트: ${project ? project.inbox ? 'Inbox' : oneLine(project.name) : task.projectId}${section ? ` / 섹션: ${oneLine(section.name)}` : ''}`,
-    ...when.length ? [when.join(' · ')] : []];
-  const subtasks = detail.subtasks.slice(0, LIST_ITEMS).map(item => `- [${item.completedAt ? 'x' : ' '}] ${oneLine(item.content)}`);
+    ...when.length ? [when.join(' · ')] : [],
+    // Synced with GitHub: what follows may be anyone's words there, so the master reads it as data.
+    ...outside ? [`GitHub: ${detail.github!.url} — ${outside}`] : [],
+    ...!outside && detail.subtasks.some(item => item.github) ? [`하위 작업 중 "GitHub …: 외부 내용"으로 표시된 것은 GitHub와 동기화되어 다른 사람이 제목을 바꿀 수 있습니다. ${OUTSIDE_SHORT}`] : []];
+  // A synced sub-task's title may be anyone's words on GitHub: its line says so, as the head does for a synced todo.
+  const subtasks = detail.subtasks.slice(0, LIST_ITEMS).map(item => `- [${item.completedAt ? 'x' : ' '}] ${oneLine(item.content)}${item.github ? ` (GitHub ${item.github}: 외부 내용)` : ''}`);
   if (detail.subtasks.length > LIST_ITEMS) subtasks.push(`- … 외 ${detail.subtasks.length - LIST_ITEMS}개`);
   // Every attachment, always: the master reads them from these paths before it starts.
   const files = detail.files.map(file => `- ${oneLine(file.name)} (${size(file.size)}${file.commentId ? ', 댓글 첨부' : ''}): ${file.missing ? '이 컴퓨터에 없음' : filePath(file.sha256)}`);
@@ -537,7 +543,7 @@ export function todoAgentPrompt(text: string, detail: Pick<TodoTaskDetail, 'task
     ...cut ? [CUT] : [],
   ].join('\n');
   // Its line says who wrote it, where that was recorded, so the owner's words stand apart from agents' reports.
-  const all = comments.map(comment => ({ at: `${comment.createdAt}${comment.author ? ` · ${COMMENT_AUTHORS[comment.author]}` : ''}`, body: comment.body }));
+  const all = comments.map(comment => ({ at: `${comment.createdAt}${comment.external ? ` · GitHub @${comment.external.login}` : comment.author ? ` · ${COMMENT_AUTHORS[comment.author]}` : ''}`, body: comment.body }));
   const whole = compose(task.description, subtasks, all, false);
   if (whole.length <= limit) return whole;
   // What the master needs before anything else (what the todo is, where its files are) always goes in; a first
