@@ -7,8 +7,8 @@ import { TodoMarkdown } from '../../../client/src/todo/TodoMarkdown.js';
 
 // Every Markdown in Tower: a chat message (with and without the master's line breaks), and a todo description or comment.
 const renderers: [string, (text: string) => string][] = [
-  ['chat', text => renderToStaticMarkup(createElement(Markdown, null, text))],
-  ['chat with line breaks', text => renderToStaticMarkup(createElement(Markdown, { lineBreaks: true }, text))],
+  ['chat', text => renderToStaticMarkup(createElement(Markdown, { children: text }))],
+  ['chat with line breaks', text => renderToStaticMarkup(createElement(Markdown, { lineBreaks: true, children: text }))],
   ['todo', text => renderToStaticMarkup(createElement(TodoMarkdown, null, text))],
 ];
 
