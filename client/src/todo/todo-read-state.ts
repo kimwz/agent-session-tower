@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TodoWorld } from './todo-model';
 
 /**
@@ -49,13 +49,17 @@ export function unreadTodos(outside: Readonly<Record<string, string>>, state: To
  */
 export function useTodoReadState(world: Pick<TodoWorld, 'outside' | 'availability' | 'detail'>, ready: boolean, openId: string | null): ReadonlySet<string> {
   const [read, setRead] = useState<TodoReadState | null>(() => stored() ?? null);
-  // Written over what is stored now, so marks another window wrote meanwhile stay.
+  // Written over what is stored now, so marks another window wrote meanwhile stay; once storage refuses a write, the
+  // marks live in memory only.
+  const writable = useRef(true);
   const save = useCallback((update: (previous: TodoReadState | null) => TodoReadState) => setRead(previous => {
-    const latest = stored();
-    const base = latest === undefined ? previous : latest;
-    const next = update(base);
-    // best-effort: the marks stay usable in memory when browser storage refuses them.
-    if (next !== previous) try { localStorage.setItem(TODO_READ_KEY, JSON.stringify(next)); } catch { /* Memory state remains usable. */ }
+    const latest = writable.current ? stored() : undefined;
+    const next = update(latest === undefined ? previous : latest);
+    if (next !== previous && writable.current) {
+      try { localStorage.setItem(TODO_READ_KEY, JSON.stringify(next)); }
+      // best-effort: the marks stay usable in memory when browser storage refuses them.
+      catch { writable.current = false; }
+    }
     return next;
   }), []);
   const outside = world.outside;
@@ -73,7 +77,8 @@ export function useTodoReadState(world: Pick<TodoWorld, 'outside' | 'availabilit
     return () => document.removeEventListener('visibilitychange', acknowledge);
   }, [openId, mark, started, save]);
   useEffect(() => {
-    const sync = (event: StorageEvent) => { if (event.key === TODO_READ_KEY) setRead(parseTodoReadState(event.newValue) ?? {}); };
+    // What is stored now, not the event's value: a late event would bring back marks written since.
+    const sync = (event: StorageEvent) => { if (event.key === TODO_READ_KEY && writable.current) setRead(previous => stored() ?? previous); };
     window.addEventListener('storage', sync);
     return () => window.removeEventListener('storage', sync);
   }, []);
