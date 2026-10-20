@@ -212,6 +212,11 @@ export interface TodoOverview {
   commentCounts: Record<string, number>;
   /** Attachments that show, per open task that has any (its description's and its comments' together). */
   fileCounts: Record<string, number>;
+  /**
+   * Per open task, the id of its newest comment the owner did not write (an agent's, GitHub's, or one not recorded): what
+   * the page's read marks compare with (client/src/todo/todo-read-state.ts). Absent from older servers.
+   */
+  outside?: Record<string, string>;
   /** Sub-tasks per open task that has any. */
   subtaskCounts: Record<string, TodoSubtaskCount>;
   /** Completed direct sub-tasks of open tasks, so a card can show where its sub-tasks stand. Absent from older servers. */

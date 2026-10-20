@@ -2786,6 +2786,7 @@ export const english: Record<string, string> = {
   "라벨": "Labels",
   "하위 작업": "Sub-tasks",
   "댓글": "Comments",
+  "새 댓글": "New comments",
   "후속 작업": "Next tasks",
   "다음 {0}": "Next {0}",
   "“{0}” 완료 취소": "Reopen “{0}”",

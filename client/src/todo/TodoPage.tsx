@@ -22,6 +22,7 @@ import { calendarFor, layoutFor, otherLayout, readShortcut, typingIn } from './t
 import { httpTransport, localToday, newId, TodoClient, useTodoState } from './todo-store';
 import { isTodoPage, readTodoLocation, todoSearch, viewKey, type TodoLocation, type TodoView } from './todo-url';
 import { isOpen } from './todo-model';
+import { useTodoReadState } from './todo-read-state';
 import { doneRange } from './calendar/calendar-layout';
 import { backgroundClose } from './todo-background';
 import { archivedColumns, calendarDone as calendarDoneItems, foldGroups, overviewGroups, shapeSections, shownTasks, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
@@ -230,7 +231,10 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   const shown = useMemo(() => new Set(visibleColumns.flatMap(column => column.tasks.map(item => item.id))), [visibleColumns]);
   // A card folded out of sight on the overview is no longer the chosen one, so E never completes a task not shown.
   useEffect(() => { if (overview && selectedId && !selectedId.startsWith('done:') && !shown.has(selectedId)) setSelectedId(null); }, [overview, selectedId, shown]);
-  const context = useMemo(() => cardContext(world, today, showProject, shown), [world, today, showProject, shown]);
+  // Comments show on the detail's own tab only: a todo opened on its chat stays unread.
+  const unread = useTodoReadState(world, state.phase === 'ready', detailTab === 'detail' ? openTaskId : null);
+  const context = useMemo(() => cardContext(world, today, showProject, shown, unread), [world, today, showProject, shown, unread]);
+  const unreadProjects = useMemo(() => new Set([...unread].flatMap(id => isOpen(world.tasks[id]) ? [world.tasks[id].projectId] : [])), [unread, world.tasks]);
   const counts = useMemo(() => sidebarCounts(world, today), [world, today]);
 
   const openAdd = useCallback((preset?: QuickAddPreset) => {
@@ -458,7 +462,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
 
   return <div className={`todo-page ${sidebarOpen ? 'with-sidebar' : ''} ${drawer ? 'drawer' : ''} ${openTaskId ? 'with-detail' : ''}`}>
     {drawer && sidebarOpen && <button type="button" className="todo-scrim" aria-label={t('목록 닫기')} onClick={() => onSidebarOpen(false)} />}
-    {sidebarOpen && state.phase === 'ready' && <TodoSidebar world={world} counts={counts} view={view} query={query} client={client} readOnly={readOnly} searchRef={searchRef} onNavigate={goTo} onAdd={() => { openAdd(); if (drawer) onSidebarOpen(false); }} />}
+    {sidebarOpen && state.phase === 'ready' && <TodoSidebar world={world} counts={counts} unreadProjects={unreadProjects} view={view} query={query} client={client} readOnly={readOnly} searchRef={searchRef} onNavigate={goTo} onAdd={() => { openAdd(); if (drawer) onSidebarOpen(false); }} />}
     <main className="todo-main" aria-label={title} onClickCapture={event => {
       // A click on the page's empty space closes the master's conversation over it, else the open task, and does
       // nothing else (todo-background).
