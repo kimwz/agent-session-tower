@@ -24,7 +24,6 @@ const PASS_MS = 60_000;
 const NUDGE_MS = 3_000;
 /** Polls look this much before the last one began, so an edit at its edge is not missed (seen twice is harmless). */
 const POLL_OVERLAP_MS = 10_000;
-const MAX_PAGES = 10;
 const MAX_CONTENT = 500, MAX_DESCRIPTION = 16_383, MAX_COMMENT = 15_000;
 
 export interface TodoGitHubSyncOptions {
@@ -231,7 +230,7 @@ export class TodoGitHubSync {
     if (!view) return;
     if (map && map.repo !== repo) {
       // Moved to a section or project of another repository: the old issue is closed, a new one made.
-      await this.github.call('PATCH', `/repos/${map.repo}/issues/${map.number}`, { state: 'closed', state_reason: 'not_planned' }).catch(error => { this.itemFailure(error); });
+      await this.closeAs(map.repo, map.number, 'not_planned').catch(error => { this.itemFailure(error); });
       this.store.github(ctx => {
         ctx.run('DELETE FROM todo_github_issues WHERE task_id = ?', id);
         ctx.run("DELETE FROM todo_github_comments WHERE task_id = ? AND origin = 'tower'", id);
@@ -272,12 +271,22 @@ export class TodoGitHubSync {
     const path = `/repos/${map.repo}/issues/${map.number}`;
     let issue = await this.github.call<GitHubIssue>('PATCH', path, { title: content.title, body: content.body, state: content.state, labels: content.labels,
       ...(content.reason ? { state_reason: content.reason } : {}) });
-    // GitHub keeps the reason of an issue that stays closed: a new reason needs it opened and closed again.
-    if (content.state === 'closed' && issue.state_reason !== content.reason) {
-      await this.github.call('PATCH', path, { state: 'open' });
-      issue = await this.github.call<GitHubIssue>('PATCH', path, { state: 'closed', state_reason: content.reason });
-    }
+    if (content.state === 'closed' && issue.state_reason !== content.reason) issue = await this.closeAs(map.repo, map.number, content.reason!, issue);
     this.store.github(ctx => ctx.run('UPDATE todo_github_issues SET synced_hash = ?, gh_updated_at = ? WHERE task_id = ?', hash, issue.updated_at, map.task_id));
+  }
+
+  /**
+   * Closes an issue with this reason. GitHub keeps the reason of an issue that stays closed, so one closed for another
+   * reason is opened and closed again.
+   */
+  private async closeAs(repo: string, number: number, reason: 'completed' | 'not_planned', answered?: GitHubIssue): Promise<GitHubIssue> {
+    const path = `/repos/${repo}/issues/${number}`;
+    let issue = answered ?? await this.github.call<GitHubIssue>('PATCH', path, { state: 'closed', state_reason: reason });
+    if (issue.state_reason !== reason) {
+      await this.github.call('PATCH', path, { state: 'open' });
+      issue = await this.github.call<GitHubIssue>('PATCH', path, { state: 'closed', state_reason: reason });
+    }
+    return issue;
   }
 
   /** Labels an issue gets are made in the repository first; one already there answers 422, which is fine. */
@@ -357,9 +366,10 @@ export class TodoGitHubSync {
 
   // ---- GitHub → Tower ------------------------------------------------------------------------------------------
 
+  /** Every page, to the end: the poll's time moves only past what was read. */
   private async pages<T>(path: string): Promise<T[]> {
     const all: T[] = [];
-    for (let page = 1; page <= MAX_PAGES; page++) {
+    for (let page = 1; ; page++) {
       const items = await this.github.call<T[]>('GET', `${path}&per_page=100&page=${page}`);
       all.push(...items);
       if (items.length < 100) break;
@@ -374,7 +384,7 @@ export class TodoGitHubSync {
     for (const issue of issues) {
       if (issue.pull_request) continue;
       const map = this.store.githubRead(ctx => ctx.get<IssueMap>('SELECT * FROM todo_github_issues WHERE repo = ? AND number = ?', binding.repo, issue.number));
-      if (!map || issue.updated_at <= map.gh_updated_at) continue;
+      if (!map || issue.updated_at <= map.gh_updated_at || !this.stillLinked(map)) continue;
       try { this.takeIssue(map, issue); }
       catch (error) { this.issueError(map.task_id, `GitHub 변경을 반영하지 못했습니다: ${message(error)}`); }
     }
@@ -382,11 +392,16 @@ export class TodoGitHubSync {
     for (const comment of comments) {
       const number = Number(/\/issues\/(\d+)$/.exec(comment.issue_url)?.[1]);
       const map = this.store.githubRead(ctx => ctx.get<IssueMap>('SELECT * FROM todo_github_issues WHERE repo = ? AND number = ?', binding.repo, number));
-      if (!map) continue;
+      if (!map || !this.stillLinked(map)) continue;
       try { this.takeComment(map, comment); }
       catch (error) { errors.set(binding.id, `GitHub 댓글을 반영하지 못했습니다: ${message(error)}`); }
     }
     this.store.github(ctx => ctx.run('UPDATE todo_github_bindings SET polled_at = ? WHERE id = ?', started, binding.id));
+  }
+
+  /** Whether the todo still syncs with this issue's repository: one moved out of linked scopes, or unlinked, takes nothing. */
+  private stillLinked(map: IssueMap): boolean {
+    return this.store.githubRead(ctx => bindingOfTask(ctx, map.task_id))?.repo === map.repo;
   }
 
   /** Brings an issue's change into its todo, unless Tower changed the todo meanwhile (then Tower's goes up instead). */

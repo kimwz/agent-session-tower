@@ -8,7 +8,7 @@ import { parseQuickAdd, type QuickAddResult } from '../../shared/todo/quick-add.
 import type { TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoFile, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { TowerError } from '../../shared/errors.js';
 import { checkLocalMedia, LOCAL_MEDIA } from './files.js';
-import { commentWriter, outsideNotice } from './github/outside.js';
+import { commentWriter, OUTSIDE_SHORT, outsideNotice } from './github/outside.js';
 
 /**
  * The Todo tools every agent Tower runs gets (server `tower_todos`, owner's order of 2026-10-17: reading and changing
@@ -100,6 +100,8 @@ function namer(overview: Pick<TodoOverview, 'projects' | 'sections' | 'labels' |
       ...(description ? { description } : {}),
       ...(task.completedAt ? { completedAt: task.completedAt } : {}),
       ...(followers?.length ? { next: followers } : {}),
+      // Its title and description may have been written on GitHub by others (server/todo/github/outside.ts).
+      ...(task.github ? { github: task.github, outside: OUTSIDE_SHORT } : {}),
     };
   };
 }

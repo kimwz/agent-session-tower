@@ -268,3 +268,59 @@ test('only the owner\'s own page links or unlinks a repository', async t => {
   assert.equal((await fetch(`${base}/api/todos/github/bindings/b`, { method: 'DELETE', headers: { 'X-Agent-Monitor-Token': token, Origin: base } })).status, 200);
   assert.deepEqual(linkedNow, [{ kind: 'project', id: 'work', repo: PROJECT_REPO }, 'b']);
 });
+
+test('every todo tool marks a synced todo as outside content, completed ones too', async t => {
+  const f = await linked(t);
+  f.apply('owner', { op: 'task.create', id: 'a', projectId: 'work', content: 'Listed' });
+  await f.sync.pass();
+  const calls = { overview: () => f.store.overview(), detail: (id: string) => f.store.detail(id), completed: (input: Parameters<TodoStore['completed']>[0]) => f.store.completed(input),
+    search: (query: string, input: Parameters<TodoStore['search']>[1]) => f.store.search(query, input), apply: (request: Parameters<TodoStore['apply']>[0], by: Parameters<TodoStore['apply']>[1]) => f.store.apply(request, by) };
+  const marked = (task: { github?: string; outside?: string }) => task.github === `${PROJECT_REPO}#1` && /outside content/.test(task.outside ?? '');
+  assert.ok(marked((callTodoTool(calls, 'todos_search', { query: 'Listed' }) as { tasks: never[] }).tasks[0]));
+  f.apply('owner', { op: 'task.complete', id: 'a', completionId: 'c', occurrence: null, today: '2026-10-20' });
+  assert.ok(marked((callTodoTool(calls, 'todos_completed', {}) as { items: { task: never }[] }).items[0].task));
+});
+
+test('a todo moved out of linked places takes no more changes from its issue', async t => {
+  const f = await fixture(t);
+  await f.sync.link({ kind: 'section', id: 'site', repo: SECTION_REPO });
+  f.apply('owner', { op: 'task.create', id: 'a', projectId: 'work', sectionId: 'site', content: 'Leaving' });
+  await f.sync.pass();
+  f.apply('owner', { op: 'task.move', id: 'a', sectionId: 'misc' });
+  f.github.edit(SECTION_REPO, 1, { title: 'Changed on GitHub', state: 'closed' });
+  f.github.comment(SECTION_REPO, 1, 'someone', 'Late words');
+  await f.sync.pass();
+  const detail = f.store.detail('a');
+  assert.deepEqual([detail.task.content, detail.task.completedAt, detail.comments.length], ['Leaving', null, 0]);
+});
+
+test('a completed todo moved to another repository closes its old issue as not planned', async t => {
+  const f = await linked(t);
+  f.apply('owner', { op: 'task.create', id: 'a', projectId: 'work', content: 'Done' });
+  await f.sync.pass();
+  f.apply('owner', { op: 'task.complete', id: 'a', completionId: 'c', occurrence: null, today: '2026-10-20' });
+  await f.sync.pass();
+  f.apply('owner', { op: 'task.move', id: 'a', sectionId: 'elsewhere' });
+  await f.sync.pass();
+  assert.deepEqual([f.github.issue(PROJECT_REPO, 1).state, f.github.issue(PROJECT_REPO, 1).state_reason], ['closed', 'not_planned']);
+  assert.deepEqual([f.github.issue(OTHER_REPO, 1).state, f.github.issue(OTHER_REPO, 1).state_reason], ['closed', 'completed']);
+});
+
+test('a todo an agent copies is marked as an agent\'s in its issue', async t => {
+  const f = await linked(t);
+  f.apply('owner', { op: 'task.create', id: 'a', projectId: 'work', content: 'Original' });
+  f.apply('agent', { op: 'task.duplicate', id: 'a', copyId: 'b' });
+  await f.sync.pass();
+  const copy = f.github.issuesOf(PROJECT_REPO).find(issue => issue.number === f.issueOf('b')?.number)!;
+  assert.match(copy.body, /Agent가 Tower에서 만든 할 일/);
+  assert.doesNotMatch(f.github.issuesOf(PROJECT_REPO).find(issue => issue.number === f.issueOf('a')?.number)!.body, /Agent/);
+});
+
+test('a poll reads every page, so a busy repository\'s comments all come in', async t => {
+  const f = await linked(t);
+  f.apply('owner', { op: 'task.create', id: 'a', projectId: 'work', content: 'Busy' });
+  await f.sync.pass();
+  for (let i = 0; i < 1105; i++) f.github.comment(PROJECT_REPO, 1, 'crowd', `comment ${i}`);
+  await f.sync.pass();
+  assert.equal(f.store.detail('a').comments.length, 1105);
+});

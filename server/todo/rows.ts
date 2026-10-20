@@ -29,10 +29,12 @@ export const taskOf = (row: Row): TodoTask => ({
   dueDate: maybe(row.due_date), dueTime: maybe(row.due_time), recurrence: row.recurrence ? JSON.parse(text(row.recurrence)) as TodoRecurrence : null,
   durationMin: row.duration_min === null || row.duration_min === undefined ? null : Number(row.duration_min), deadlineDate: maybe(row.deadline_date),
   labelIds: row.labels ? text(row.labels).split(',').sort() : [], sortKey: text(row.sort_key), dayOrder: maybe(row.day_order), completedAt: maybe(row.completed_at), ...stamps(row),
+  ...(row.gh_issue ? { github: text(row.gh_issue) } : {}),
 });
 
 /** A task's columns with its live labels, for `SELECT ${TASK_COLUMNS} FROM todo_tasks t …`. */
-export const TASK_COLUMNS = `t.*, (SELECT group_concat(tl.label_id) FROM todo_task_labels tl JOIN todo_labels l ON l.id = tl.label_id AND l.deleted_at IS NULL WHERE tl.task_id = t.id) AS labels`;
+export const TASK_COLUMNS = `t.*, (SELECT group_concat(tl.label_id) FROM todo_task_labels tl JOIN todo_labels l ON l.id = tl.label_id AND l.deleted_at IS NULL WHERE tl.task_id = t.id) AS labels,
+  (SELECT g.repo || '#' || g.number FROM todo_github_issues g WHERE g.task_id = t.id) AS gh_issue`;
 
 export const linkOf = (row: Row): TodoLink => ({
   id: text(row.id), fromTaskId: text(row.from_task_id), toTaskId: text(row.to_task_id), kind: text(row.kind) as 'next', createdAt: text(row.created_at),

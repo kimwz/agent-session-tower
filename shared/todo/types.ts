@@ -79,6 +79,8 @@ export interface TodoTask extends Stamped {
    */
   dayOrder: string | null;
   completedAt: string | null;
+  /** The GitHub issue it is synced with (`owner/name#number`, server/todo/github/): its text may come from outside. */
+  github?: string;
 }
 
 /** A task's direct sub-tasks that are not deleted, and how many of them are completed. */

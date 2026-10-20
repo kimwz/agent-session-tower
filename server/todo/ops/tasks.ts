@@ -207,7 +207,7 @@ export function duplicateTask(ctx: TodoContext, op: TodoOpOf<'task.duplicate'>):
     ctx.run(`INSERT INTO todo_task_labels (task_id, label_id) SELECT ?, tl.label_id FROM todo_task_labels tl JOIN todo_labels l ON l.id = tl.label_id AND l.deleted_at IS NULL
       WHERE tl.task_id = ?`, id, row.id);
     ctx.touched.tasks.add(id);
-    ctx.event(id, 'created', { copyOf: row.id });
+    ctx.event(id, 'created', { copyOf: row.id, ...(ctx.by ? { by: ctx.by } : {}) });
   }
 }
 

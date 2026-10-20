@@ -54,7 +54,7 @@ test('a copy holds the task and its open sub-tasks, right after it, without comm
   for (const task of detail.subtasks) assert.match(task.id, ID);
   assert.equal(detail.subtasks.find(task => task.content === 'First, part')!.parentId, detail.subtasks.find(task => task.content === 'First')!.id);
   assert.deepEqual([detail.comments, detail.completions, detail.previous, detail.next], [[], [], [], []]);
-  assert.deepEqual(detail.events.map(event => [event.kind, event.detail]), [['created', { copyOf: 'p' }]]);
+  assert.deepEqual(detail.events.map(event => [event.kind, event.detail]), [['created', { copyOf: 'p', by: 'owner' }]]);
   assert.deepEqual(changes.subtaskCounts?.p2, { done: 0, total: 2 });
   assert.throws(() => apply({ op: 'task.duplicate', id: 'q', copyId: 'p2' }), error => kind(error) === 'invalid');
   assert.throws(() => apply({ op: 'task.duplicate', id: 'missing', copyId: 'x' }), error => kind(error) === 'not-found');
