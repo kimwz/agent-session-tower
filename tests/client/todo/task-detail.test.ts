@@ -43,6 +43,25 @@ test('a rare property with a value takes its row, and the additions row is gone 
   assert.deepEqual(rows, ['date', 'priority', 'labels', 'project', 'deadline', 'duration']);
 });
 
+test('a todo synced with a GitHub issue heads its properties with a link that opens the issue in a new window', () => {
+  const uploads = { subscribe: () => () => undefined, getJobs: () => [], add() {}, cancel() {}, retry() {} };
+  const show = (item: ReturnType<typeof task>, github: { issues?: Record<string, { repo: string; number: number; url: string; error: string | null }>; detail?: { repo: string; number: number; url: string } }) => {
+    const world = withDetail(worldFromOverview({ ...overview([item]), github: { bindings: [], issues: github.issues ?? {} } }, emptyWorld()),
+      { task: item, subtasks: [], comments: [], files: [], completions: [], events: [], previous: [], next: [], ...(github.detail ? { github: github.detail } : {}) });
+    return renderToStaticMarkup(createElement(TaskDetail, { taskId: item.id, world, error: '', today: '2026-10-14', client: { today: () => '2026-10-14' } as never, actions: {} as never,
+      readOnly: true, uploads: uploads as never, onClose() {}, onOpen() {}, onFollowUp() {}, tab: 'detail', onTab() {} }));
+  };
+  const url = 'https://github.com/o/r/issues/7';
+  const open = show(task('a'), { issues: { a: { repo: 'o/r', number: 7, url, error: null } } });
+  assert.deepEqual([...open.matchAll(/class="todo-property (\w+)/g)].map(match => match[1]).slice(0, 2), ['github', 'date'], 'first in the card, read-only too');
+  assert.match(open, /<a class="todo-property-value todo-github-link " href="https:\/\/github.com\/o\/r\/issues\/7" target="_blank" rel="noreferrer"[^>]*><span>o\/r#7<\/span>/);
+  // A completed todo is no longer in the overview's issues; its detail still knows the issue.
+  assert.match(show(task('b', { completedAt: '2026-10-14T01:00:00.000Z' }), { detail: { repo: 'o/r', number: 8, url } }), /todo-github-link[^>]*><span>o\/r#8</);
+  // A sync problem shows red, with the reason in its hover text.
+  assert.match(show(task('c'), { issues: { c: { repo: 'o/r', number: 9, url, error: 'boom' } } }), /class="todo-property-value todo-github-link error"[^>]*title="o\/r#9 — boom"/);
+  assert.doesNotMatch(show(task('d'), {}), /todo-github-link/, 'none without an issue');
+});
+
 test('a card shows its sub-tasks unless they were folded, a done one struck through', () => {
   (globalThis as { window?: unknown }).window = { localStorage: { getItem: () => null, setItem() {} } };
   const parent = task('p'), open = task('c1', { parentId: 'p' }), done = task('c2', { parentId: 'p', completedAt: '2026-10-14T01:00:00.000Z' });
