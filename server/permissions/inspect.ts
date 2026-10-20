@@ -315,11 +315,14 @@ async function expand(reach: Reach, file: string, text: string): Promise<{ place
 /**
  * The reviewer's reading scope for one request: the repository of its folder and that repository's worktrees, the
  * folders the command changes into, and the files it names. Files the reviewer reads add the files they name
- * (see `ReviewFiles`).
+ * (see `ReviewFiles`). The shared temporary folder is always readable whole: agents keep worktrees and fixtures of
+ * other repositories there.
  */
 export async function reviewScope(input: { cwd: string; command?: string; stateDir: string; log: string; home?: string; env?: NodeJS.ProcessEnv;
   /** Scripts Tower already read for the reviewer (commandEvidence): what they name is open from the start. */
-  evidence?: { path: string; text: string }[] }): Promise<ReviewScopeSpec> {
+  evidence?: { path: string; text: string }[];
+  /** The temporary folder read whole (`/tmp`, `/private/tmp` on macOS); null: none. */
+  temp?: string | null }): Promise<ReviewScopeSpec> {
   const home = input.home ?? homedir();
   const denied = await deniedPaths(input.stateDir, home, input.env ?? process.env);
   const roots: ScopeRoot[] = [];
@@ -342,6 +345,10 @@ export async function reviewScope(input: { cwd: string; command?: string; stateD
   const command = await named(input.command ?? '', [cwd], home, true);
   for (const folder of command.cds) add({ path: folder.real, kind: 'tree' });
   for (const root of command.roots) add(root);
+  // Last, past add's rule against trees right under the top, so the repositories and worktrees in it stay their own
+  // trees (watchable). Credential stores and Tower's own folders in it are still refused by name.
+  const temp = input.temp === null ? undefined : await real(input.temp ?? '/tmp');
+  if (temp && !isDenied(temp, denied, true)) roots.push({ path: temp, kind: 'tree' });
   // The request folder too, unless it lies in a denied place (a Slack or GitHub coordinator's folder in Tower's state).
   // A request folder that is gone binds nothing (the run fails on its own).
   const places = await real(input.cwd) ? [{ path: resolve(input.cwd), real: cwd }].filter(place => !isDenied(place.path, denied, true) && !isDenied(place.real, denied, true)) : [];
@@ -564,7 +571,7 @@ async function sharedFolder(folder: string): Promise<boolean> {
 function explain(status: ReadStatus): string {
   switch (status) {
     case 'denied': return 'Credential stores and Tower\'s own state are never read.';
-    case 'outside': return 'Outside the review scope: the request folder\'s repository and worktrees, paths the command names and paths the files you read name.';
+    case 'outside': return 'Outside the review scope: the request folder\'s repository and worktrees, the temporary folder, paths the command names and paths the files you read name.';
     case 'missing': return 'No such file.';
     case 'unreadable': return 'The file is there but could not be opened (permissions).';
     case 'not-text': return 'Not a text file.';

@@ -26,7 +26,7 @@ async function fixture(t: TestContext) {
   await writeFile(join(home, 'private', 'notes.txt'), 'personal');
   const log = join(root, 'reads.jsonl');
   t.after(() => rm(root, { recursive: true, force: true }));
-  const files = async (command: string) => new ReviewFiles(await reviewScope({ cwd: project, command, stateDir, log, home, env: {} }));
+  const files = async (command: string) => new ReviewFiles(await reviewScope({ temp: null, cwd: project, command, stateDir, log, home, env: {} }));
   return { root, home, project, other, stateDir, log, files };
 }
 
@@ -98,6 +98,49 @@ test('the scope never widens to the home folder, the filesystem top or a folder 
   assert.equal((await files.read({ path: join(f.home, 'loose.sh') }) as { text: string }).text, 'echo loose\n', 'a file named in the command, alone');
   assert.equal((await files.read({ path: join(f.home, 'private', 'notes.txt') }) as { status: string }).status, 'outside');
   assert.equal((await files.read({ path: '/etc/hosts' }) as { status: string }).status, 'outside');
+});
+
+test('the temporary folder is readable whole, by /tmp and by its real path; credential files and Tower\'s own folders in it are still refused', async t => {
+  const f = await fixture(t);
+  const work = await mkdtemp('/tmp/tower-review-temp-');
+  t.after(() => rm(work, { recursive: true, force: true }));
+  const real = await realpath(work);
+  await mkdir(join(real, 'runtime', 'apps', 'server'), { recursive: true });
+  await writeFile(join(real, 'runtime', 'apps', 'server', 'package.json'), '{"scripts":{"test":"node --test"}}');
+  await writeFile(join(real, 'runtime', '.env'), 'TOKEN=secret');
+  const tower = [['tower-runner-501-0123456789abcdef01234567', 'token'], ['tower-owned-501', 'data', 'mcp-x', 'config.json'], ['tower-browser-501', 'state.json'], ['playwright_chromiumdev_profile-x', 'Cookies']];
+  for (const parts of tower) { await mkdir(join(real, ...parts.slice(0, -1)), { recursive: true }); await writeFile(join(real, ...parts), 'secret'); }
+  const spec = await reviewScope({ cwd: f.project, command: 'npm test', stateDir: f.stateDir, log: f.log, home: f.home, env: {} });
+  assert.ok(spec.roots.some(root => root.kind === 'tree' && root.path === dirname(real)));
+  const files = new ReviewFiles(spec);
+  for (const base of [work, real]) {
+    const read = await files.read({ path: join(base, 'runtime', 'apps', 'server', 'package.json') }) as { text: string };
+    assert.equal(read.text, '{"scripts":{"test":"node --test"}}', `nested under ${base}`);
+  }
+  const listed = await files.list({ path: work, depth: 3 }) as { entries: { path: string }[] };
+  assert.deepEqual(listed.entries.map(entry => entry.path), ['runtime', 'runtime/apps', 'runtime/apps/server']);
+  assert.equal((await files.read({ path: join(work, 'runtime', '.env') }) as { status: string }).status, 'denied');
+  for (const parts of tower) assert.equal((await files.read({ path: join(work, ...parts) }) as { status: string }).status, 'denied', parts.join('/'));
+  assert.equal((await files.list({ path: join(work, 'tower-runner-501-0123456789abcdef01234567') }) as { status: string }).status, 'denied');
+  assert.equal((await files.search({ path: work, text: 'secret' }) as { matches: unknown[] }).matches.length, 0);
+  // Only Tower's own names: an agent's files named like them are read.
+  for (const parts of [['scripts', 'tower-browser-check.ts'], ['tower-browser-env-abc123', 'bin', 'aside'], ['tower-owned-501.ts']]) {
+    await mkdir(join(real, ...parts.slice(0, -1)), { recursive: true });
+    await writeFile(join(real, ...parts), 'code');
+    assert.equal((await files.read({ path: join(work, ...parts) }) as { text: string }).text, 'code', parts.join('/'));
+  }
+  assert.equal((await files.read({ path: '/etc/hosts' }) as { status: string }).status, 'outside', 'nothing else widens');
+});
+
+test('a repository in the temporary folder keeps its own tree beside it', async t => {
+  const f = await fixture(t);
+  const work = await realpath(await mkdtemp('/tmp/tower-review-temp-'));
+  t.after(() => rm(work, { recursive: true, force: true }));
+  const repository = join(work, 'worktrees', 'runtime');
+  await mkdir(repository, { recursive: true });
+  execFileSync('git', ['-C', repository, 'init', '-q']);
+  const spec = await reviewScope({ cwd: repository, command: 'npm test', stateDir: f.stateDir, log: f.log, home: f.home, env: {} });
+  assert.deepEqual(spec.roots.filter(root => root.kind === 'tree').map(root => root.path), [repository, dirname(work)]);
 });
 
 test('relative children are followed from the script\'s folder; a path in a comment opens that one file, never its folder', async t => {
@@ -221,7 +264,7 @@ test('the run\'s folder is bound by where it leads: a current link moved to anot
   const f = await fixture(t);
   for (const name of ['release-a', 'release-b']) { await mkdir(join(f.home, 'work', name)); await writeFile(join(f.home, 'work', name, 'package.json'), '{}'); }
   await symlink(join(f.home, 'work', 'release-a'), join(f.home, 'work', 'current'));
-  const spec = await reviewScope({ cwd: join(f.home, 'work', 'current'), command: 'npm test', stateDir: f.stateDir, log: f.log, home: f.home, env: {} });
+  const spec = await reviewScope({ temp: null, cwd: join(f.home, 'work', 'current'), command: 'npm test', stateDir: f.stateDir, log: f.log, home: f.home, env: {} });
   const places = spec.places!.map(place => ({ ...place, sha256: null }));
   assert.deepEqual(places, [{ path: join(f.home, 'work', 'current'), real: join(f.home, 'work', 'release-a'), sha256: null }]);
   assert.deepEqual(await changedFiles(places, []), []);
@@ -236,7 +279,7 @@ test('a script Tower already gave the reviewer opens what it names; a script run
   await mkdir(join(tools, 'deep'), { recursive: true });
   await writeFile(join(tools, 'deep', 'wrapper.mjs'), "spawn('node', ['./child.mjs']);\n");
   await writeFile(join(tools, 'deep', 'child.mjs'), 'console.log("child")\n');
-  const scope = await reviewScope({ cwd: f.project, command: `node ${join(tools, 'deep', 'wrapper.mjs')}`, stateDir: f.stateDir, log: f.log, home: f.home, env: {},
+  const scope = await reviewScope({ temp: null, cwd: f.project, command: `node ${join(tools, 'deep', 'wrapper.mjs')}`, stateDir: f.stateDir, log: f.log, home: f.home, env: {},
     evidence: [{ path: join(tools, 'deep', 'wrapper.mjs'), text: "spawn('node', ['./child.mjs']);\n" }] });
   const given = new ReviewFiles(scope);
   assert.equal((await given.read({ path: join(tools, 'deep', 'child.mjs') }) as { text: string }).text, 'console.log("child")\n', 'without reading the wrapper again');
@@ -583,7 +626,7 @@ test('in a worktree nested in a repository, an import of ../x from a file binds 
   await mkdir(join(nested, 'server', 'runs'), { recursive: true });
   await writeFile(join(nested, 'server', 'state-dir.ts'), 'export {}\n');
   await writeFile(join(nested, 'server', 'runs', 'worker.ts'), "import '../state-dir.js';\n");
-  const files = new ReviewFiles(await reviewScope({ cwd: nested, command: 'node server/runs/worker.ts', stateDir: f.stateDir, log: f.log, home: f.home, env: {} }));
+  const files = new ReviewFiles(await reviewScope({ temp: null, cwd: nested, command: 'node server/runs/worker.ts', stateDir: f.stateDir, log: f.log, home: f.home, env: {} }));
   await files.read({ path: 'server/runs/worker.ts' });
   const bound = reviewedFiles(await readLog(f.log)).filter(file => file.depth).map(file => file.real);
   assert.ok(!bound.includes(join(f.project, 'tmp', 'job')), 'not the folder above the nested worktree');
