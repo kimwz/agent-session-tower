@@ -11,8 +11,8 @@ export interface View { scale: number; x: number; y: number }
 export const fitScale = (stage: Size, image: Size) =>
   image.width > 0 && image.height > 0 ? Math.min(stage.width / image.width, stage.height / image.height, 1) : 1;
 
-/** The closest the viewer zooms in: four times the image's own size, or twice the fit for an image smaller than that. */
-export const maxScale = (fit: number) => Math.max(4, fit * 2);
+/** The closest the viewer zooms in: four times the image's own size (the fit is never above its own size). */
+export const MAX_SCALE = 4;
 
 export const fitView = (stage: Size, image: Size): View => ({ scale: fitScale(stage, image), x: 0, y: 0 });
 
@@ -25,7 +25,7 @@ export const zoomedIn = (view: View, fit: number) => view.scale > fit * 1.001;
  */
 export function clampView(view: View, stage: Size, image: Size): View {
   const fit = fitScale(stage, image);
-  const scale = Math.min(Math.max(view.scale, fit), maxScale(fit));
+  const scale = Math.min(Math.max(view.scale, fit), MAX_SCALE);
   const room = (side: number, stageSide: number) => Math.max(0, (side * scale - stageSide) / 2);
   const bound = (value: number, limit: number) => Math.min(Math.max(value, -limit), limit) || 0;
   return { scale, x: bound(view.x, room(image.width, stage.width)), y: bound(view.y, room(image.height, stage.height)) };
@@ -37,7 +37,7 @@ export function clampView(view: View, stage: Size, image: Size): View {
  */
 export function pinchView(start: View, factor: number, from: Point, to: Point, stage: Size, image: Size): View {
   const fit = fitScale(stage, image);
-  const scale = Math.min(Math.max(start.scale * factor, fit), maxScale(fit));
+  const scale = Math.min(Math.max(start.scale * factor, fit), MAX_SCALE);
   const ratio = scale / start.scale;
   return clampView({ scale, x: to.x - (from.x - start.x) * ratio, y: to.y - (from.y - start.y) * ratio }, stage, image);
 }
@@ -48,14 +48,11 @@ export function pinchView(start: View, factor: number, from: Point, to: Point, s
  */
 export const zoomAt = (view: View, factor: number, point: Point, stage: Size, image: Size): View => pinchView(view, factor, point, point, stage, image);
 
-/**
- * Back to the fit when zoomed in, otherwise to the image's own size (1:1) at `point`. `small` is what a double click or
- * tap does with an image already at its own size when fitted: twice that; the toolbar's button leaves it as it is.
- */
-export function toggleZoom(view: View, point: Point, stage: Size, image: Size, { small = 2 }: { small?: number } = {}): View {
+/** A double click or tap: back to the fit when zoomed in, otherwise to the image's own size (twice it for a small one) at `point`. */
+export function toggleZoom(view: View, point: Point, stage: Size, image: Size): View {
   const fit = fitScale(stage, image);
   if (zoomedIn(view, fit)) return fitView(stage, image);
-  const target = fit < 1 ? 1 : fit * small;
+  const target = fit < 1 ? 1 : 2;
   return zoomAt(view, target / view.scale, point, stage, image);
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type PointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronLeft, ChevronRight, Download, ExternalLink, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { translate as t, useI18n } from '../i18n/i18n';
@@ -13,36 +13,52 @@ type Gesture =
 
 const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
 const middle = (a: Point, b: Point): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+/** Files dragged or pasted over the viewer are not the page's: the task's detail under it would attach them. */
+const keepFiles = (event: DragEvent) => { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'none'; };
 
 /**
- * Shows images over the page, starting from `start`: fitted to the screen, zoomed with the buttons, the wheel, a pinch
- * or a double click or tap (back to the fit, or to the image's own size there), moved by dragging when zoomed in, and
- * gone through with the arrows, the arrow keys or a sideways swipe. Esc, a click or tap beside the image or the close
- * button closes it, and the focus goes back to `opener` (Safari does not focus a clicked button) or where it was.
+ * Shows `images` (at least one) over the page, starting from `start`: fitted to the screen, zoomed with the buttons, the
+ * wheel, a pinch or a double click or tap (back to the fit, or to the image's own size there), moved by dragging or, zoomed
+ * in, the arrow keys, and gone through with the arrows, the left and right keys or a sideways swipe. Esc, a click or tap
+ * beside the image or the close button closes it, and the focus goes back to `opener` (Safari does not focus a clicked
+ * button) or where it was. The list may change while open (an attachment deleted elsewhere): the picture shown stays,
+ * or its neighbour when it is gone.
  */
 export function ImageViewer({ images, start, opener, onClose }: { images: readonly ViewerImage[]; start: number; opener?: HTMLElement | null; onClose: () => void }) {
   useI18n();
   const dialog = useRef<HTMLDialogElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
-  const [chosen, setChosen] = useState(start);
+  // The picture shown, by its address, so a change to the list does not swap it for another.
+  const [chosen, setChosen] = useState(images[start]?.src);
   const [stage, setStage] = useState<Size>({ width: 0, height: 0 });
-  const [natural, setNatural] = useState<Size | null>(null);
+  // What loading a picture found, for that picture only: its size, or that it failed.
+  const [loaded, setLoaded] = useState<{ src: string; size: Size | null } | null>(null);
   const [view, setView] = useState<View>({ scale: 1, x: 0, y: 0 });
-  const [failed, setFailed] = useState(false);
   const pointers = useRef(new Map<number, Point>());
   const gesture = useRef<Gesture | null>(null);
   const lastTap = useRef<{ time: number; point: Point } | null>(null);
-  const index = Math.min(Math.max(chosen, 0), images.length - 1);
+  // A tap beside the picture closes the viewer on its click, not before: a viewer gone at the tap's end would leave the
+  // click to whatever is under it on the page.
+  const closeOnClick = useRef(false);
+  const found = images.findIndex(image => image.src === chosen);
+  const lastIndex = useRef(start);
+  const index = found >= 0 ? found : Math.min(lastIndex.current, images.length - 1);
+  lastIndex.current = index;
   const image = images[index];
   const count = images.length;
+  const natural = loaded?.src === image.src ? loaded.size : null;
+  const failed = loaded?.src === image.src && !loaded.size;
   // The handlers below read the latest of these, not the render they were made in.
-  const live = useRef({ stage, natural, view, count, onClose });
-  live.current = { stage, natural, view, count, onClose };
+  const live = useRef({ stage, natural, view, count, index, images });
+  live.current = { stage, natural, view, count, index, images };
 
   useEffect(() => {
     const element = dialog.current!, back = opener ?? document.activeElement;
     if (!element.open) element.showModal();
+    // After `showModal`, which focuses the first control it finds (a link while the zoom buttons wait for the picture).
+    closeButton.current?.focus();
     // Safari's own pinch would zoom the page behind; the stage's pinch is the viewer's.
     const gestures = (event: Event) => event.preventDefault();
     element.addEventListener('gesturestart', gestures);
@@ -90,21 +106,22 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
     return { x: event.clientX - rect.left - rect.width / 2, y: event.clientY - rect.top - rect.height / 2 };
   };
   const go = (step: number) => {
-    if (live.current.count < 2 || !step) return;
-    setChosen(current => (current + step + live.current.count) % live.current.count);
-    setNatural(null); setFailed(false);
+    const { count, index, images } = live.current;
+    if (count < 2 || !step) return;
+    setChosen(images[(index + step + count) % count].src);
     pointers.current.clear(); gesture.current = null; lastTap.current = null;
   };
   const fit = natural ? fitScale(stage, natural) : 1;
   // A picture still loading, or one that failed, is never zoomed: the last picture's scale says nothing of it.
   const zoomed = natural !== null && zoomedIn(view, fit);
   const zoomBy = (factor: number) => { if (natural) setView(current => zoomAt(current, factor, { x: 0, y: 0 }, stage, natural)); };
-  const toggleAt = (point: Point, small?: number) => { if (natural) setView(current => toggleZoom(current, point, stage, natural, { small })); };
+  const toggleAt = (point: Point) => { if (natural) setView(current => toggleZoom(current, point, stage, natural)); };
   const panKeys = (dx: number, dy: number) => { if (natural) setView(current => panBy(current, dx, dy, stage, natural)); };
 
   const down = (event: PointerEvent<HTMLDivElement>) => {
     if (event.pointerType === 'mouse' && event.button !== 0) return;
     event.currentTarget.setPointerCapture(event.pointerId);
+    closeOnClick.current = false;
     const point = pointIn(event);
     pointers.current.set(event.pointerId, point);
     const [a, b] = [...pointers.current.values()];
@@ -117,16 +134,16 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
     const point = pointIn(event);
     pointers.current.set(event.pointerId, point);
     const current = gesture.current, { natural, stage } = live.current;
-    if (!current || !natural) return;
+    if (!current) return;
     if (current.kind === 'pinch') {
       const [a, b] = [...pointers.current.values()];
-      if (!b) return;
-      setView(pinchView(current.view, distance(a, b) / current.distance, current.middle, middle(a, b), stage, natural));
+      if (b && natural) setView(pinchView(current.view, distance(a, b) / current.distance, current.middle, middle(a, b), stage, natural));
       return;
     }
+    // A move counts before the picture has loaded too: a swipe over one still loading (or failed) goes on, never closes.
     const dx = point.x - current.start.x, dy = point.y - current.start.y;
     if (Math.hypot(dx, dy) > 6) current.moved = true;
-    if (current.moved && zoomedIn(current.view, fitScale(stage, natural))) setView(panBy(current.view, dx, dy, stage, natural));
+    if (natural && current.moved && zoomedIn(current.view, fitScale(stage, natural))) setView(panBy(current.view, dx, dy, stage, natural));
   };
   const up = (event: PointerEvent<HTMLDivElement>) => {
     if (!pointers.current.delete(event.pointerId)) return;
@@ -139,10 +156,10 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
     if (event.type === 'pointercancel') return;
     const point = pointIn(event);
     if (current.moved) {
-      if (natural && !zoomedIn(current.view, fitScale(stage, natural))) go(swipeStep(point.x - current.start.x, point.y - current.start.y));
+      if (!natural || !zoomedIn(current.view, fitScale(stage, natural))) go(swipeStep(point.x - current.start.x, point.y - current.start.y));
       return;
     }
-    if (!current.onImage) { live.current.onClose(); return; }
+    if (!current.onImage) { closeOnClick.current = true; return; }
     const previous = lastTap.current;
     if (previous && event.timeStamp - previous.time < 320 && distance(previous.point, point) < 30) { lastTap.current = null; toggleAt(point); }
     else lastTap.current = { time: event.timeStamp, point };
@@ -152,11 +169,11 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
     if (event.metaKey || event.ctrlKey || event.altKey || event.nativeEvent.isComposing) return;
     // Zoomed in, the arrow keys move the picture (a picture the keyboard could not see all of otherwise); fitted, left and
     // right go through the pictures.
-    const step = 80, moving = zoomed;
+    const step = 80;
     const actions: Record<string, () => void> = {
       // Esc is the viewer's alone: the page's own Esc handlers (its help, the task's detail) never see it.
-      Escape: onClose, ArrowLeft: () => moving ? panKeys(step, 0) : go(-1), ArrowRight: () => moving ? panKeys(-step, 0) : go(1),
-      ArrowUp: () => { if (moving) panKeys(0, step); }, ArrowDown: () => { if (moving) panKeys(0, -step); },
+      Escape: onClose, ArrowLeft: () => zoomed ? panKeys(step, 0) : go(-1), ArrowRight: () => zoomed ? panKeys(-step, 0) : go(1),
+      ArrowUp: () => { if (zoomed) panKeys(0, step); }, ArrowDown: () => { if (zoomed) panKeys(0, -step); },
       '+': () => zoomBy(1.25), '=': () => zoomBy(1.25), '-': () => zoomBy(0.8),
       '0': () => { if (natural) setView(fitView(stage, natural)); },
     };
@@ -166,8 +183,10 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
     action();
   };
 
-  if (!image) return null;
+  // A page opened from the home screen gives a new tab a browser of its own, without the page's sign-in: no new tab there.
+  const standalone = typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches;
   return createPortal(<dialog ref={dialog} className="image-viewer" aria-label={image.name} onKeyDown={keys}
+    onPaste={event => event.stopPropagation()} onDragOver={keepFiles} onDrop={keepFiles}
     // A close request without a key (Android's back gesture).
     onCancel={event => { event.preventDefault(); onClose(); }}
     // The browser may close a modal on its own (a second Esc); a close queued before it opened again is not one.
@@ -175,18 +194,21 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
     <div className="image-viewer-bar">
       <span className="image-viewer-name" title={image.name}>{image.name}</span>
       {count > 1 && <span className="image-viewer-count">{index + 1} / {count}</span>}
-      <button type="button" className="icon-button" aria-label={t('축소')} title={t('축소')} disabled={!natural || !zoomed} onClick={() => zoomBy(0.8)}><ZoomOut size={16} /></button>
+      <button type="button" className="icon-button" aria-label={t('축소')} title={t('축소')} disabled={!zoomed} onClick={() => zoomBy(0.8)}><ZoomOut size={16} /></button>
+      {/* Fit and actual size (1:1) are one for a picture smaller than the screen. */}
       <button type="button" className="image-viewer-scale" disabled={!natural || (fit >= 1 && !zoomed)} aria-label={zoomed ? t('화면에 맞추기') : t('원본 크기로 보기')} title={zoomed ? t('화면에 맞추기') : t('원본 크기로 보기')}
-        onClick={() => toggleAt({ x: 0, y: 0 }, 1)}>{natural ? `${Math.round(view.scale * 100)}%` : '–'}</button>
+        onClick={() => toggleAt({ x: 0, y: 0 })}>{natural ? `${Math.round(view.scale * 100)}%` : '–'}</button>
       <button type="button" className="icon-button" aria-label={t('확대')} title={t('확대')} disabled={!natural} onClick={() => zoomBy(1.25)}><ZoomIn size={16} /></button>
-      <a className="icon-button" href={image.src} target="_blank" rel="noreferrer noopener" aria-label={t('새 탭에서 원본 열기')} title={t('새 탭에서 원본 열기')}><ExternalLink size={16} /></a>
+      {!standalone && <a className="icon-button" href={image.src} target="_blank" rel="noreferrer noopener" aria-label={t('새 탭에서 원본 열기')} title={t('새 탭에서 원본 열기')}><ExternalLink size={16} /></a>}
       {image.download && <a className="icon-button" href={image.download} download={image.name} aria-label={t('“{0}” 내려받기', { 0: image.name })} title={t('“{0}” 내려받기', { 0: image.name })}><Download size={16} /></a>}
-      <button type="button" className="icon-button" autoFocus aria-label={t('닫기')} title={t('닫기')} onClick={onClose}><X size={18} /></button>
+      <button ref={closeButton} type="button" className="icon-button" aria-label={t('닫기')} title={t('닫기')} onClick={onClose}><X size={18} /></button>
     </div>
-    <div ref={stageRef} className={`image-viewer-stage${zoomed ? ' zoomed' : ''}`} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}>
+    <div ref={stageRef} className={`image-viewer-stage${zoomed ? ' zoomed' : ''}`} onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
+      onClick={() => { if (closeOnClick.current) { closeOnClick.current = false; onClose(); } }}>
       {failed ? <p className="image-viewer-error">{t('이미지 미리보기를 불러올 수 없습니다.')}</p>
         : <img key={image.src} ref={imageRef} src={image.src} alt={image.name} draggable={false} decoding="async"
-          onLoad={event => setNatural({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} onError={() => setFailed(true)}
+          onLoad={event => setLoaded({ src: image.src, size: { width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight } })}
+          onError={() => setLoaded({ src: image.src, size: null })}
           style={natural ? { width: natural.width, height: natural.height, transform: `translate(${view.x}px, ${view.y}px) translate(-50%, -50%) scale(${view.scale})` } : { opacity: 0 }} />}
     </div>
     {count > 1 && <>

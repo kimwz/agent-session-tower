@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clampView, fitScale, fitView, maxScale, panBy, pinchView, swipeStep, toggleZoom, zoomAt, zoomedIn } from '../../../client/src/common/image-zoom.js';
+import { clampView, fitScale, fitView, MAX_SCALE, panBy, pinchView, swipeStep, toggleZoom, zoomAt, zoomedIn } from '../../../client/src/common/image-zoom.js';
 
 const stage = { width: 400, height: 800 };
 const shot = { width: 1200, height: 2400 };
@@ -13,8 +13,7 @@ test('a picture fits the stage whole, and a small one keeps its own size', () =>
   assert.equal(fitScale(stage, { width: 100, height: 50 }), 1);
   assert.equal(fitScale(stage, { width: 0, height: 0 }), 1);
   assert.deepEqual(fitView(stage, shot), { scale: 1 / 3, x: 0, y: 0 });
-  assert.equal(maxScale(1 / 3), 4);
-  assert.equal(maxScale(3), 6);
+  assert.equal(MAX_SCALE, 4);
 });
 
 test('the view stays between the fit and the most, and never pulls the picture past its edge', () => {
@@ -58,8 +57,6 @@ test('a double click goes to the picture’s own size there, and back to the fit
   // A small picture, already at its own size, doubles.
   const icon = { width: 100, height: 50 };
   assert.equal(toggleZoom(fitView(stage, icon), { x: 0, y: 0 }, stage, icon).scale, 2);
-  // The toolbar's actual size is 1:1, which a small picture already is.
-  assert.deepEqual(toggleZoom(fitView(stage, icon), { x: 0, y: 0 }, stage, icon, { small: 1 }), fitView(stage, icon));
 });
 
 test('dragging moves a zoomed picture within its edges', () => {
