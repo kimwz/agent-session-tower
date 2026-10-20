@@ -139,6 +139,21 @@ test('a card lists three sub-tasks in their order, from the done one before the 
   assert.equal(shown(''), ' +0');
 });
 
+test('a sub-task at work is never left out of its card: outside the run, and when the owner folded the list', () => {
+  // `d` done, `o` open, `w` open and at work, `x` done with a master still marked at work.
+  const shown = (marks: string, folded = false) => {
+    const list = [...marks].map((mark, index) => ({ id: index + 1, completedAt: mark === 'd' || mark === 'x' ? 'x' : null, working: mark === 'w' || mark === 'x' }));
+    const { shown, more } = subtaskWindow(list, item => item.working, folded);
+    return `${shown.map(item => item.id).join(',')} +${more}`;
+  };
+  assert.equal(shown('dooow'), '1,2,3,5 +1', 'the run as before, the one at work after it, the rest counted');
+  assert.equal(shown('ooowow'), '1,2,3,4,6 +1', 'several at work: each in its order');
+  assert.equal(shown('doow'), '1,2,3,4 +0');
+  assert.equal(shown('dooow', true), '5 +0', 'folded: only those at work, nothing counted as more');
+  assert.equal(shown('dooo', true), ' +0', 'folded with none at work: nothing');
+  assert.equal(shown('ooox'), '1,2,3 +1', 'a completed one is not kept');
+});
+
 test('a card shows its sub-task window, done ones struck through, and how many more the detail has', () => {
   const parent = task('p', { content: 'Parent' });
   const subtasks = [1, 2, 3, 4, 5, 6].map(n => task(`p${n}`, { parentId: 'p', content: `Step ${n}`, sortKey: `${n}`, ...(n <= 2 ? { completedAt: 'x' } : {}) }));
