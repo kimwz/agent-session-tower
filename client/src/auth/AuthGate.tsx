@@ -35,8 +35,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }, [refresh]);
   const signedIn = Boolean(status && (status.local || status.authenticated));
   // A link Tower hands out, opened before signing in, opens now (server/http/link-reopen.ts); nothing else is followed.
-  // The address loses it first. The same link sent back here within moments (the server still not taking the sign-in,
-  // as when the address the session is bound to changed) is not followed again, so the two never bounce.
+  // The address loses it first. A page that was signed in already when the link came back within moments (the server
+  // not taking the sign-in, as when the address the session is bound to changed) does not follow it again, so the two
+  // never bounce; a sign-in made here always follows it.
+  const signedInHere = useRef(false);
   useEffect(() => {
     if (!signedIn) return;
     const open = linkToOpen(window.location.search);
@@ -45,13 +47,15 @@ export function AuthGate({ children }: { children: ReactNode }) {
     const key = 'agent-session-tower.opened-link', now = Date.now();
     try {
       const last = JSON.parse(window.sessionStorage.getItem(key) ?? 'null') as { link?: string; at?: number } | null;
-      if (last?.link === open.link && typeof last.at === 'number' && now - last.at < 10_000) return;
+      if (!signedInHere.current && last?.link === open.link && typeof last.at === 'number' && now - last.at < 10_000) return;
       window.sessionStorage.setItem(key, JSON.stringify({ link: open.link, at: now }));
-    } catch { /* Private browsing can disable storage; the link still opens. */ }
+    } catch {
+      // best-effort: without storage (private browsing) the link still opens, unguarded.
+    }
     window.location.replace(open.link);
   }, [signedIn]);
   if (status && signedIn) return <AuthContext.Provider value={{ status, refresh }}>{children}</AuthContext.Provider>;
-  return <main className="auth-screen"><section className="auth-card"><LockKeyhole size={26} /><h1>Agent Session Tower</h1>{!status ? <>{error ? <><p role="alert">{translateMessage(error)}</p><button className="secondary-button" onClick={() => void refresh()}>{t('다시 확인')}</button></> : <LoaderCircle className="spin" aria-label={t('연결 중')} />}</> : status.configured ? <LoginForm status={status} onLogin={next => { ++generation.current; setStatus(next); }} /> : <><h2>{t('계정 설정이 필요합니다')}</h2><p>{t('서버 컴퓨터에서 Tower를 열고 계정 관리에서 ID와 비밀번호를 설정하세요.')}</p><button className="secondary-button" onClick={() => void refresh()}>{t('다시 확인')}</button></>}</section></main>;
+  return <main className="auth-screen"><section className="auth-card"><LockKeyhole size={26} /><h1>Agent Session Tower</h1>{!status ? <>{error ? <><p role="alert">{translateMessage(error)}</p><button className="secondary-button" onClick={() => void refresh()}>{t('다시 확인')}</button></> : <LoaderCircle className="spin" aria-label={t('연결 중')} />}</> : status.configured ? <LoginForm status={status} onLogin={next => { ++generation.current; signedInHere.current = true; setStatus(next); }} /> : <><h2>{t('계정 설정이 필요합니다')}</h2><p>{t('서버 컴퓨터에서 Tower를 열고 계정 관리에서 ID와 비밀번호를 설정하세요.')}</p><button className="secondary-button" onClick={() => void refresh()}>{t('다시 확인')}</button></>}</section></main>;
 }
 export function LoginForm({ status, onLogin }: { status: AuthStatus; onLogin: (status: AuthStatus) => void }) {
   const { t } = useI18n();
