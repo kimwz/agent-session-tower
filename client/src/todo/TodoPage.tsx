@@ -459,8 +459,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
     <main className="todo-main" aria-label={title} onClickCapture={event => {
       // A click on the page's empty space closes the master's conversation over it, else the open task, and does
       // nothing else (todo-background).
-      const main = event.currentTarget;
-      const close = backgroundClose({ target: event.target, pressedOn: pressed.current.target, popover: pressed.current.popover, inside: target => main.contains(target) },
+      const target = event.target instanceof Element && event.currentTarget.contains(event.target) ? event.target : null;
+      const close = backgroundClose({ target, plain: !pressed.current.popover && pressed.current.target === event.target },
         { conversation: onBackgroundClick, task: openTaskId ? closeTask : undefined });
       if (!close) return;
       event.preventDefault(); event.stopPropagation();
