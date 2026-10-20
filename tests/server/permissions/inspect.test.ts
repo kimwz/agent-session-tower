@@ -108,7 +108,7 @@ test('the temporary folder is readable whole, by /tmp and by its real path; cred
   await mkdir(join(real, 'runtime', 'apps', 'server'), { recursive: true });
   await writeFile(join(real, 'runtime', 'apps', 'server', 'package.json'), '{"scripts":{"test":"node --test"}}');
   await writeFile(join(real, 'runtime', '.env'), 'TOKEN=secret');
-  const tower = [['tower-runner-501-0123abcd', 'token'], ['tower-owned-501', 'data', 'mcp-x', 'config.json'], ['tower-browser-501', 'state.json'], ['playwright_chromiumdev_profile-x', 'Cookies']];
+  const tower = [['tower-runner-501-0123456789abcdef01234567', 'token'], ['tower-owned-501', 'data', 'mcp-x', 'config.json'], ['tower-browser-501', 'state.json'], ['playwright_chromiumdev_profile-x', 'Cookies']];
   for (const parts of tower) { await mkdir(join(real, ...parts.slice(0, -1)), { recursive: true }); await writeFile(join(real, ...parts), 'secret'); }
   const spec = await reviewScope({ cwd: f.project, command: 'npm test', stateDir: f.stateDir, log: f.log, home: f.home, env: {} });
   assert.ok(spec.roots.some(root => root.kind === 'tree' && root.path === dirname(real)));
@@ -121,8 +121,14 @@ test('the temporary folder is readable whole, by /tmp and by its real path; cred
   assert.deepEqual(listed.entries.map(entry => entry.path), ['runtime', 'runtime/apps', 'runtime/apps/server']);
   assert.equal((await files.read({ path: join(work, 'runtime', '.env') }) as { status: string }).status, 'denied');
   for (const parts of tower) assert.equal((await files.read({ path: join(work, ...parts) }) as { status: string }).status, 'denied', parts.join('/'));
-  assert.equal((await files.list({ path: join(work, 'tower-runner-501-0123abcd') }) as { status: string }).status, 'denied');
+  assert.equal((await files.list({ path: join(work, 'tower-runner-501-0123456789abcdef01234567') }) as { status: string }).status, 'denied');
   assert.equal((await files.search({ path: work, text: 'secret' }) as { matches: unknown[] }).matches.length, 0);
+  // Only Tower's own names: an agent's files named like them are read.
+  for (const parts of [['scripts', 'tower-browser-check.ts'], ['tower-browser-env-abc123', 'bin', 'aside'], ['tower-owned-501.ts']]) {
+    await mkdir(join(real, ...parts.slice(0, -1)), { recursive: true });
+    await writeFile(join(real, ...parts), 'code');
+    assert.equal((await files.read({ path: join(work, ...parts) }) as { text: string }).text, 'code', parts.join('/'));
+  }
   assert.equal((await files.read({ path: '/etc/hosts' }) as { status: string }).status, 'outside', 'nothing else widens');
 });
 
