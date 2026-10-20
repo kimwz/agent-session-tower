@@ -231,7 +231,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   const shown = useMemo(() => new Set(visibleColumns.flatMap(column => column.tasks.map(item => item.id))), [visibleColumns]);
   // A card folded out of sight on the overview is no longer the chosen one, so E never completes a task not shown.
   useEffect(() => { if (overview && selectedId && !selectedId.startsWith('done:') && !shown.has(selectedId)) setSelectedId(null); }, [overview, selectedId, shown]);
-  const unread = useTodoReadState(world, state.phase === 'ready', openTaskId);
+  // Comments show on the detail's own tab only: a todo opened on its chat stays unread.
+  const unread = useTodoReadState(world, state.phase === 'ready', detailTab === 'detail' ? openTaskId : null);
   const context = useMemo(() => cardContext(world, today, showProject, shown, unread), [world, today, showProject, shown, unread]);
   const unreadProjects = useMemo(() => new Set([...unread].flatMap(id => isOpen(world.tasks[id]) ? [world.tasks[id].projectId] : [])), [unread, world.tasks]);
   const counts = useMemo(() => sidebarCounts(world, today), [world, today]);

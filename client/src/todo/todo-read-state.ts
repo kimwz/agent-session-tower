@@ -30,6 +30,13 @@ export function acknowledgeTodos(state: TodoReadState, marks: Readonly<Record<st
   return Object.fromEntries([...kept.slice(Math.max(0, kept.length + changed.length - TODO_READ_LIMIT)), ...changed]);
 }
 
+/** The stored marks: null when none were ever written, undefined without browser storage. */
+function stored(): TodoReadState | null | undefined {
+  try { return parseTodoReadState(localStorage.getItem(TODO_READ_KEY)); }
+  // best-effort: without browser storage the marks live in memory only.
+  catch { return undefined; }
+}
+
 export function unreadTodos(outside: Readonly<Record<string, string>>, state: TodoReadState): Set<string> {
   return new Set(Object.entries(outside).filter(([id, mark]) => state[id] !== mark).map(([id]) => id));
 }
@@ -41,13 +48,12 @@ export function unreadTodos(outside: Readonly<Record<string, string>>, state: To
  * once the overview is in.
  */
 export function useTodoReadState(world: Pick<TodoWorld, 'outside' | 'availability' | 'detail'>, ready: boolean, openId: string | null): ReadonlySet<string> {
-  const [read, setRead] = useState<TodoReadState | null>(() => {
-    try { return parseTodoReadState(localStorage.getItem(TODO_READ_KEY)); }
-    // best-effort: without browser storage the marks live in memory only.
-    catch { return {}; }
-  });
+  const [read, setRead] = useState<TodoReadState | null>(() => stored() ?? null);
+  // Written over what is stored now, so marks another window wrote meanwhile stay.
   const save = useCallback((update: (previous: TodoReadState | null) => TodoReadState) => setRead(previous => {
-    const next = update(previous);
+    const latest = stored();
+    const base = latest === undefined ? previous : latest;
+    const next = update(base);
     // best-effort: the marks stay usable in memory when browser storage refuses them.
     if (next !== previous) try { localStorage.setItem(TODO_READ_KEY, JSON.stringify(next)); } catch { /* Memory state remains usable. */ }
     return next;
@@ -55,7 +61,7 @@ export function useTodoReadState(world: Pick<TodoWorld, 'outside' | 'availabilit
   const outside = world.outside;
   // An unavailable file shows no comments: what it holds is not known to be read.
   const known = ready && world.availability.state !== 'unavailable';
-  useEffect(() => { if (read === null && known) save(() => acknowledgeTodos({}, outside)); }, [read, known, outside, save]);
+  useEffect(() => { if (read === null && known) save(base => base ?? acknowledgeTodos({}, outside)); }, [read, known, outside, save]);
   const newest = openId ? outside[openId] : undefined;
   const mark = newest && world.detail?.task.id === openId && world.detail.comments.some(comment => comment.id === newest) ? newest : undefined;
   const started = read !== null;

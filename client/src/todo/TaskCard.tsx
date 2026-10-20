@@ -122,7 +122,8 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
   // A completed card (the completed list) lists none: its sub-tasks are in its detail.
   const listed = task.completedAt ? [] : (context.children.get(task.id) ?? []).filter(child => !context.shown?.has(child.id));
   const subtasks: CardSubtasksProps = { task, listed, world: context.world, unread: context.unread, readOnly, onOpen, onComplete, onReopen, onChat };
-  const unread = !!context.unread?.has(task.id);
+  // A completed card (a repeating task's past occurrence among them) is done with.
+  const unread = !task.completedAt && !!context.unread?.has(task.id);
   const chips = CARD_META.filter(chip => chip.visible(task, context));
   const agent = context.world.agents[task.id];
   // A file dragged from the computer is not a card being dragged (dnd-kit follows the pointer, not HTML drag events).
@@ -192,14 +193,15 @@ function LiveSubtasks(props: CardSubtasksProps) {
  */
 function CardSubtasks({ task, listed, world, unread, working, readOnly, onOpen, onComplete, onReopen, onChat }: CardSubtasksProps) {
   const [folded, setFolded] = useState(() => subtasksFolded(task.id));
-  const { shown, more } = subtaskWindow(listed, working, folded);
+  // Unread ones show whatever the fold, as those at work do.
+  const { shown, more } = subtaskWindow(listed, child => !!working?.(child) || !!unread?.has(child.id), folded);
   return <div className="todo-card-subtasks">
     <button type="button" className="todo-subtask-toggle" aria-expanded={!folded} onClick={event => { event.stopPropagation(); setSubtasksFolded(task.id, !folded); setFolded(!folded); }}>
       <ChevronRight size={12} />{subtaskToggleText(world, task.id, listed.filter(isOpen).length)}
     </button>
     {shown.length > 0 && <ul>{shown.map(child => <li key={child.id} className={child.completedAt ? 'done' : undefined}>
       <CheckCircle task={child} size="small" disabled={readOnly} onComplete={() => onComplete(child)} onReopen={onReopen && (() => onReopen(child))} />
-      <button type="button" className="todo-subtask-title" onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{unread?.has(child.id) && <UnreadDot />}{child.content}</button>
+      <button type="button" className="todo-subtask-title" onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{!child.completedAt && unread?.has(child.id) && <UnreadDot />}{child.content}</button>
       {world.agents[child.id] && <SubtaskAgent task={child} agent={world.agents[child.id]} onChat={onChat} />}
     </li>)}</ul>}
     {more > 0 && <button type="button" className="todo-subtask-more" {...OWN_PRESS} onClick={event => { event.stopPropagation(); onOpen(task.id); }}>{t('{0}건 더 있음', { 0: more })}</button>}
