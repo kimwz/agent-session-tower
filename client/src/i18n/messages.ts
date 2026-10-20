@@ -2987,6 +2987,7 @@ export const english: Record<string, string> = {
   " (비공개 리포)": " (private repository)",
   "{0} 계정은 {1}에 쓸 수 없습니다.": "{0} cannot write to {1}.",
   "{0}와 동기화": "Synced with {0}",
+  "GitHub": "GitHub",
   "GitHub 이슈에서 온 댓글입니다. GitHub에서만 고칠 수 있습니다.": "This comment came from the GitHub issue. It can be changed only on GitHub.",
   "GitHub 연결은 소유자의 화면에서만 바꿀 수 있습니다.": "GitHub links can be changed only on the owner’s page.",
   "GitHub 동기화를 사용할 수 없습니다.": "GitHub sync is unavailable.",
