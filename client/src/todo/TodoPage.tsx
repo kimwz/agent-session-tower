@@ -492,7 +492,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
       {body}
     </main>
     {openTaskId && state.phase === 'ready' && <TaskDetail taskId={openTaskId} world={world} error={state.detailError} today={today} client={client} actions={actions} readOnly={readOnly || lockedTask(openTaskId)} uploads={uploads}
-      onClose={closeTask} onOpen={openTask} onProject={id => goTo(world.projects.find(item => item.id === id)?.inbox ? { kind: 'inbox' } : { kind: 'project', id })} onFollowUp={followUp}
+      onClose={closeTask} onOpen={openTask} onFollowUp={followUp}
       tab={detailTab} onTab={chooseTab} />}
     {switcher && state.phase === 'ready' && <ViewSwitcher anchor={titleRef} world={world} current={view} onClose={() => setSwitcher(false)} onChoose={next => { setSwitcher(false); goTo(next); }} />}
     {quick && <QuickAdd world={world} today={today} client={client} preset={quick.preset} follow={quick.follow} attach={attach} onClose={() => setQuick(null)} onAdded={id => setSelectedId(id)} />}

@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.166.1] - 2026-10-20
+
+- **할 일 상세의 맨 윗줄이 상세 / 채팅 탭입니다.** 위쪽의 프로젝트 이름 줄을 없애고, 그 자리 왼쪽에 상세 / 채팅 탭을, 오른쪽에 전과 같은 완료 · ··· · 닫기 버튼을 둡니다. 한 줄이 줄어든 만큼 본문과 채팅 대화가 위로 넓어집니다. 프로젝트는 상세 탭의 속성 카드(휴대폰은 제목 아래 칩)에 그대로 보입니다. 하위 작업의 상위 작업 링크는 상세 탭 제목 위로 옮겨, 휴대폰에서 완료 버튼이 눌려 두 줄로 접히지 않습니다.
+
 ## [1.166.0] - 2026-10-20
 
 - **할 일 캘린더에서 W·M을 다시 누르면 다른 보기로 돌아갑니다.** 캘린더가 주간일 때 W를 한 번 더 누르면 월간으로, 월간일 때 M을 한 번 더 누르면 주간(모바일은 3일)으로 바뀝니다. B·C처럼 같은 키로 왔다 갔다 할 수 있습니다. 다른 보기에서 누르면 전과 같이 그 키의 보기로 가고, 보드에서 누르면 캘린더를 누른 키의 보기로 엽니다. 키를 누르고 있어도 보기가 깜박이며 바뀌지 않습니다. 도움말(?)의 설명도 "캘린더 주·월 (다시 누르면 돌아감)"으로 바뀌었습니다. 화면의 월간·주간 버튼은 그대로입니다.
