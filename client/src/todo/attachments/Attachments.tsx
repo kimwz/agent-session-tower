@@ -1,7 +1,8 @@
-import { useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type ReactNode } from 'react';
 import { Download, FileText, Paperclip, RotateCcw, Trash2, TriangleAlert, X } from 'lucide-react';
 import type { TodoFile } from '../../../../shared/todo/types';
 import { translate as t } from '../../i18n/i18n';
+import { ImageViewer } from '../../common/ImageViewer';
 import { isPreviewable, playable, sizeLabel, type UploadJob } from './upload';
 
 /** Attachments of a task's description or of a comment, the uploads going to it, and the ways to add files. */
@@ -9,17 +10,27 @@ import { isPreviewable, playable, sizeLabel, type UploadJob } from './upload';
 export const fileUrl = (file: Pick<TodoFile, 'id'>, inline = false) => `/api/todos/files/${encodeURIComponent(file.id)}${inline ? '?inline=1' : ''}`;
 
 export function AttachmentList({ files, onDelete }: { files: readonly TodoFile[]; onDelete?: (file: TodoFile) => void }) {
+  // The picture the viewer over the page opened at, by its place among the list's pictures.
+  const [viewing, setViewing] = useState<{ index: number; opener: HTMLElement } | null>(null);
+  const images = files.filter(isPreviewable);
+  // Its pictures all gone (deleted elsewhere), the viewer is closed for good, not opened again by the next one.
+  const empty = images.length === 0;
+  useEffect(() => { if (empty) setViewing(null); }, [empty]);
   if (!files.length) return null;
-  const images = files.filter(isPreviewable), media = files.filter(file => playable(file)), others = files.filter(file => !isPreviewable(file) && !playable(file));
+  const media = files.filter(file => playable(file)), others = files.filter(file => !isPreviewable(file) && !playable(file));
   const tools = (file: TodoFile) => <>
     <a className="icon-button" href={fileUrl(file)} download={file.name} aria-label={t('“{0}” 내려받기', { 0: file.name })}><Download size={13} /></a>
     {onDelete && <button type="button" className="icon-button" aria-label={t('“{0}” 삭제', { 0: file.name })} onClick={() => onDelete(file)}><Trash2 size={13} /></button>}
   </>;
   return <div className="todo-files">
-    {images.length > 0 && <ul className="todo-file-thumbs">{images.map(file => <li key={file.id}>
-      <a href={fileUrl(file, true)} target="_blank" rel="noreferrer noopener" title={file.name}><img src={fileUrl(file, true)} alt={file.name} loading="lazy" /></a>
+    {images.length > 0 && <ul className="todo-file-thumbs">{images.map((file, index) => <li key={file.id}>
+      <button type="button" className="todo-file-thumb" title={file.name} aria-label={t('“{0}” 크게 보기', { 0: file.name })} onClick={event => setViewing({ index, opener: event.currentTarget })}>
+        <img src={fileUrl(file, true)} alt={file.name} loading="lazy" />
+      </button>
       <span className="todo-file-tools">{tools(file)}</span>
     </li>)}</ul>}
+    {viewing !== null && images.length > 0 && <ImageViewer images={images.map(file => ({ src: fileUrl(file, true), name: file.name, download: fileUrl(file) }))}
+      start={viewing.index} opener={viewing.opener} onClose={() => setViewing(null)} />}
     {media.length > 0 && <ul className="todo-file-media">{media.map(file => <li key={file.id}>
       {playable(file) === 'video'
         ? <video controls playsInline preload="metadata" src={fileUrl(file, true)} aria-label={file.name} />

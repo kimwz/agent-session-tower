@@ -47,7 +47,7 @@ const ALLOWED: ReadonlyArray<readonly [edge: string, reason: string]> = [];
  */
 export const EDGE: ReadonlyMap<string, string> = new Map([
   ['server/index.ts', 'composition: mounts the routes and answers the update request with its status'],
-  ['server/http/auth.ts', 'web server'], ['server/http/chat-images.ts', 'web server'], ['server/http/compression.ts', 'web server'],
+  ['server/http/auth.ts', 'web server'], ['server/http/chat-images.ts', 'web server'], ['server/http/compression.ts', 'web server'], ['server/http/link-reopen.ts', 'web server'],
   ['server/http/requests.ts', 'web server: reads requests, answers errors with their status'], ['server/http/server.ts', 'web server'],
   ['server/http/sinks.ts', 'web server: the heads of audio and event streams'],
   ['server/http/terminal-socket.ts', "web server: terminal sockets, and their relay to a joined computer's routes over the link"],
