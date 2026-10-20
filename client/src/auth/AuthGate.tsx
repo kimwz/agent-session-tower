@@ -49,9 +49,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
       const last = JSON.parse(window.sessionStorage.getItem(key) ?? 'null') as { link?: string; at?: number } | null;
       if (!signedInHere.current && last?.link === open.link && typeof last.at === 'number' && now - last.at < 10_000) return;
       window.sessionStorage.setItem(key, JSON.stringify({ link: open.link, at: now }));
-    } catch {
       // best-effort: without storage (private browsing) the link still opens, unguarded.
-    }
+    } catch { /* storage unavailable */ }
     window.location.replace(open.link);
   }, [signedIn]);
   if (status && signedIn) return <AuthContext.Provider value={{ status, refresh }}>{children}</AuthContext.Provider>;
