@@ -71,8 +71,6 @@ export async function readChatImage(session: Session, path: string): Promise<{ c
     } finally { await file.close(); }
   } catch { throw missing(); }
 }
-/** A link to a chat image (this computer's or a joined one's), exactly as Tower issues it: nothing else, no query. */
-export const isChatImageLink = (url: string) => /^\/api\/(?:nodes\/[a-f0-9]{32}\/)?chat-images\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/.test(url);
 export function sendChatImage(res: ServerResponse, image: Awaited<ReturnType<typeof readChatImage>>, head: boolean): void {
   res.writeHead(200, { 'Content-Type': image.mime, 'Content-Length': image.content.length, 'Cache-Control': 'no-store',
     'Content-Disposition': 'inline', 'X-Content-Type-Options': 'nosniff',

@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { LoaderCircle, LockKeyhole } from 'lucide-react';
 import type { AuthStatus } from '../../../shared/auth';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
+import { isReopenableLink, OPEN_AFTER_LOGIN } from '../../../shared/reopenable-links';
 import { api, AUTH_REQUIRED_EVENT } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
 
@@ -32,7 +33,14 @@ export function AuthGate({ children }: { children: ReactNode }) {
     const timer = window.setInterval(visible, 30_000);
     return () => { ++generation.current; window.clearInterval(timer); window.removeEventListener(AUTH_REQUIRED_EVENT, required); document.removeEventListener('visibilitychange', visible); };
   }, [refresh]);
-  if (status && (status.local || status.authenticated)) return <AuthContext.Provider value={{ status, refresh }}>{children}</AuthContext.Provider>;
+  const signedIn = Boolean(status && (status.local || status.authenticated));
+  // A link Tower hands out, opened before signing in, opens now (server/http/link-reopen.ts); nothing else is followed.
+  useEffect(() => {
+    if (!signedIn) return;
+    const link = new URLSearchParams(window.location.search).get(OPEN_AFTER_LOGIN);
+    if (link && isReopenableLink(link)) window.location.replace(link);
+  }, [signedIn]);
+  if (status && signedIn) return <AuthContext.Provider value={{ status, refresh }}>{children}</AuthContext.Provider>;
   return <main className="auth-screen"><section className="auth-card"><LockKeyhole size={26} /><h1>Agent Session Tower</h1>{!status ? <>{error ? <><p role="alert">{translateMessage(error)}</p><button className="secondary-button" onClick={() => void refresh()}>{t('다시 확인')}</button></> : <LoaderCircle className="spin" aria-label={t('연결 중')} />}</> : status.configured ? <LoginForm status={status} onLogin={next => { ++generation.current; setStatus(next); }} /> : <><h2>{t('계정 설정이 필요합니다')}</h2><p>{t('서버 컴퓨터에서 Tower를 열고 계정 관리에서 ID와 비밀번호를 설정하세요.')}</p><button className="secondary-button" onClick={() => void refresh()}>{t('다시 확인')}</button></>}</section></main>;
 }
 export function LoginForm({ status, onLogin }: { status: AuthStatus; onLogin: (status: AuthStatus) => void }) {

@@ -6,7 +6,8 @@ import { createServer, STATUS_CODES, type IncomingMessage, type ServerResponse }
 import type { Duplex } from 'node:stream';
 import { WebSocketServer } from 'ws';
 import { chatImageReference, readChatImage, sendChatImage, withChatImages } from './chat-images.js';
-import { isReopenableLink, sendLinkReopen } from './link-reopen.js';
+import { sendLinkLogin, sendLinkReopen } from './link-reopen.js';
+import { isReopenableLink } from '../../shared/reopenable-links.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
@@ -329,6 +330,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       const publicAsset = (req.method === 'GET' || req.method === 'HEAD') && (path === '/' || APP_SHELL.has(path) || path.startsWith('/assets/'));
       if (req.method === 'GET' && path === '/api/auth/status') return json(res, 200, authStatus());
       const login = req.method === 'POST' && path === '/api/auth/login';
+      // A link Tower hands out, opened in a browser not signed in here, goes through the sign-in and on to the link.
+      if (!authenticated && navigation && isReopenableLink(req.url || '/')) return sendLinkLogin(res, req.url!);
       if (!authenticated && !login && !publicAsset) return json(res, 401, { error: '로그인이 필요합니다.', ...(/^\/api\/secrets\/(value|value-update|view-lock)$/.test(path) ? { code: 'login-required' } : {}) });
       const adminRoute = ['/api/auth/overview', '/api/auth/credentials', '/api/auth/unblock'].includes(path);
       if (adminRoute && !identity.local) return json(res, 403, { error: '계정 관리는 로컬 접속에서만 사용할 수 있습니다.' });

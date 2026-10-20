@@ -247,7 +247,14 @@ test('an attachment link opened from another site opens again from Tower; embeds
   // The browser then opens it from Tower itself, which carries the session and passes every usual check.
   const opened = await send(link, { ...navigation('same-origin'), cookie });
   assert.equal(opened.status, 200); assert.equal(opened.type, 'image/png'); assert.deepEqual(opened.body, PNG);
-  assert.equal((await send(link, navigation('same-origin'))).status, 401);
+  // A browser not signed in to Tower goes through the sign-in, which opens the link afterwards; a read stays refused.
+  const signIn = await new Promise<{ status?: number; location?: string }>((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port, path: link, headers: { Host: `remote.test:${port}`, 'X-Forwarded-For': '192.0.2.1', ...navigation('same-origin') } }, res => { res.resume(); resolve({ status: res.statusCode, location: res.headers.location }); });
+    req.on('error', reject); req.end();
+  });
+  assert.deepEqual(signIn, { status: 302, location: `/?open=${encodeURIComponent(link)}` });
+  assert.equal((await send(link, { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty' })).status, 401);
+  assert.equal((await send(`/api/todos/files/${file.id}?inline=0`, navigation('same-origin'))).status, 401);
   // Embeds, reads, changes, foreign origins and anything not shaped like an attachment link stay closed.
   const closed: Array<[string, Record<string, string>, string?]> = [
     [link, { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'image', cookie }],

@@ -102,7 +102,8 @@ test('an image link opened from another site opens again from Tower; embeds, rea
   // The browser then opens it from Tower itself, which carries the session and passes every usual check.
   const opened = await send(link, { ...navigation('same-origin'), cookie });
   assert.equal(opened.status, 200); assert.equal(opened.type, 'image/png'); assert.deepEqual(opened.body, png);
-  assert.equal((await send(link, navigation('same-origin'))).status, 401);
+  // Not signed in to Tower in this browser: on to the sign-in, which opens the link afterwards.
+  assert.equal((await send(link, navigation('same-origin'))).status, 302);
   assert.equal((await send(`${link.slice(0, -2)}AA`, { ...navigation('same-origin'), cookie })).status, 404);
   assert.equal((await send(link, { ...navigation('none'), cookie })).status, 200);
   // Embeds, reads, changes, foreign origins and anything not shaped like an image link stay closed.
