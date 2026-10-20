@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.165.2] - 2026-10-20
+
+- **Slack 모니터 카드가 마지막 활동 순으로 놓입니다.** 이미 처리한 Slack 스레드에 나중 메시지가 와서 그 대화로 전달되면(멘션이 있거나 소유자에게 묻는 것으로 판단된 메시지), 새 대화를 만들지 않아도 그 카드가 맨 앞으로 올라옵니다. 지금까지는 대화를 처음 만든 시각 순이라, 며칠 전에 시작한 스레드의 새 질문이 "더 보기" 뒤에 묻혔습니다. 캔버스의 트리거 모니터와 트리거 화면의 Slack 목록 모두 같고, 처음 5개와 "더 보기"도 같은 순서입니다. 카드에 보이는 시각도 그 활동 시각입니다. 다른 사람끼리 나눈 말처럼 대화에 전달하지 않은 메시지로는 순서가 바뀌지 않습니다.
+
 ## [1.165.1] - 2026-10-20
 
 - 작업 중인 하위 작업 줄(움직이는 테두리가 둘러진 줄)이 테두리 안쪽에 위아래 여백을 갖고, 줄 끝 아이콘이 테두리에 걸려 잘리지 않고 온전히 보입니다. 보드 카드와 부모 할 일 상세 모두 같습니다. 작업 중이 아닌 줄의 높이는 그대로입니다.
