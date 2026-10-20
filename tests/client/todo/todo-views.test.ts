@@ -437,3 +437,18 @@ test('the calendar shows completions by default, and leaves out those of archive
   // An archived project opened to be read shows its own.
   assert.deepEqual(calendarDone(items, world, true).map(entry => entry.task.id), ['a', 'b', 'c', 'd']);
 });
+
+test('a card shows unread dots on its own title and on the sub-task rows with unread comments at or below them', () => {
+  const world = worldFromOverview(overview([
+    task('p', { content: 'Parent' }), task('a', { parentId: 'p', content: 'Child A' }), task('g', { parentId: 'a', content: 'Grandchild' }),
+    task('b', { parentId: 'p', content: 'Child B' }), task('c', { parentId: 'p', content: 'Child C', completedAt: '2026-10-14T01:00:00.000Z' }),
+    task('q', { content: 'Other' }),
+  ]));
+  const html = (id: string, unread: string[]) => renderToStaticMarkup(createElement(TaskCard, { task: world.tasks[id], context: cardContext(world, '2026-10-14', false, undefined, new Set(unread)), onOpen() {}, onComplete() {}, onCompleteNext() {} }));
+  const dotted = (markup: string) => [...markup.matchAll(/class="unread-dot"[^>]*\/?>(?:<\/i>)?([^<]*)/g)].map(match => match[1]);
+  // The grandchild has no row on the card: its child row carries the dot. A completed row never does.
+  assert.deepEqual(dotted(html('p', ['g', 'c'])), ['Child A']);
+  assert.deepEqual(dotted(html('p', ['p', 'b'])), ['Parent', 'Child B']);
+  assert.deepEqual(dotted(html('q', ['g'])), []);
+  assert.match(html('p', ['p']), /class="todo-card +unread"|todo-card[^"]* unread"/);
+});
