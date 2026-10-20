@@ -1,7 +1,7 @@
 import { useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { closestCenter, DndContext, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
-import { ArrowLeft, ArrowRight, ArrowUpFromLine, Bot, CalendarDays, Check, CheckCheck, ChevronDown, Clock3, Copy, CornerDownRight, Flag, GripVertical, History, Link, Link2, LoaderCircle, MessageSquare, MoreHorizontal, Paperclip, Pencil, Plus, Send, Tag, Trash2, User, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowUpFromLine, Bot, CalendarDays, Check, CheckCheck, ChevronDown, Clock3, Copy, CornerDownRight, CornerLeftUp, Flag, GripVertical, History, Link, Link2, LoaderCircle, MessageSquare, MoreHorizontal, Paperclip, Pencil, Plus, Send, Tag, Trash2, User, X } from 'lucide-react';
 import type { TodoAgent, TodoComment, TodoEvent, TodoFile, TodoPriority, TodoTask } from '../../../shared/todo/types';
 import { liveProjectIds } from '../../../shared/todo/compose';
 import { relativeTime } from '../common/lib';
@@ -573,13 +573,12 @@ export interface TaskDetailProps {
   uploads: TodoUploads;
   onClose: () => void;
   onOpen: (id: string) => void;
-  onProject: (projectId: string) => void;
   onFollowUp: (task: TodoTask, complete: boolean) => void;
   tab: DetailTab;
   onTab: (tab: DetailTab) => void;
 }
 
-export function TaskDetail({ taskId, world, error, today, client, actions, readOnly, uploads, onClose, onOpen, onProject, onFollowUp, tab, onTab }: TaskDetailProps) {
+export function TaskDetail({ taskId, world, error, today, client, actions, readOnly, uploads, onClose, onOpen, onFollowUp, tab, onTab }: TaskDetailProps) {
   const task = world.tasks[taskId] ?? (world.detail?.task.id === taskId ? world.detail.task : undefined);
   const more = usePopover();
   // Choosing where to move it opens once the menu has closed, from the same button.
@@ -591,7 +590,6 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
   // screen the panel covers the right of the window, header included, and the header's controls move beside it (todo.css).
   const size = usePanelWidth({ storageKey: DETAIL_WIDTH_KEY, fallback: 640, min: DETAIL_MIN_WIDTH, rootProperty: '--todo-detail-panel-width',
     maximum: () => (typeof window === 'undefined' ? Infinity : window.innerWidth) - DETAIL_HEADER_ROOM });
-  const project = task && world.projects.find(item => item.id === task.projectId);
   const parent = task?.parentId ? world.tasks[task.parentId] : undefined;
   const context: DetailContext | undefined = task && { task, world, today, client, actions, readOnly, uploads };
   const agent = world.agents[taskId];
@@ -603,8 +601,11 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
     <PanelResizeHandle panel={size} label={t('상세 패널 너비 조절')} className="todo-detail-resize" />
     <header className="todo-detail-bar">
       <button type="button" className="icon-button todo-detail-back" aria-label={t('닫기')} onClick={onClose}><ArrowLeft size={17} /></button>
-      {project && <button type="button" className="todo-breadcrumb" onClick={() => onProject(project.id)}><i className="todo-dot" style={{ background: colorOf(project.color) }} />{project.inbox ? t('관리함') : project.name}</button>}
-      {parent && <><span className="todo-muted">/</span><button type="button" className="todo-breadcrumb" onClick={() => onOpen(parent.id)}>{parent.content}</button></>}
+      {/* The tabs head the panel; the project is in the property card, the parent above the title. */}
+      <div className="todo-detail-tabs" role="tablist" aria-label={t('작업 보기')}>
+        <button type="button" role="tab" aria-selected={!chatting} onClick={() => onTab('detail')}>{t('상세')}</button>
+        <button type="button" role="tab" aria-selected={chatting} onClick={() => onTab('chat')}>{agent && <AgentIcon agent={agent} />}{t('채팅')}</button>
+      </div>
       <span className="todo-spacer" />
       {task && <CompleteButton task={task} actions={actions} onFollowUp={onFollowUp} readOnly={readOnly} />}
       {task && !readOnly && <button ref={more.anchor} type="button" className="icon-button" aria-label={t('작업 메뉴')} onClick={more.toggle}><MoreHorizontal size={16} /></button>}
@@ -620,14 +621,11 @@ export function TaskDetail({ taskId, world, error, today, client, actions, readO
       ]} />}
       {moving && !more.open && task && <MoveUnderSearch task={task} world={world} client={client} anchor={more.anchor} onClose={() => setMoving(false)} />}
     </header>
-    <div className="todo-detail-tabs" role="tablist" aria-label={t('작업 보기')}>
-      <button type="button" role="tab" aria-selected={!chatting} onClick={() => onTab('detail')}>{t('상세')}</button>
-      <button type="button" role="tab" aria-selected={chatting} onClick={() => onTab('chat')}>{agent && <AgentIcon agent={agent} />}{t('채팅')}</button>
-    </div>
     {chatting && task ? <AgentChat task={task} agent={agent} presets={world.chatPresets} client={client} readOnly={readOnly} onLeave={() => onTab('detail')} />
     : !task || !context ? <div className="todo-detail-empty">{error ? <p className="todo-error" role="alert">{error}</p> : <LoaderCircle className="spin" size={18} />}</div> : <div key={task.id} className="todo-detail-body">
       {/* A wide panel puts the properties in a card on the right; a phone shows them as chips under the title (todo.css). */}
       <div className="todo-detail-main">
+        {parent && <button type="button" className="todo-detail-parent" title={t('상위 작업')} onClick={() => onOpen(parent.id)}><CornerLeftUp size={12} /><span>{parent.content}</span></button>}
         <div className="todo-detail-heading">
           <CheckCircle task={task} disabled={readOnly} onComplete={() => actions.complete(task)} onCompleteNext={() => onFollowUp(task, true)} onReopen={() => void actions.reopen(task)} />
           <EditableTitle key={task.id} task={task} actions={actions} readOnly={readOnly} />

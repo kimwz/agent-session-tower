@@ -16,11 +16,11 @@ import type { TodoComment } from '../../../shared/todo/types.js';
 // Each test brings its own browser stub (storage, window size) and leaves none behind.
 afterEach(() => { delete (globalThis as { window?: unknown }).window; });
 
-const render = (item: ReturnType<typeof task>, options: { tab?: 'detail' | 'chat'; chatPresets?: string[]; readOnly?: boolean; comments?: TodoComment[] } = {}) => {
-  const world = withDetail(worldFromOverview({ ...overview([item]), ...(options.chatPresets ? { chatPresets: options.chatPresets } : {}) }, emptyWorld()), { task: item, subtasks: [], comments: options.comments ?? [], files: [], completions: [], events: [], previous: [], next: [] });
+const render = (item: ReturnType<typeof task>, options: { tab?: 'detail' | 'chat'; chatPresets?: string[]; readOnly?: boolean; comments?: TodoComment[]; others?: ReturnType<typeof task>[] } = {}) => {
+  const world = withDetail(worldFromOverview({ ...overview([item, ...options.others ?? []]), ...(options.chatPresets ? { chatPresets: options.chatPresets } : {}) }, emptyWorld()), { task: item, subtasks: [], comments: options.comments ?? [], files: [], completions: [], events: [], previous: [], next: [] });
   const uploads = { subscribe: () => () => undefined, getJobs: () => [], add() {}, cancel() {}, retry() {} };
   return renderToStaticMarkup(createElement(TaskDetail, { taskId: item.id, world, error: '', today: '2026-10-14', client: { today: () => '2026-10-14' } as never, actions: {} as never,
-    readOnly: options.readOnly ?? false, uploads: uploads as never, onClose() {}, onOpen() {}, onProject() {}, onFollowUp() {}, tab: options.tab ?? 'detail', onTab() {} }));
+    readOnly: options.readOnly ?? false, uploads: uploads as never, onClose() {}, onOpen() {}, onFollowUp() {}, tab: options.tab ?? 'detail', onTab() {} }));
 };
 
 test('the detail puts the most used properties first; rare ones without a value become one row of additions', () => {
@@ -100,6 +100,19 @@ test('an empty issue chat offers the presets as buttons: the saved ones in order
   setLanguage('en');
   assert.deepEqual(presets(render(task('a'), { tab: 'chat' })), ['Start the work', 'Design it', 'Research it']);
   assert.deepEqual(presets(render(task('a'), { tab: 'chat', chatPresets: ['조사 해줘'] })), ['조사 해줘']);
+});
+
+test('the tabs head the panel beside its buttons, with no project line; a sub-task shows its parent above its title', () => {
+  setLanguage('ko');
+  for (const tab of ['detail', 'chat'] as const) {
+    const bar = /<header class="todo-detail-bar">([^]*?)<\/header>/.exec(render(task('a', { content: 'Plan' }), { tab }))?.[1] ?? '';
+    assert.match(bar, /role="tablist" aria-label="작업 보기">.*>상세<.*>채팅<.*<\/div><span class="todo-spacer"><\/span>.*>완료</s, tab);
+    assert.doesNotMatch(bar, /todo-dot|todo-breadcrumb/, 'the project is in the property card, not the bar');
+  }
+  const child = render(task('c', { content: 'Child', parentId: 'p' }), { others: [task('p', { content: 'Parent plan' })] });
+  assert.match(child, /<div class="todo-detail-main"><button type="button" class="todo-detail-parent" title="상위 작업">.*<span>Parent plan<\/span><\/button><div class="todo-detail-heading">/s);
+  assert.doesNotMatch(render(task('a')), /todo-detail-parent/);
+  assert.doesNotMatch(render(task('c', { parentId: 'p' }), { tab: 'chat', others: [task('p')] }), /todo-detail-parent/, 'the chat tab keeps its room');
 });
 
 test('both tabs of the detail have a left edge to drag; it starts at 640px and comes back at the saved width', t => {

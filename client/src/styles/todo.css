@@ -166,8 +166,6 @@
 .todo-detail { position:absolute; top:0; right:0; bottom:0; z-index:30; display:flex; flex-direction:column; width:min(var(--todo-detail-width, 640px), calc(100% - 40px)); border-left:1px solid var(--line); background:#0f1621; box-shadow:-24px 0 60px #0007; outline:none; }
 .todo-detail-bar { display:flex; align-items:center; gap:6px; height:50px; padding:0 14px 0 18px; border-bottom:1px solid #1f2a39; }
 .todo-detail-back { display:none; }
-.todo-breadcrumb { display:inline-flex; align-items:center; gap:7px; max-width:200px; padding:4px 6px; border-radius:6px; color:#93a3b8; font-size:12px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
-.todo-breadcrumb:hover { background:#1a2433; color:var(--text); }
 .todo-split { display:inline-flex; }
 .todo-split-main, .todo-split-more { display:inline-flex; align-items:center; gap:6px; height:30px; padding:0 12px; border:1px solid #33465f; background:#172334; color:#d6e2f1; font-size:12px; }
 .todo-split-main { border-radius:7px; }
@@ -181,6 +179,10 @@
 .todo-detail-main > * { grid-column:1; min-width:0; }
 .todo-detail-main > .todo-properties { grid-column:2; grid-row:1 / span 20; align-self:start; position:sticky; top:0; }
 .todo-detail-empty { display:flex; justify-content:center; padding:40px; color:#6d7c92; }
+/* A sub-task's parent, one click away above its title. */
+.todo-detail-parent { display:inline-flex; justify-self:start; align-items:center; gap:6px; max-width:100%; margin:0 0 6px 33px; padding:3px 6px; border-radius:6px; color:#93a3b8; font-size:12px; }
+.todo-detail-parent span { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.todo-detail-parent:hover { background:#1a2433; color:var(--text); }
 .todo-detail-heading { display:flex; align-items:flex-start; gap:12px; }
 .todo-detail-heading .todo-check { width:21px; height:21px; margin-top:5px; }
 .todo-detail-title { flex:1; min-width:0; min-height:34px; padding:3px 6px; border:1px solid transparent; border-radius:7px; background:none; color:var(--bright); font-size:18px; font-weight:600; line-height:1.4; resize:none; field-sizing:content; }
@@ -704,8 +706,9 @@ a.todo-file-name:hover { text-decoration:underline; }
 .todo-subtask-list li > .agent-activity-border { inset:2px -8px; border-radius:7px; }
 .todo-card.selected:has(> .agent-activity-border) { outline:2px solid #3e5c86; outline-offset:2px; }
 .todo-card.file-target > .agent-activity-border { display:none; }
-.todo-detail-tabs { display:flex; gap:2px; padding:0 18px; border-bottom:1px solid #1f2a39; }
-.todo-detail-tabs button { display:inline-flex; align-items:center; gap:7px; height:36px; margin-bottom:-1px; padding:0 10px; border-bottom:2px solid transparent; border-radius:0; color:#8492a6; font-size:12.5px; font-weight:600; }
+/* The tabs head the bar: as tall as it, their underline over its bottom border. */
+.todo-detail-tabs { display:flex; flex:none; align-self:stretch; gap:2px; }
+.todo-detail-tabs button { display:inline-flex; align-items:center; gap:7px; height:auto; margin-bottom:-1px; padding:0 10px; border-bottom:2px solid transparent; border-radius:0; color:#8492a6; font-size:12.5px; font-weight:600; }
 .todo-detail-tabs button:hover { color:var(--text); }
 .todo-detail-tabs button[aria-selected="true"] { color:var(--bright); border-bottom-color:#5b8fd6; }
 .todo-detail-tabs .agent-orb-wrap.compact, .todo-detail-tabs .agent-orb-wrap.compact .agent-orb { width:18px; height:18px; }
@@ -722,7 +725,7 @@ a.todo-file-name:hover { text-decoration:underline; }
 .todo-detail-chat { display:flex; flex:1; min-height:0; }
 .todo-detail-chat .chat-panel-spacer, .todo-detail-chat .chat-resize-handle, .todo-detail-chat .chat-panel .chat-header-actions .close-chat { display:none; }
 .todo-detail-chat .chat-panel { position:relative; inset:auto; flex:1 1 0; width:auto; min-width:0; max-width:none; height:auto; min-height:0; z-index:auto; border-left:0; box-shadow:none; }
-@media (max-width:680px) { .todo-agent-start { padding:16px; } .todo-detail-tabs { padding:0 10px; } }
+@media (max-width:680px) { .todo-agent-start { padding:16px; } }
 
 /* The master's conversation over the Todo page (App): the canvas's own chat panel, covering the right of the window and
    the header as on the canvas, above a task detail it may cover. The master's button, bar and panel stay over the chat

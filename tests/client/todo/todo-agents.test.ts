@@ -58,7 +58,7 @@ const detail = (item: TodoTask, agents: Record<string, TodoAgent>, tab: DetailTa
   const world = withDetail(worldFromOverview(overview([item], { agents }), emptyWorld()), { task: item, subtasks: [], comments: [], files: [], completions: [], events: [], previous: [], next: [] });
   const uploads = { subscribe: () => () => undefined, getJobs: () => [], add() {}, cancel() {}, retry() {} };
   return createElement(TaskDetail, { taskId: item.id, world, error: '', today: '2026-10-14', client: { today: () => '2026-10-14' } as never, actions: {} as never,
-    readOnly, uploads: uploads as never, onClose() {}, onOpen() {}, onProject() {}, onFollowUp() {}, tab, onTab() {} });
+    readOnly, uploads: uploads as never, onClose() {}, onOpen() {}, onFollowUp() {}, tab, onTab() {} });
 };
 
 test('the detail has two tabs; the chat tab starts an issue master with a first message', () => {
@@ -176,7 +176,7 @@ test('the parent\'s detail shows each sub-task\'s master as its card does', () =
   const world = withDetail(worldFromOverview(overview([parent, ...subtasks.slice(1)], { agents }), emptyWorld()), { task: parent, subtasks, comments: [], files: [], completions: [], events: [], previous: [], next: [] });
   const uploads = { subscribe: () => () => undefined, getJobs: () => [], add() {}, cancel() {}, retry() {} };
   const markup = within(view([session('claude:p2'), session('claude:p5', { provider: 'codex', status: 'working' })]), createElement(TaskDetail, { taskId: 'p', world, error: '', today: '2026-10-14', client: { today: () => '2026-10-14' } as never,
-    actions: {} as never, readOnly: false, uploads: uploads as never, onClose() {}, onOpen() {}, onProject() {}, onFollowUp() {}, tab: 'detail', onTab() {} }));
+    actions: {} as never, readOnly: false, uploads: uploads as never, onClose() {}, onOpen() {}, onFollowUp() {}, tab: 'detail', onTab() {} }));
   const list = /<ul class="todo-subtask-list">(.*?)<\/ul>/.exec(markup)?.[1] ?? '';
   const rows = [...list.matchAll(/<li[^>]*>(.*?)<\/li>/g)].map(match => `${/>(Step \d)</.exec(match[1])?.[1]}:${match[1].includes('agent-activity-border') ? 'border' : '-'}:${/todo-agent-icon (\w+)/.exec(match[1])?.[1] ?? '-'}`);
   assert.deepEqual(rows, ['Step 1:-:-', 'Step 2:-:idle', 'Step 3:-:-', 'Step 4:-:-', 'Step 5:border:working']);
