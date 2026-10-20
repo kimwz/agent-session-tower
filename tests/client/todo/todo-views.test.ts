@@ -195,7 +195,7 @@ test('keys: a G chord, task keys, and undo', () => {
     assert.deepEqual(readShortcut({ ...key('ㅠ'), code: `Key${letter.toUpperCase()}` }, false), { shortcut: { action }, pending: false });
   }
   assert.deepEqual(readShortcut(key('b'), true), { pending: false }, 'after G only A, T, U and I count');
-  // A held layout key does not flip the page back and forth; a held arrow still moves.
+  // A held layout or calendar view key does not flip the page back and forth; a held arrow still moves.
   for (const held of [key('b'), key('c'), key('w'), key('m'), key('V', { shiftKey: true })]) assert.deepEqual(readShortcut({ ...held, repeat: true }, false), { pending: false });
   assert.deepEqual(readShortcut({ ...key('ArrowDown'), repeat: true }, false), { shortcut: { action: 'move', direction: 'down' }, pending: false });
   assert.deepEqual(readShortcut(key('M', { shiftKey: true }), false), { pending: false }, 'Shift+M stays the master\'s');
