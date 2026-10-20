@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.164.1] - 2026-10-20
+
+- **물결표 하나(`~`)가 더 이상 취소선이 되지 않습니다.** "18~20%, 6~7%"처럼 범위를 쓴 글이 두 `~` 사이에 취소선이 그어져 보이던 문제를 고쳤습니다. 이제 `~~텍스트~~`처럼 두 개로 감쌀 때만 취소선입니다. 채팅(에이전트·마스터 답변, 고정된 요청)과 할 일 설명·댓글 모두 같습니다.
+- 할 일 카드에 보이는 설명 한 줄이 `~`를 지워 "18~20%"가 "1820%"로 보이던 문제도 고쳤습니다. `~~`만 표시로 보고 지웁니다.
+
 ## [1.164.0] - 2026-10-20
 
 - **채팅이 작업 중인 하위 작업도 보드에서 작업 중으로 보입니다.** 하위 작업에 이슈 채팅이 있으면 부모 카드의 하위 작업 줄 끝에 일반 카드와 같은 아이콘이 보이고(작업 중이면 색, 쉬는 중이면 회색, 소유자를 기다리면 점), 누르면 그 하위 작업의 채팅이 열립니다. 작업 중인 동안 그 줄에는 일반 카드와 같은 움직이는 테두리가 둘러집니다. 부모 할 일의 상세에 있는 하위 작업 목록도 같습니다.
