@@ -300,7 +300,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       && req.headers['sec-fetch-dest'] === 'document';
     const crossSite = req.headers['sec-fetch-site'] === 'cross-site';
     const pageNavigation = navigation && !(req.url || '/').startsWith('/api/');
-    const linkReopen = crossSite && navigation && isReopenableLink(req.url || '/');
+    const linkNavigation = navigation && isReopenableLink(req.url || '/');
+    const linkReopen = crossSite && linkNavigation;
     if (crossSite && !pageNavigation && !linkReopen) return json(res, 403, { error: '다른 사이트에서의 접근은 허용되지 않습니다.' });
     const origin = req.headers.origin;
     if (origin && !origins.has(origin)) return json(res, 403, { error: '허용되지 않은 출처입니다.' });
@@ -331,7 +332,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       if (req.method === 'GET' && path === '/api/auth/status') return json(res, 200, authStatus());
       const login = req.method === 'POST' && path === '/api/auth/login';
       // A link Tower hands out, opened in a browser not signed in here, goes through the sign-in and on to the link.
-      if (!authenticated && navigation && isReopenableLink(req.url || '/')) return sendLinkLogin(res, req.url!);
+      if (!authenticated && linkNavigation) return sendLinkLogin(res, req.url!);
       if (!authenticated && !login && !publicAsset) return json(res, 401, { error: '로그인이 필요합니다.', ...(/^\/api\/secrets\/(value|value-update|view-lock)$/.test(path) ? { code: 'login-required' } : {}) });
       const adminRoute = ['/api/auth/overview', '/api/auth/credentials', '/api/auth/unblock'].includes(path);
       if (adminRoute && !identity.local) return json(res, 403, { error: '계정 관리는 로컬 접속에서만 사용할 수 있습니다.' });

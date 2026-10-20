@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, ty
 import { LoaderCircle, LockKeyhole } from 'lucide-react';
 import type { AuthStatus } from '../../../shared/auth';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
-import { isReopenableLink, OPEN_AFTER_LOGIN } from '../../../shared/reopenable-links';
+import { linkToOpen } from '../../../shared/reopenable-links';
 import { api, AUTH_REQUIRED_EVENT } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
 
@@ -35,10 +35,20 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }, [refresh]);
   const signedIn = Boolean(status && (status.local || status.authenticated));
   // A link Tower hands out, opened before signing in, opens now (server/http/link-reopen.ts); nothing else is followed.
+  // The address loses it first. The same link sent back here within moments (the server still not taking the sign-in,
+  // as when the address the session is bound to changed) is not followed again, so the two never bounce.
   useEffect(() => {
     if (!signedIn) return;
-    const link = new URLSearchParams(window.location.search).get(OPEN_AFTER_LOGIN);
-    if (link && isReopenableLink(link)) window.location.replace(link);
+    const open = linkToOpen(window.location.search);
+    if (!open) return;
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}${open.rest}${window.location.hash}`);
+    const key = 'agent-session-tower.opened-link', now = Date.now();
+    try {
+      const last = JSON.parse(window.sessionStorage.getItem(key) ?? 'null') as { link?: string; at?: number } | null;
+      if (last?.link === open.link && typeof last.at === 'number' && now - last.at < 10_000) return;
+      window.sessionStorage.setItem(key, JSON.stringify({ link: open.link, at: now }));
+    } catch { /* Private browsing can disable storage; the link still opens. */ }
+    window.location.replace(open.link);
   }, [signedIn]);
   if (status && signedIn) return <AuthContext.Provider value={{ status, refresh }}>{children}</AuthContext.Provider>;
   return <main className="auth-screen"><section className="auth-card"><LockKeyhole size={26} /><h1>Agent Session Tower</h1>{!status ? <>{error ? <><p role="alert">{translateMessage(error)}</p><button className="secondary-button" onClick={() => void refresh()}>{t('다시 확인')}</button></> : <LoaderCircle className="spin" aria-label={t('연결 중')} />}</> : status.configured ? <LoginForm status={status} onLogin={next => { ++generation.current; setStatus(next); }} /> : <><h2>{t('계정 설정이 필요합니다')}</h2><p>{t('서버 컴퓨터에서 Tower를 열고 계정 관리에서 ID와 비밀번호를 설정하세요.')}</p><button className="secondary-button" onClick={() => void refresh()}>{t('다시 확인')}</button></>}</section></main>;

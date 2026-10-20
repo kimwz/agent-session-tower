@@ -1,6 +1,7 @@
 /* The image viewer over the page (client/src/common/ImageViewer.tsx): the whole screen, a bar on top, the picture below. */
 .image-viewer { position:fixed; inset:0; width:100vw; height:100dvh; max-width:none; max-height:none; margin:0; padding:0; border:0; background:#05080d; color:var(--text); overflow:hidden; }
 .image-viewer[open] { display:flex; flex-direction:column; }
+.image-viewer:focus { outline:none; }
 .image-viewer::backdrop { background:#030812b8; }
 .image-viewer-bar { position:relative; z-index:1; display:flex; align-items:center; gap:4px; min-height:48px; padding:6px 8px 6px 14px; padding-top:max(6px, env(safe-area-inset-top)); background:#0b1018e6; border-bottom:1px solid #1d2735; }
 .image-viewer-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#d0dbe8; font-size:13px; }

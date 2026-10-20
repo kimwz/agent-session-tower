@@ -7,9 +7,10 @@ import { clampView, fitScale, fitView, panBy, pinchView, swipeStep, toggleZoom, 
 /** An image the viewer shows: its address, its name, and where to download it (when it can be). */
 export interface ViewerImage { src: string; name: string; download?: string }
 
+// `view` is the view the gesture began from, or null when it began before the picture had loaded (never zoomed then).
 type Gesture =
-  | { kind: 'pan'; start: Point; view: View; moved: boolean; onImage: boolean }
-  | { kind: 'pinch'; distance: number; middle: Point; view: View };
+  | { kind: 'pan'; start: Point; view: View | null; moved: boolean; onImage: boolean }
+  | { kind: 'pinch'; distance: number; middle: Point; view: View | null };
 
 const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
 const middle = (a: Point, b: Point): Point => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
@@ -47,6 +48,8 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
   const index = found >= 0 ? found : Math.min(lastIndex.current, images.length - 1);
   lastIndex.current = index;
   const image = images[index];
+  // The picture shown in place of one deleted is the one shown from now on, whatever is deleted next.
+  if (found < 0 && chosen !== image.src) setChosen(image.src);
   const count = images.length;
   const natural = loaded?.src === image.src ? loaded.size : null;
   const failed = loaded?.src === image.src && !loaded.size;
@@ -125,9 +128,10 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
     const point = pointIn(event);
     pointers.current.set(event.pointerId, point);
     const [a, b] = [...pointers.current.values()];
+    const from = live.current.natural ? live.current.view : null;
     gesture.current = b
-      ? { kind: 'pinch', distance: Math.max(distance(a, b), 1), middle: middle(a, b), view: live.current.view }
-      : { kind: 'pan', start: point, view: live.current.view, moved: false, onImage: event.target === imageRef.current };
+      ? { kind: 'pinch', distance: Math.max(distance(a, b), 1), middle: middle(a, b), view: from }
+      : { kind: 'pan', start: point, view: from, moved: false, onImage: event.target === imageRef.current };
   };
   const move = (event: PointerEvent<HTMLDivElement>) => {
     if (!pointers.current.has(event.pointerId)) return;
@@ -137,26 +141,26 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
     if (!current) return;
     if (current.kind === 'pinch') {
       const [a, b] = [...pointers.current.values()];
-      if (b && natural) setView(pinchView(current.view, distance(a, b) / current.distance, current.middle, middle(a, b), stage, natural));
+      if (b && natural && current.view) setView(pinchView(current.view, distance(a, b) / current.distance, current.middle, middle(a, b), stage, natural));
       return;
     }
     // A move counts before the picture has loaded too: a swipe over one still loading (or failed) goes on, never closes.
     const dx = point.x - current.start.x, dy = point.y - current.start.y;
     if (Math.hypot(dx, dy) > 6) current.moved = true;
-    if (natural && current.moved && zoomedIn(current.view, fitScale(stage, natural))) setView(panBy(current.view, dx, dy, stage, natural));
+    if (natural && current.view && current.moved && zoomedIn(current.view, fitScale(stage, natural))) setView(panBy(current.view, dx, dy, stage, natural));
   };
   const up = (event: PointerEvent<HTMLDivElement>) => {
     if (!pointers.current.delete(event.pointerId)) return;
     const current = gesture.current, { natural, stage } = live.current;
     const rest = [...pointers.current.values()];
     // One finger left of a pinch goes on moving the picture from where it is.
-    if (current?.kind === 'pinch') { gesture.current = rest.length === 1 ? { kind: 'pan', start: rest[0], view: live.current.view, moved: true, onImage: true } : null; return; }
+    if (current?.kind === 'pinch') { gesture.current = rest.length === 1 ? { kind: 'pan', start: rest[0], view: natural ? live.current.view : null, moved: true, onImage: true } : null; return; }
     if (rest.length || !current) return;
     gesture.current = null;
     if (event.type === 'pointercancel') return;
     const point = pointIn(event);
     if (current.moved) {
-      if (!natural || !zoomedIn(current.view, fitScale(stage, natural))) go(swipeStep(point.x - current.start.x, point.y - current.start.y));
+      if (!natural || !current.view || !zoomedIn(current.view, fitScale(stage, natural))) go(swipeStep(point.x - current.start.x, point.y - current.start.y));
       return;
     }
     if (!current.onImage) { closeOnClick.current = true; return; }
@@ -183,9 +187,8 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
     action();
   };
 
-  // A page opened from the home screen gives a new tab a browser of its own, without the page's sign-in: no new tab there.
-  const standalone = typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches;
-  return createPortal(<dialog ref={dialog} className="image-viewer" aria-label={image.name} onKeyDown={keys}
+  // tabIndex: a click on the picture (not focusable) focuses the dialog, not the page, so the keys stay the viewer's.
+  return createPortal(<dialog ref={dialog} className="image-viewer" tabIndex={-1} aria-label={image.name} onKeyDown={keys}
     onPaste={event => event.stopPropagation()} onDragOver={keepFiles} onDrop={keepFiles}
     // A close request without a key (Android's back gesture).
     onCancel={event => { event.preventDefault(); onClose(); }}
@@ -199,7 +202,7 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
       <button type="button" className="image-viewer-scale" disabled={!natural || (fit >= 1 && !zoomed)} aria-label={zoomed ? t('화면에 맞추기') : t('원본 크기로 보기')} title={zoomed ? t('화면에 맞추기') : t('원본 크기로 보기')}
         onClick={() => toggleAt({ x: 0, y: 0 })}>{natural ? `${Math.round(view.scale * 100)}%` : '–'}</button>
       <button type="button" className="icon-button" aria-label={t('확대')} title={t('확대')} disabled={!natural} onClick={() => zoomBy(1.25)}><ZoomIn size={16} /></button>
-      {!standalone && <a className="icon-button" href={image.src} target="_blank" rel="noreferrer noopener" aria-label={t('새 탭에서 원본 열기')} title={t('새 탭에서 원본 열기')}><ExternalLink size={16} /></a>}
+      <a className="icon-button" href={image.src} target="_blank" rel="noreferrer noopener" aria-label={t('새 탭에서 원본 열기')} title={t('새 탭에서 원본 열기')}><ExternalLink size={16} /></a>
       {image.download && <a className="icon-button" href={image.download} download={image.name} aria-label={t('“{0}” 내려받기', { 0: image.name })} title={t('“{0}” 내려받기', { 0: image.name })}><Download size={16} /></a>}
       <button ref={closeButton} type="button" className="icon-button" aria-label={t('닫기')} title={t('닫기')} onClick={onClose}><X size={18} /></button>
     </div>

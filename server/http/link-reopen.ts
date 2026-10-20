@@ -1,5 +1,5 @@
 import type { ServerResponse } from 'node:http';
-import { isChatImageLink, isReopenableLink, OPEN_AFTER_LOGIN } from '../../shared/reopenable-links.js';
+import { isChatImageLink, isReopenableLink, loginThenOpen } from '../../shared/reopenable-links.js';
 
 /**
  * Answers a top-level navigation to a link Tower hands out (shared/reopenable-links.ts) that came from another site (a
@@ -20,6 +20,6 @@ export function sendLinkReopen(res: ServerResponse, url: string, head: boolean):
  */
 export function sendLinkLogin(res: ServerResponse, url: string): void {
   if (!isReopenableLink(url)) throw new Error('Not a link that opens again from Tower.');
-  res.writeHead(302, { Location: `/?${OPEN_AFTER_LOGIN}=${encodeURIComponent(url)}` });
+  res.writeHead(302, { Location: loginThenOpen(url) });
   res.end();
 }

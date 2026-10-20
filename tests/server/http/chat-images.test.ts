@@ -103,7 +103,11 @@ test('an image link opened from another site opens again from Tower; embeds, rea
   const opened = await send(link, { ...navigation('same-origin'), cookie });
   assert.equal(opened.status, 200); assert.equal(opened.type, 'image/png'); assert.deepEqual(opened.body, png);
   // Not signed in to Tower in this browser: on to the sign-in, which opens the link afterwards.
-  assert.equal((await send(link, navigation('same-origin'))).status, 302);
+  const signIn = await new Promise<{ status?: number; location?: string }>((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port, path: link, headers: { Host: `remote.test:${port}`, 'X-Forwarded-For': '192.0.2.1', ...navigation('same-origin') } }, res => { res.resume(); resolve({ status: res.statusCode, location: res.headers.location }); });
+    req.on('error', reject); req.end();
+  });
+  assert.deepEqual(signIn, { status: 302, location: `/?open=${encodeURIComponent(link)}` });
   assert.equal((await send(`${link.slice(0, -2)}AA`, { ...navigation('same-origin'), cookie })).status, 404);
   assert.equal((await send(link, { ...navigation('none'), cookie })).status, 200);
   // Embeds, reads, changes, foreign origins and anything not shaped like an image link stay closed.
