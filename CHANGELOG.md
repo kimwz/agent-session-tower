@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.165.2] - 2026-10-20
+
+- **할 일 화면에서도 바탕을 클릭하면 마스터 에이전트 대화가 닫힙니다.** 캔버스에서 빈 바탕을 누르면 대화가 닫히듯, 할 일 화면 위에 열린 마스터 대화도 보드·캘린더의 빈 곳을 누르면 닫힙니다. 할 일 상세가 함께 열려 있으면 Esc처럼 마스터 대화가 먼저 닫히고, 한 번 더 누르면 상세가 닫힙니다. 그 클릭은 닫기만 해서, 캘린더의 빈 날을 눌러도 작업 추가는 열리지 않습니다. 작업 카드(그 작업이 열림), 버튼·입력창·메뉴, 대화 패널 안을 누를 때는 전과 같습니다.
+
 ## [1.165.1] - 2026-10-20
 
 - 작업 중인 하위 작업 줄(움직이는 테두리가 둘러진 줄)이 테두리 안쪽에 위아래 여백을 갖고, 줄 끝 아이콘이 테두리에 걸려 잘리지 않고 온전히 보입니다. 보드 카드와 부모 할 일 상세 모두 같습니다. 작업 중이 아닌 줄의 높이는 그대로입니다.
