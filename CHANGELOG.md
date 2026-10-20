@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.165.4] - 2026-10-20
+
+- **할 일 상세의 맨 윗줄이 상세 / 채팅 탭입니다.** 위쪽의 프로젝트 이름 줄을 없애고, 그 자리 왼쪽에 상세 / 채팅 탭을, 오른쪽에 전과 같은 완료 · ··· · 닫기 버튼을 둡니다. 한 줄이 줄어든 만큼 본문과 채팅 대화가 위로 넓어집니다. 프로젝트는 상세 탭의 속성 카드(휴대폰은 제목 아래 칩)에 그대로 보입니다. 하위 작업의 상위 작업 링크는 상세 탭 제목 위로 옮겨, 휴대폰에서 완료 버튼이 눌려 두 줄로 접히지 않습니다.
+
 ## [1.165.3] - 2026-10-20
 
 - **할 일 화면에서도 바탕을 클릭하면 마스터 에이전트 대화가 닫힙니다.** 캔버스에서 빈 바탕을 누르면 대화가 닫히듯, 할 일 화면 위에 열린 마스터 대화도 보드·캘린더의 빈 곳을 누르면 닫힙니다. 할 일 상세가 함께 열려 있으면 Esc처럼 마스터 대화가 먼저 닫히고, 한 번 더 누르면 상세가 닫힙니다. 그 클릭은 닫기만 해서, 캘린더의 빈 날을 눌러도 작업 추가는 열리지 않습니다. 작업 카드(그 작업이 열림), 버튼·입력창·메뉴, 대화 패널 안을 누를 때는 전과 같습니다.
