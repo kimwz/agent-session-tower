@@ -22,7 +22,7 @@ test('the todo routes take the page token and JSON, check every change, and have
     snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('unused'); }, cancel: async () => {}, subscribe: () => () => {},
     todos: {
       overview: () => store.overview(), detail: id => store.detail(id), completed: input => store.completed(input), search: (query, input) => store.search(query, input),
-      apply: request => { changes++; return store.apply(request); },
+      apply: (request, by) => { changes++; return store.apply(request, by); },
     },
   } });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -74,6 +74,15 @@ test('the todo routes take the page token and JSON, check every change, and have
   const found = (await (await fetch(`${base}/api/todos/search?q=task&completed=1`)).json() as { tasks: { id: string; completedAt: string | null }[] }).tasks;
   assert.deepEqual(found.map(task => [task.id, typeof task.completedAt]).sort(), [['a', 'string'], ['b', 'string']]);
 
+  // A comment from the owner's own page (it names its origin) is the owner's; the same change from anything else (the
+  // master, a script on this computer) is an agent's, whatever it sends.
+  assert.equal((await create('talk')).status, 200);
+  const comment = (id: string, extra: Record<string, string>) => send({ requestId: randomUUID(), ops: [{ op: 'comment.create', id, taskId: 'talk', body: id }] }, { ...headers, ...extra });
+  assert.equal((await comment('page', { Origin: base })).status, 200);
+  assert.equal((await comment('master', { Origin: base, 'X-Tower-Master': 'not the secret' })).status, 200);
+  assert.equal((await comment('script', {})).status, 200);
+  assert.deepEqual(Object.fromEntries(store.detail('talk').comments.map(item => [item.id, item.author])), { page: 'owner', master: 'agent', script: 'agent' });
+
   // Far more changes than the page's general budget of 30 a minute, and the general budget is still untouched.
   for (let index = 0; index < 60; index++) assert.equal((await create(`bulk-${index}`)).status, 200);
   const other = await fetch(`${base}/api/groups`, { method: 'POST', headers, body: JSON.stringify({ cwd: '/tmp/x', title: 'X' }) });
@@ -101,7 +110,7 @@ test('attachments upload in pieces apart from the change budget, and come back a
     snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('unused'); }, cancel: async () => {}, subscribe: () => () => {},
     todos: {
       overview: () => store.overview(), detail: id => store.detail(id), completed: input => store.completed(input), search: (query, input) => store.search(query, input),
-      apply: request => store.apply(request), files,
+      apply: (request, by) => store.apply(request, by), files,
     },
   } });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -110,7 +119,7 @@ test('attachments upload in pieces apart from the change budget, and come back a
   const { token } = await (await fetch(`${base}/api/bootstrap`)).json() as { token: string };
   const headers = { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
   const post = (path: string, body: unknown, extra: Record<string, string> = headers) => fetch(`${base}${path}`, { method: 'POST', headers: extra, body: Buffer.isBuffer(body) ? new Uint8Array(body) : JSON.stringify(body) });
-  store.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 't', content: 'With files' }] });
+  store.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 't', content: 'With files' }] }, 'owner');
   const upload = async (content: Buffer, name: string, mimeType: string) => {
     const started = await post('/api/todos/uploads', { taskId: 't', name, mimeType, size: content.length });
     assert.equal(started.status, 201);
@@ -183,7 +192,7 @@ test('attachments upload in pieces apart from the change budget, and come back a
   assert.match(played.headers.get('content-security-policy') ?? '', /sandbox/);
   assert.equal(Buffer.from(await played.arrayBuffer()).toString(), 'ftyp');
 
-  store.apply({ requestId: randomUUID(), ops: [{ op: 'file.delete', id: file.id }] });
+  store.apply({ requestId: randomUUID(), ops: [{ op: 'file.delete', id: file.id }] }, 'owner');
   assert.equal((await fetch(`${base}/api/todos/files/${file.id}`)).status, 404);
   assert.equal((await fetch(`${base}/api/todos/files/${encodeURIComponent('../x')}`)).status, 404);
   const cancelled = await (await post('/api/todos/uploads', { taskId: 't', name: 'a.txt', mimeType: 'text/plain', size: 1 })).json() as { id: string };

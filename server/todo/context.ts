@@ -1,9 +1,9 @@
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import { TowerError } from '../../shared/errors.js';
 import { keyBetween, SORT_KEY_SPREAD_AT, spreadKeys } from '../../shared/todo/sort-key.js';
-import type { TodoEventKind } from '../../shared/todo/types.js';
+import type { TodoCommentAuthor, TodoEventKind } from '../../shared/todo/types.js';
 
-/** What one request's operations share inside its transaction: the connection, the time, and what they changed. */
+/** What one request's operations share inside its transaction: the connection, the time, who sent it, and what they changed. */
 export class TodoContext {
   readonly touched = { projects: new Set<string>(), sections: new Set<string>(), labels: new Set<string>(), tasks: new Set<string>(), links: new Set<string>(), comments: new Set<string>(), files: new Set<string>() };
   readonly removedLinks: string[] = [];
@@ -11,7 +11,8 @@ export class TodoContext {
   readonly parents = new Set<string>();
   /** Tasks copied so far: one request copies at most MAX_DUPLICATE_TASKS, however many duplicate ops it holds. */
   copied = 0;
-  constructor(readonly db: DatabaseSync, readonly now: string) {}
+  /** `by` is who sent the request (TodoStore.apply), which a comment it creates is recorded as written by. */
+  constructor(readonly db: DatabaseSync, readonly now: string, readonly by: TodoCommentAuthor | null = null) {}
 
   get<T = Record<string, unknown>>(sql: string, ...params: SQLInputValue[]): T | undefined {
     return this.db.prepare(sql).get(...params) as T | undefined;

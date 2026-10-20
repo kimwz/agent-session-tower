@@ -93,10 +93,15 @@ export interface TodoLink {
   createdAt: string;
 }
 
+/** Who wrote a comment: the owner on their own page, or an agent (the todo tools, the master, a local agent). */
+export type TodoCommentAuthor = 'owner' | 'agent';
+
 export interface TodoComment extends Stamped {
   id: string;
   taskId: string;
   body: string;
+  /** Decided by the server from how the comment arrived; null where it was not recorded (before 1.162.0, or an older build). */
+  author: TodoCommentAuthor | null;
 }
 
 export interface TodoCompletion {

@@ -1,4 +1,4 @@
-import type { TodoAgent, TodoAgentState, TodoComment, TodoCompletion, TodoEvent, TodoEventKind, TodoFile, TodoLabel, TodoLayout, TodoLink, TodoPriority, TodoProject, TodoRecurrence, TodoSection, TodoTask } from '../../shared/todo/types.js';
+import type { TodoAgent, TodoAgentState, TodoComment, TodoCommentAuthor, TodoCompletion, TodoEvent, TodoEventKind, TodoFile, TodoLabel, TodoLayout, TodoLink, TodoPriority, TodoProject, TodoRecurrence, TodoSection, TodoTask } from '../../shared/todo/types.js';
 
 /** Each table's row and the value the page sees, converted in one place per table. */
 
@@ -38,7 +38,9 @@ export const linkOf = (row: Row): TodoLink => ({
   id: text(row.id), fromTaskId: text(row.from_task_id), toTaskId: text(row.to_task_id), kind: text(row.kind) as 'next', createdAt: text(row.created_at),
 });
 
-export const commentOf = (row: Row): TodoComment => ({ id: text(row.id), taskId: text(row.task_id), body: text(row.body), ...stamps(row) });
+export const commentOf = (row: Row): TodoComment => ({
+  id: text(row.id), taskId: text(row.task_id), body: text(row.body), author: row.author === 'owner' || row.author === 'agent' ? row.author as TodoCommentAuthor : null, ...stamps(row),
+});
 
 export const completionOf = (row: Row): TodoCompletion => ({
   id: text(row.id), taskId: text(row.task_id), occurrenceDate: maybe(row.occurrence_date), completedAt: text(row.completed_at),

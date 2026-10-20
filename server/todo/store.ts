@@ -5,7 +5,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { TowerError } from '../../shared/errors.js';
 import { parseChatPresets } from '../../shared/todo/chat-presets.js';
 import type { TodoOp, TodoOpName, TodoOpOf, TodoRequest } from '../../shared/todo/ops.js';
-import type { TodoAgent, TodoAgentState, TodoAvailability, TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoRestoreProgress, TodoSubtaskCount, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import type { TodoAgent, TodoAgentState, TodoAvailability, TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoFile, TodoOverview, TodoRestoreProgress, TodoSubtaskCount, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { nodeVerified, sqlitePatched } from '../storage/runtime.js';
 import { TodoContext } from './context.js';
 import { checkTodoFileRow, todoFilePath, usableContent } from './files.js';
@@ -344,9 +344,12 @@ export class TodoStore {
       ORDER BY t.completed_at IS NOT NULL, t.updated_at DESC LIMIT ?`, input.completed ? 1 : 0, pattern, pattern, limit).map(taskOf);
   }
 
-  /** Applies a request's operations together, or none of them. A request sent again answers what it answered first. */
-  apply(request: TodoRequest): TodoChanges {
-    return this.commit(ctx => {
+  /**
+   * Applies a request's operations together, or none of them. A request sent again answers what it answered first.
+   * `by` is who sent it, decided by its caller from how it arrived (never from the request): its comments are theirs.
+   */
+  apply(request: TodoRequest, by: TodoCommentAuthor): TodoChanges {
+    return this.commit(by, ctx => {
       const earlier = this.get<{ result: string }>('SELECT result FROM todo_requests WHERE id = ?', request.requestId);
       // An answer kept by an earlier build lacks what was added since.
       if (earlier) return { ...this.emptyChanges(0), ...JSON.parse(earlier.result) as TodoChanges };
@@ -358,11 +361,11 @@ export class TodoStore {
   }
 
   /** One write transaction of the store's rules, whose answer carries the revision it made. */
-  private commit(work: (ctx: TodoContext) => TodoChanges): TodoChanges {
+  private commit(by: TodoCommentAuthor | null, work: (ctx: TodoContext) => TodoChanges): TodoChanges {
     this.writable();
     const changes = this.transaction(() => {
       if (Number(this.meta('min_writer') ?? 1) > TODO_SCHEMA_STEP) throw new TowerError('locked', '더 새로운 Tower가 바꾼 할 일 저장소입니다.');
-      return work(new TodoContext(this.db!, this.now()));
+      return work(new TodoContext(this.db!, this.now(), by));
     });
     // Only a committed change moves the revision pages see.
     this.revisionValue = Math.max(this.revisionValue, changes.revision);
@@ -386,7 +389,7 @@ export class TodoStore {
    * are there. The id was fixed when the upload began: a file already added answers its row and changes nothing.
    */
   attach(file: NewTodoFile): { file: TodoFile; changes: TodoChanges } {
-    const changes = this.commit(ctx => {
+    const changes = this.commit(null, ctx => {
       if (this.get('SELECT 1 FROM todo_files WHERE id = ?', file.id)) return { ...this.emptyChanges(this.revisionValue), files: [this.fileRow(file.id)!] };
       attachFile(ctx, file);
       return this.changes(ctx, this.nextRevision());

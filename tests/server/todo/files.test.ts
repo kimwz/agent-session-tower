@@ -33,7 +33,7 @@ async function fixture(t: TestContext) {
   };
   let { store, files } = await open();
   t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
-  const apply = (...ops: TodoOp[]) => store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }));
+  const apply = (...ops: TodoOp[]) => store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }), 'owner');
   const upload = async (taskId: string, content: Buffer, options: { commentId?: string; name?: string; mimeType?: string } = {}) => {
     const started = await files.startUpload({ taskId, commentId: options.commentId, name: options.name ?? 'notes.txt', mimeType: options.mimeType ?? 'text/plain', size: content.length });
     if (content.length) await files.appendUpload(started.id, 0, once(content));

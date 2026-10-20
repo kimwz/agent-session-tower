@@ -15,7 +15,7 @@ async function fixture(t: TestContext) {
   const store = new TodoStore(dir, { now: () => clock });
   store.start();
   t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
-  const apply = (...ops: TodoOp[]) => store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }));
+  const apply = (...ops: TodoOp[]) => store.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }), 'owner');
   const tick = () => { clock = new Date(clock.getTime() + 1000); };
   return { store, apply, tick };
 }

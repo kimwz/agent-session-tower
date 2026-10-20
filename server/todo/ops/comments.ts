@@ -9,7 +9,7 @@ const comment = (ctx: TodoContext, id: string) => ctx.get<CommentRow>('SELECT id
 export function createComment(ctx: TodoContext, op: TodoOpOf<'comment.create'>): void {
   if (comment(ctx, op.id)) throw invalid('같은 id의 댓글이 이미 있습니다.');
   const task = liveTask(ctx, op.taskId);
-  ctx.run('INSERT INTO todo_comments (id, task_id, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?)', op.id, task.id, op.body, ctx.now, ctx.now);
+  ctx.run('INSERT INTO todo_comments (id, task_id, body, author, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)', op.id, task.id, op.body, ctx.by, ctx.now, ctx.now);
   ctx.touched.comments.add(op.id);
   ctx.event(task.id, 'commented', { comment: op.id });
 }

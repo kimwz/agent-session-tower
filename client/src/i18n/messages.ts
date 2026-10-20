@@ -2699,6 +2699,8 @@ export const english: Record<string, string> = {
   "마지막": "Last",
   "댓글 편집": "Edit comment",
   "고침": "edited",
+  "작성자 기록 없음": "Author not recorded",
+  "이 댓글에는 작성자 정보가 저장되어 있지 않습니다": "This comment has no author recorded",
   "왼쪽으로 옮기기": "Move left",
   "오른쪽으로 옮기기": "Move right",
   "보관된 프로젝트": "Archived projects",

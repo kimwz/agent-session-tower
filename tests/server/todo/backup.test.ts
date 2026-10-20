@@ -116,7 +116,7 @@ async function computer(t: TestContext, bucket: Bucket, options: { stateDir?: st
   t.after(async () => { service.close(); await service.flush(); backup.close(); await backup.downloads(); todos.close(); if (!options.stateDir) await rm(stateDir, { recursive: true, force: true }); });
   // Tower never removes an attachment object, in any test.
   t.after(() => assert.deepEqual(bucket.seen.filter(line => line.startsWith('DELETE ') && line.includes(TODO_FILES_FOLDER.slice(0, -1))), []));
-  const apply = (...ops: TodoOp[]) => todos.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }));
+  const apply = (...ops: TodoOp[]) => todos.apply(TodoRequestSchema.parse({ requestId: randomUUID(), ops }), 'owner');
   const attach = async (taskId: string, content: Buffer, name = 'file.bin') => {
     const started = await files.startUpload({ taskId, name, mimeType: 'application/octet-stream', size: content.length });
     await files.appendUpload(started.id, 0, once(content));

@@ -5,7 +5,7 @@ import { completeOp, liveProjectIds, quickAddOps, type QuickAddDraft } from '../
 import { addDays, formatDate } from '../../shared/todo/dates.js';
 import { labelName, MAX_TODO_OPS, TodoOpSchema, TodoRequestSchema, type TodoOp } from '../../shared/todo/ops.js';
 import { parseQuickAdd, type QuickAddResult } from '../../shared/todo/quick-add.js';
-import type { TodoChanges, TodoCompletedPage, TodoFile, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import type { TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoFile, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { TowerError } from '../../shared/errors.js';
 import { checkLocalMedia, LOCAL_MEDIA } from './files.js';
 
@@ -27,7 +27,8 @@ export interface TodoToolStore {
   detail(id: string): TodoTaskDetail;
   completed(input: { projectId?: string; labelId?: string; before?: string; limit?: number }): TodoCompletedPage;
   search(query: string, input: { completed?: boolean; limit?: number }): TodoTask[];
-  apply(request: z.infer<typeof TodoRequestSchema>): TodoChanges;
+  /** `by` is who sent it (TodoStore.apply); the tools always send as an agent. */
+  apply(request: z.infer<typeof TodoRequestSchema>, by: TodoCommentAuthor): TodoChanges;
   /** Attaches a file on this computer to a task or comment (TodoFiles.attachLocal); absent where files cannot be kept. */
   attachFile?(input: { taskId: string; commentId: string | null; path: string }): Promise<TodoFile>;
 }
@@ -121,7 +122,8 @@ function task(overview: TodoOverview, store: TodoToolStore, taskId: string): Tod
 function apply(context: Context, ops: readonly unknown[]): TodoChanges {
   const request = TodoRequestSchema.safeParse({ requestId: context.newId(), ops });
   if (!request.success) throw new TowerError('invalid', request.error.issues.map(issue => `${issue.path.join('.') || 'ops'}: ${issue.message}`).join('; '));
-  return context.store.apply(request.data);
+  // Whatever a tool changes is an agent's doing: its comments are recorded as an agent's.
+  return context.store.apply(request.data, 'agent');
 }
 
 /** Label names as ids, with label.create operations for the new ones (to go first in the same request). */
@@ -232,14 +234,14 @@ const TOOLS: Tool[] = [
     },
   }),
   tool({
-    name: 'todos_get', description: 'One task in full: its description, sub-tasks, comments (the latest 50, each cut at 2000 characters: pass comment to read one whole), attachments (names and sizes), completions, and the tasks before and after it.',
+    name: 'todos_get', description: 'One task in full: its description, sub-tasks, comments (the latest 50, each cut at 2000 characters: pass comment to read one whole; author says whether the owner or an agent wrote it, where that was recorded), attachments (names and sizes), completions, and the tasks before and after it.',
     input: z.object({ id, comment: id.optional().describe('A comment of this task to read whole, by its id.') }).strict(),
     run: ({ id: taskId, comment: commentId }, { store }) => {
       const detail = store.detail(taskId);
       if (commentId) {
         const found = detail.comments.find(item => item.id === commentId && !item.deletedAt);
         if (!found) throw new TowerError('not-found', `Comment ${commentId} is not on this task.`);
-        return { comment: { id: found.id, body: found.body, createdAt: found.createdAt } };
+        return { comment: { id: found.id, body: found.body, createdAt: found.createdAt, ...(found.author ? { author: found.author } : {}) } };
       }
       const overview = store.overview();
       const links = new Map([...overview.links, ...detail.next.map(item => item.link)].map(link => [link.id, link]));
@@ -249,7 +251,7 @@ const TOOLS: Tool[] = [
         task: name(detail.task, true),
         subtasks: detail.subtasks.map(item => name(item)),
         // The latest comments, so a long discussion still fits one answer.
-        comments: comments.slice(-MAX_COMMENTS).map(comment => ({ id: comment.id, createdAt: comment.createdAt,
+        comments: comments.slice(-MAX_COMMENTS).map(comment => ({ id: comment.id, createdAt: comment.createdAt, ...(comment.author ? { author: comment.author } : {}),
           ...(comment.body.length > MAX_COMMENT_CHARS ? { body: `${comment.body.slice(0, MAX_COMMENT_CHARS)}…`, truncated: true } : { body: comment.body }) })),
         ...(comments.length > MAX_COMMENTS ? { olderComments: comments.length - MAX_COMMENTS } : {}),
         files: detail.files.map(file => ({ id: file.id, name: file.name, size: file.size, ...(file.commentId ? { commentId: file.commentId } : {}) })),

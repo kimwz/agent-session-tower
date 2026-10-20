@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { pipeline } from 'node:stream/promises';
 import { TowerError } from '../../shared/errors.js';
 import { TodoRequestSchema, type TodoRequest } from '../../shared/todo/ops.js';
-import type { TodoAgent, TodoChanges, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import type { TodoAgent, TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import type { TodoFiles } from '../todo/files.js';
 import { readJson, UUID } from './requests.js';
 import { byteRange } from './sinks.js';
@@ -13,7 +13,8 @@ export interface TodoBackend {
   detail(id: string): TodoTaskDetail;
   completed(input: { projectId?: string; labelId?: string; before?: string; since?: string; until?: string; limit?: number }): TodoCompletedPage;
   search(query: string, input: { completed?: boolean; limit?: number }): TodoTask[];
-  apply(request: TodoRequest): TodoChanges;
+  /** `by` is who sent it: comments it creates are recorded as theirs. */
+  apply(request: TodoRequest, by: TodoCommentAuthor): TodoChanges;
   /** Starts a todo's issue master with the owner's first message (server/todo/agents.ts). */
   startAgent?(id: string, text: string): Promise<TodoAgent>;
   /** Records a session an issue master made (POST /api/sessions on its behalf) in its todo's family. */
@@ -79,7 +80,8 @@ async function sendFile(req: IncomingMessage, res: ServerResponse, files: NonNul
 
 /**
  * Answers `/api/todos…`; false for any other path. `owner` says the request is the owner's own page (see
- * server/http/server.ts), which starting an issue master and saving the chat presets need.
+ * server/http/server.ts), which starting an issue master and saving the chat presets need, and which makes the comments
+ * a change creates the owner's; any other caller here (the master, a local agent) is an agent.
  */
 export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: URL, path: string, todos: TodoBackend | undefined,
   json: (res: ServerResponse, status: number, body: unknown) => void, owner = false): Promise<boolean> {
@@ -140,7 +142,7 @@ export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: 
       const issue = parsed.error.issues[0];
       throw new TowerError('invalid', `할 일 변경 형식이 올바르지 않습니다: ${issue ? `${issue.path.join('.')} ${issue.message}` : ''}`.trim());
     }
-    json(res, 200, todos.apply(parsed.data));
+    json(res, 200, todos.apply(parsed.data, owner ? 'owner' : 'agent'));
     return true;
   }
   json(res, 404, { error: 'API 경로를 찾을 수 없습니다.' });
