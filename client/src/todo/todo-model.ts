@@ -28,6 +28,8 @@ export interface TodoWorld {
   restore?: TodoRestoreProgress;
   /** The empty issue chat's buttons the owner saved; absent shows the defaults (`TodoOverview.chatPresets`). */
   chatPresets?: string[];
+  /** GitHub links and open todos' issues (`TodoOverview.github`). */
+  github?: TodoOverview['github'];
   detail: TodoTaskDetail | null;
 }
 
@@ -57,6 +59,7 @@ export function worldFromOverview(overview: TodoOverview, previous?: TodoWorld):
     tasks, links: Object.fromEntries(overview.links.map(link => [link.id, link])), commentCounts: { ...overview.commentCounts },
     fileCounts: { ...(overview.fileCounts ?? {}) }, subtaskCounts: { ...(overview.subtaskCounts ?? {}) }, agents: { ...(overview.agents ?? {}) }, ...(overview.restore ? { restore: overview.restore } : {}),
     ...(overview.chatPresets ? { chatPresets: [...overview.chatPresets] } : {}),
+    ...(overview.github ? { github: overview.github } : {}),
     detail: previous?.detail ? syncDetail(previous.detail, tasks) : null,
   };
 }

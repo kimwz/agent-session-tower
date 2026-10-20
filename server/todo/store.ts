@@ -14,7 +14,7 @@ import { attachFile, checkAttachable, deleteFile, restoreFile, type NewTodoFile 
 import { createLink, deleteLink } from './ops/links.js';
 import { MAX_PROJECT_LEVELS, createLabel, createProject, createSection, deleteLabel, deleteProject, deleteSection, moveLabel, moveProject, moveSection, restoreLabel, restoreProject, restoreSection, updateLabel, updateProject, updateSection } from './ops/projects.js';
 import { MAX_TASK_DEPTH, completeTask, createTask, deleteTask, duplicateTask, moveTask, restoreTask, uncompleteTask, updateTask } from './ops/tasks.js';
-import { TASK_COLUMNS, VISIBLE_FILE, agentOf, commentOf, completionOf, eventOf, fileOf, labelOf, linkOf, projectOf, sectionOf, taskOf } from './rows.js';
+import { COMMENT_COLUMNS, TASK_COLUMNS, VISIBLE_FILE, agentOf, commentOf, githubBindingOf, completionOf, eventOf, fileOf, labelOf, linkOf, projectOf, sectionOf, taskOf } from './rows.js';
 import { TODO_DATA_TABLES, TODO_SCHEMA, TODO_SCHEMA_STEP, minWriterAt } from './schema.js';
 
 /** The completed list's page cursor: the last completion's time and row. */
@@ -236,6 +236,12 @@ export class TodoStore {
       agents: Object.fromEntries(this.all("SELECT * FROM todo_agents WHERE state != 'closed'").map(agentOf).map(agent => [agent.taskId, agent])),
       ...(this.restoreProgress ? { restore: { ...this.restoreProgress } } : {}),
       ...this.savedChatPresets(),
+      github: {
+        bindings: this.all('SELECT * FROM todo_github_bindings WHERE deleted_at IS NULL ORDER BY created_at').map(githubBindingOf),
+        issues: Object.fromEntries(this.all<{ task_id: string; repo: string; number: number; url: string; error: string | null }>(`SELECT g.task_id, g.repo, g.number, g.url, g.error
+          FROM todo_github_issues g JOIN todo_tasks t ON t.id = g.task_id WHERE t.deleted_at IS NULL AND t.completed_at IS NULL`)
+          .map(row => [row.task_id, { repo: row.repo, number: Number(row.number), url: row.url, error: row.error ?? null }])),
+      },
     };
   }
 
@@ -297,13 +303,19 @@ export class TodoStore {
         .map(row => ({ link: linkOf(row), task: this.task(row.other)! }));
     return {
       task, subtasks,
-      comments: this.all('SELECT * FROM todo_comments WHERE task_id = ? AND deleted_at IS NULL ORDER BY created_at', id).map(commentOf),
+      comments: this.all(`SELECT ${COMMENT_COLUMNS} FROM todo_comments c WHERE c.task_id = ? AND c.deleted_at IS NULL ORDER BY c.created_at`, id).map(commentOf),
       files: this.all(`SELECT f.* FROM todo_files f LEFT JOIN todo_comments c ON c.id = f.comment_id WHERE f.task_id = ? AND ${VISIBLE_FILE} ORDER BY f.created_at, f.rowid`, id)
         .map(fileOf).map(file => usableContent(lstatSync(todoFilePath(this.stateDir, file.sha256), { throwIfNoEntry: false }), file.size) ? file : { ...file, missing: true as const }),
       completions: this.all('SELECT * FROM todo_completions WHERE task_id = ? AND undone_at IS NULL ORDER BY completed_at DESC LIMIT 50', id).map(completionOf),
       events: this.all('SELECT * FROM todo_events WHERE task_id = ? ORDER BY id DESC LIMIT 100', id).map(eventOf),
       previous: related('to_task_id', 'from_task_id'), next: related('from_task_id', 'to_task_id'),
+      ...this.githubIssueOf(id),
     };
+  }
+
+  private githubIssueOf(id: string): { github?: { repo: string; number: number; url: string } } {
+    const row = this.get<{ repo: string; number: number; url: string }>('SELECT repo, number, url FROM todo_github_issues WHERE task_id = ?', id);
+    return row ? { github: { repo: row.repo, number: Number(row.number), url: row.url } } : {};
   }
 
   /**
@@ -358,6 +370,33 @@ export class TodoStore {
       this.run('INSERT INTO todo_requests (id, result, at) VALUES (?, ?, ?)', request.requestId, JSON.stringify(changes), ctx.now);
       return changes;
     });
+  }
+
+  /**
+   * GitHub sync's way into the file (server/todo/github/): `work` runs in one write transaction with the store's
+   * operations at hand. When it changed anything a page shows, the revision moves and `changes` says what changed.
+   */
+  github<T>(work: (ctx: TodoContext) => T): { result: T; changes?: TodoChanges } {
+    let result!: T;
+    let moved = false;
+    const changes = this.commit(null, ctx => {
+      result = work(ctx);
+      moved = Object.values(ctx.touched).some(set => set.size > 0) || ctx.removedLinks.length > 0;
+      return moved ? this.changes(ctx, this.nextRevision()) : this.emptyChanges(this.revisionValue);
+    });
+    return moved ? { result, changes } : { result };
+  }
+
+  /** Reads for GitHub sync, outside any transaction. */
+  githubRead<T>(work: (ctx: TodoContext) => T): T {
+    this.readable();
+    return work(new TodoContext(this.db!, this.now(), null));
+  }
+
+  /** Marks that GitHub sync's status changed (an error shown or cleared), so open pages read the overview again. */
+  touchRevision(): void {
+    this.writable();
+    this.revisionValue = this.transaction(() => this.nextRevision());
   }
 
   /** One write transaction of the store's rules, whose answer carries the revision it made. */
@@ -437,7 +476,7 @@ export class TodoStore {
       tasks,
       links: rows('todo_links', ctx.touched.links).map(linkOf),
       removedLinks: ctx.removedLinks,
-      comments: rows('todo_comments', ctx.touched.comments).map(commentOf),
+      comments: [...ctx.touched.comments].map(id => this.get(`SELECT ${COMMENT_COLUMNS} FROM todo_comments c WHERE c.id = ?`, id)).filter((row): row is Record<string, unknown> => !!row).map(commentOf),
       files: rows('todo_files', ctx.touched.files).map(fileOf),
       ...(parents.size ? { subtaskCounts: this.subtaskCounts(parents) } : {}),
     };
@@ -461,6 +500,10 @@ export class TodoStore {
         // An issue master goes with its task, once its sessions are handed over (closed); otherwise later.
         this.run("DELETE FROM todo_agents WHERE state = 'closed' AND NOT EXISTS (SELECT 1 FROM todo_tasks t WHERE t.id = todo_agents.task_id)");
         this.run('DELETE FROM todo_agent_sessions WHERE NOT EXISTS (SELECT 1 FROM todo_agents a WHERE a.task_id = todo_agent_sessions.task_id)');
+        // What GitHub sync kept about things removed for good goes with them; the issues and comments stay on GitHub.
+        this.run('DELETE FROM todo_github_issues WHERE NOT EXISTS (SELECT 1 FROM todo_tasks t WHERE t.id = todo_github_issues.task_id)');
+        this.run('DELETE FROM todo_github_comments WHERE NOT EXISTS (SELECT 1 FROM todo_comments c WHERE c.id = todo_github_comments.comment_id)');
+        this.run('DELETE FROM todo_github_files WHERE NOT EXISTS (SELECT 1 FROM todo_files f WHERE f.id = todo_github_files.file_id)');
       });
     } catch (error) { console.error(`Todo cleanup failed: ${error instanceof Error ? error.message : String(error)}`); }
   }

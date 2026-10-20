@@ -1,8 +1,8 @@
 import { useContext, useId, useRef, useState, type ReactNode } from 'react';
-import { ArrowRight, CalendarDays, Check, ChevronRight, Clock3, Flag, MessageCircle, MessageSquare, MoreHorizontal, Paperclip, Repeat } from 'lucide-react';
+import { ArrowRight, CalendarDays, Check, ChevronRight, Clock3, Flag, Github, MessageCircle, MessageSquare, MoreHorizontal, Paperclip, Repeat } from 'lucide-react';
 import type { TodoAgent, TodoTask } from '../../../shared/todo/types';
 import { statusLabels } from '../common/lib';
-import { translate as t } from '../i18n/i18n';
+import { translate as t, translateMessage } from '../i18n/i18n';
 import { SessionContextIcon } from '../sessions/SessionContextIcon';
 import { agentLook, TodoAgentContext } from './todo-agents';
 
@@ -37,6 +37,9 @@ export const CARD_META: MetaChip[] = [
   { key: 'comments', visible: (task, { world }) => (world.commentCounts[task.id] ?? 0) > 0, render: (task, { world }) => <span className="todo-chip" title={t('댓글')}><MessageSquare size={11} />{world.commentCounts[task.id]}</span> },
   // Attachments counted by the server; the upload itself lives in the task detail.
   { key: 'files', visible: (task, { world }) => (world.fileCounts[task.id] ?? 0) > 0, render: (task, { world }) => <span className="todo-chip" title={t('첨부 파일')}><Paperclip size={11} />{world.fileCounts[task.id]}</span> },
+  { key: 'github', visible: (task, { world }) => !!world.github?.issues[task.id], render: (task, { world }) => { const issue = world.github!.issues[task.id];
+    return <a className={`todo-chip github ${issue.error ? 'error' : ''}`} href={issue.url} target="_blank" rel="noreferrer" title={issue.error ? `${issue.repo}#${issue.number} — ${translateMessage(issue.error)}` : `${issue.repo}#${issue.number}`}
+      onClick={event => event.stopPropagation()} onPointerDown={event => event.stopPropagation()}><Github size={11} />#{issue.number}</a>; } },
   { key: 'next', visible: (task, { next }) => (next.get(task.id) ?? 0) > 0, render: (task, { next }) => <span className="todo-chip next" title={t('후속 작업')}><ArrowRight size={11} />{t('다음 {0}', { 0: next.get(task.id)! })}</span> },
   { key: 'project', visible: (task, { showProject }) => showProject, render: (task, { world }) => { const project = world.projects.find(item => item.id === task.projectId); return project ? <span className="todo-chip project"><i style={{ background: colorOf(project.color) }} />{project.inbox ? t('관리함') : project.name}</span> : null; } },
 ];

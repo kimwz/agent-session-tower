@@ -27,8 +27,8 @@ export interface Destination {
   ownPorts: readonly number[];
 }
 export interface HttpCall {
-  /** PATCH is used only for GitHub writes; it is handled like POST, as a write that may have arrived. */
-  method: 'GET' | 'POST' | 'PATCH';
+  /** PATCH and DELETE are used only for GitHub writes; they are handled like POST, as writes that may have arrived. */
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   url: string;
   headers: Record<string, string>;
   /** Headers from the secret store, sent only while the request stays on `secretOrigin`. */

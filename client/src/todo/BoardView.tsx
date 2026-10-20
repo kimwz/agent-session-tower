@@ -3,11 +3,12 @@ import { closestCorners, DndContext, DragOverlay, pointerWithin, useDroppable, t
 import { horizontalListSortingStrategy, SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { useTodoSensors } from './todo-dnd';
 import { GripVertical, Inbox, MoreHorizontal, Plus } from 'lucide-react';
-import type { TodoProject, TodoTask } from '../../../shared/todo/types';
+import type { TodoGitHubBinding, TodoProject, TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { TaskCard, type TaskCardProps } from './TaskCard';
 import { colorOf } from './todo-format';
 import { dayAfterOf, dropPlace, OVERVIEW_SHOWN, sectionDropAfter, shownTasks, type BoardColumn, type BoardGroup, type CardContext } from './todo-views';
+import { GitHubMark } from './GitHubMark';
 
 /**
  * Columns of cards. Cards are dragged with a mouse, a held touch or the keyboard: within a column to put them in order
@@ -46,6 +47,8 @@ export interface BoardProps {
   onSectionMove: (sectionId: string, afterId: string | null) => void;
   onAddSection: (name: string) => void;
   onSectionMenu: (sectionId: string, anchor: HTMLElement) => void;
+  /** A section's GitHub link, shown beside its name. */
+  sectionBinding?: (sectionId: string) => TodoGitHubBinding | undefined;
   /** Completed tasks shown at the end, when the display asks for them. */
   completed?: ReactNode;
 }
@@ -98,7 +101,7 @@ function Column({ column, board, active, over, children }: { column: BoardColumn
   return <section ref={sortable.setNodeRef} style={style} className={`todo-column ${column.tone ?? ''} ${column.collapsed ? 'collapsed' : ''} ${column.locked ? 'locked' : ''} ${over && active && column.drop ? 'drop-target' : ''} ${sortable.isDragging ? 'dragging' : ''}`} data-column={column.id} aria-label={column.title}>
     <header className="todo-column-head">
       {board.sections && column.sectionId && !column.locked && <button type="button" className="todo-column-grip" aria-label={t('“{0}” 섹션 옮기기', { 0: column.title })} {...sortable.attributes} {...sortable.listeners}><GripVertical size={13} /></button>}
-      <h3>{column.title}</h3>
+      <h3>{column.title}{column.sectionId && board.sectionBinding?.(column.sectionId) && <GitHubMark binding={board.sectionBinding(column.sectionId)!} />}</h3>
       <span className="todo-column-count">{column.tasks.length || ''}</span>
       {column.note && <span className="todo-column-note">{column.note}</span>}
       {column.sectionId && <button ref={menu} type="button" className="icon-button todo-column-more" aria-label={t('섹션 메뉴')} onClick={() => menu.current && board.onSectionMenu(column.sectionId!, menu.current)}><MoreHorizontal size={14} /></button>}

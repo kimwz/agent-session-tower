@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { pipeline } from 'node:stream/promises';
 import { TowerError } from '../../shared/errors.js';
 import { TodoRequestSchema, type TodoRequest } from '../../shared/todo/ops.js';
-import type { TodoAgent, TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import type { TodoAgent, TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoGitHubBinding, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import type { TodoFiles } from '../todo/files.js';
 import { readJson, UUID } from './requests.js';
 import { byteRange } from './sinks.js';
@@ -27,6 +27,12 @@ export interface TodoBackend {
   chatPresets?(): string[] | null;
   /** Saves the owner's list (`null` goes back to the defaults); refuses an invalid one whole. */
   setChatPresets?(presets: unknown): string[] | null;
+  /** GitHub links of projects and sections (server/todo/github/sync.ts); only the owner's page reaches them. */
+  github?: {
+    check(repo: string): Promise<{ login: string; repo: string; private: boolean; canPush: boolean }>;
+    link(input: { kind: 'project' | 'section'; id: string; repo: string }): Promise<TodoGitHubBinding>;
+    unlink(id: string): void;
+  };
   /** Attachments; absent where they cannot be kept. */
   files?: Pick<TodoFiles, 'startUpload' | 'uploadOffset' | 'appendUpload' | 'completeUpload' | 'cancelUpload' | 'openFile'>;
 }
@@ -41,6 +47,7 @@ const number = (value: string | null) => value === null || !/^\d{1,4}$/.test(val
 const UPLOAD = /^\/api\/todos\/uploads\/([^/]+?)(?:\/(complete|cancel))?$/;
 const FILE = /^\/api\/todos\/files\/([^/]+)$/;
 const AGENT = /^\/api\/todos\/tasks\/([^/]+)\/agent$/;
+const GITHUB_BINDING = /^\/api\/todos\/github\/bindings\/([^/]+)$/;
 const MAX_AGENT_TEXT = 32_000;
 
 
@@ -135,6 +142,7 @@ export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: 
     json(res, 202, { agent: await todos.startAgent(agent[1], text) });
     return true;
   }
+  if (path.startsWith('/api/todos/github/')) return githubRoute(req, res, path, todos, json, owner);
   if (path === '/api/todos/uploads' || UPLOAD.test(path) || FILE.test(path)) return todoFileRoute(req, res, url, path, todos, json);
   if (req.method === 'POST' && path === TODO_OPS_PATH) {
     const parsed = TodoRequestSchema.safeParse(await readJson(req, MAX_TODO_BODY));
@@ -145,6 +153,39 @@ export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: 
     json(res, 200, todos.apply(parsed.data, owner ? 'owner' : 'agent'));
     return true;
   }
+  json(res, 404, { error: 'API 경로를 찾을 수 없습니다.' });
+  return true;
+}
+
+/** Linking projects and sections to GitHub repositories: the owner's page only, never an agent. */
+async function githubRoute(req: IncomingMessage, res: ServerResponse, path: string, todos: TodoBackend,
+  json: (res: ServerResponse, status: number, body: unknown) => void, owner: boolean): Promise<boolean> {
+  if (!owner) { req.resume(); json(res, 403, { error: 'GitHub 연결은 소유자의 화면에서만 바꿀 수 있습니다.' }); return true; }
+  const github = todos.github;
+  if (!github) { req.resume(); json(res, 503, { error: 'GitHub 동기화를 사용할 수 없습니다.' }); return true; }
+  const repoOf = (body: Record<string, unknown>) => typeof body.repo === 'string' ? body.repo.trim() : '';
+  // GitHub's own refusals are told as they came, as an upstream problem.
+  const upstream = <T>(work: Promise<T>) => work.catch(error => { throw error instanceof TowerError ? error : new TowerError('upstream', error instanceof Error ? error.message : String(error)); });
+  if (req.method === 'POST' && path === '/api/todos/github/check') {
+    const body = await readJson(req, 4 * 1024);
+    json(res, 200, await upstream(github.check(repoOf(body))));
+    return true;
+  }
+  if (req.method === 'POST' && path === '/api/todos/github/bindings') {
+    const body = await readJson(req, 4 * 1024);
+    const kind = body.kind, id = body.id;
+    if ((kind !== 'project' && kind !== 'section') || typeof id !== 'string' || !ID.test(id)) throw new TowerError('invalid', '연결할 프로젝트나 섹션이 올바르지 않습니다.');
+    json(res, 200, { binding: await upstream(github.link({ kind, id, repo: repoOf(body) })) });
+    return true;
+  }
+  const binding = GITHUB_BINDING.exec(path);
+  if (req.method === 'DELETE' && binding) {
+    req.resume();
+    github.unlink(binding[1]);
+    json(res, 200, { unlinked: true });
+    return true;
+  }
+  req.resume();
   json(res, 404, { error: 'API 경로를 찾을 수 없습니다.' });
   return true;
 }

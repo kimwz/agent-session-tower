@@ -73,7 +73,7 @@ export class GitHubAccess {
       const outcome = await performHttp({ method: send?.method ?? 'GET', url: `${GITHUB_API}${path}`, secretOrigin: GITHUB_API, secretHeaders: { authorization },
         headers: { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', ...(etag ? { 'if-none-match': etag } : {}), ...(send ? { 'content-type': 'application/json' } : {}) },
         // A write is never followed through a redirect: whatever answered it, the POST arrived and is not repeated.
-        ...(send ? { body: JSON.stringify(send.body), noRedirects: true } : {}), timeoutMs: 30_000, maxBytes: 5_000_000, beforeSend: async () => { await current(); blocked(); return this.ports.budget.spend(); } }, { privateHosts: [], ownPorts }, this.ports.resolve);
+        ...(send ? { ...(send.body !== undefined ? { body: JSON.stringify(send.body) } : {}), noRedirects: true } : {}), timeoutMs: 30_000, maxBytes: 5_000_000, beforeSend: async () => { await current(); blocked(); return this.ports.budget.spend(); } }, { privateHosts: [], ownPorts }, this.ports.resolve);
       if (!outcome.ok) throw Object.assign(new GitHubError(outcome.error), { uncertain: outcome.uncertain });
       let body: unknown;
       try { body = outcome.status === 304 ? undefined : JSON.parse(outcome.body); } catch { body = undefined; }

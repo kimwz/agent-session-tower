@@ -1,7 +1,9 @@
 import { useRef, useState, type FormEvent, type ReactNode, type RefObject } from 'react';
-import { Archive, ArchiveRestore, ArrowDown, ArrowUp, CalendarDays, CalendarRange, ChevronDown, ChevronRight, FolderTree, Hash, Heart, Inbox, Layers, MoreHorizontal, Palette, Pencil, Plus, Search, Tag, Trash2 } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowDown, ArrowUp, CalendarDays, CalendarRange, ChevronDown, ChevronRight, FolderTree, Github, Hash, Heart, Inbox, Layers, MoreHorizontal, Palette, Pencil, Plus, Search, Tag, Trash2 } from 'lucide-react';
 import type { TodoLabel, TodoProject } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
+import { GitHubBindingDialog } from './GitHubBindingDialog';
+import { GitHubMark } from './GitHubMark';
 import { Menu, Popover, type MenuItem } from './Popover';
 import { colorOf, TODO_COLORS } from './todo-format';
 import type { TodoWorld } from './todo-model';
@@ -50,11 +52,11 @@ function ColorGrid({ anchor, value, onPick, onClose }: { anchor: RefObject<HTMLE
   </Popover>;
 }
 
-function Row({ active, icon, label, count, tone, onClick, menu, depth = 0, toggle }: { active: boolean; icon: ReactNode; label: string; count?: number; tone?: string; onClick: (anchor: HTMLElement) => void; menu?: (anchor: HTMLButtonElement) => void; depth?: number; toggle?: ReactNode }) {
+function Row({ active, icon, label, count, tone, onClick, menu, depth = 0, toggle, badge }: { active: boolean; icon: ReactNode; label: string; count?: number; tone?: string; onClick: (anchor: HTMLElement) => void; menu?: (anchor: HTMLButtonElement) => void; depth?: number; toggle?: ReactNode; badge?: ReactNode }) {
   const more = useRef<HTMLButtonElement>(null);
   return <li className={`todo-side-row ${active ? 'active' : ''}`} style={{ paddingLeft: 8 + depth * 14 }}>
     {toggle}
-    <button type="button" className="todo-side-link" aria-current={active ? 'page' : undefined} onClick={event => onClick(event.currentTarget)}>{icon}<span>{label}</span></button>
+    <button type="button" className="todo-side-link" aria-current={active ? 'page' : undefined} onClick={event => onClick(event.currentTarget)}>{icon}<span>{label}</span>{badge}</button>
     {count ? <span className={`todo-side-count ${tone ?? ''}`}>{count}</span> : null}
     {menu && <button ref={more} type="button" className="icon-button todo-side-more" aria-label={t('“{0}” 메뉴', { 0: label })} onClick={() => more.current && menu(more.current)}><MoreHorizontal size={14} /></button>}
   </li>;
@@ -69,6 +71,8 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
   const [color, setColor] = useState<{ anchor: HTMLElement; value: string; pick: (color: string) => void } | null>(null);
   // Choosing a new parent opens once the project's menu has closed, at the same place.
   const [parentFor, setParentFor] = useState<TodoProject | null>(null);
+  // The GitHub link dialog opens once the project's menu has closed, at the same place.
+  const [githubFor, setGithubFor] = useState<TodoProject | null>(null);
   const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set(['archived']));
   const [search, setSearch] = useState(query);
   const menuAnchor = useRef<HTMLElement | null>(null);
@@ -80,6 +84,7 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
   const inbox = world.projects.find(project => project.inbox);
   const fold = (key: string) => setFolded(previous => { const next = new Set(previous); if (next.has(key)) next.delete(key); else next.add(key); return next; });
   const openMenu = (anchor: HTMLElement, label: string, items: (MenuItem | 'separator')[]) => { menuAnchor.current = anchor; setMenu({ anchor, items, label }); };
+  const githubOf = (projectId: string) => world.github?.bindings.find(binding => binding.scope.kind === 'project' && binding.scope.id === projectId);
   const removed = (name: string) => client.toast(t('“{0}” 삭제', { 0: name }), 'info', client.undoActions());
 
   const projectMenu = (project: TodoProject, anchor: HTMLElement, depth: number) => openMenu(anchor, project.name, [
@@ -89,6 +94,7 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
     { key: 'color', label: t('색 바꾸기'), icon: <Palette size={13} />, run: () => { colorAnchor.current = anchor; setColor({ anchor, value: project.color, pick: value => client.apply([{ op: 'project.update', id: project.id, patch: { color: value } }]) }); } },
     ...placeItems(project, anchor),
     'separator',
+    { key: 'github', label: githubOf(project.id) ? t('GitHub 연결 바꾸기…') : t('GitHub 연결…'), icon: <Github size={13} />, run: () => { menuAnchor.current = anchor; setGithubFor(project); } },
     { key: 'archive', label: t('보관'), icon: <Archive size={13} />, run: () => { if (client.apply([{ op: 'project.update', id: project.id, patch: { archived: true } }])) client.toast(t('“{0}” 보관', { 0: project.name }), 'info', client.undoActions()); } },
     { key: 'delete', label: t('삭제'), danger: true, icon: <Trash2 size={13} />, run: () => { if (client.apply([{ op: 'project.delete', id: project.id }])) { removed(project.name); if (current === `p:${project.id}`) onNavigate({ kind: 'today' }); } } },
   ]);
@@ -117,6 +123,7 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
         ? <NameInput initial={project.name} label={t('프로젝트 이름')} onCancel={() => setEditing(null)} onSave={name => { client.apply([{ op: 'project.update', id: project.id, patch: { name } }]); setEditing(null); }} />
         : <ul><Row active={current === key} depth={node.depth} icon={<i className="todo-dot" style={{ background: colorOf(project.color) }} />} label={project.name} count={counts.projects[project.id]}
           onClick={() => onNavigate({ kind: 'project', id: project.id })} menu={readOnly ? undefined : anchor => projectMenu(project, anchor, node.depth)}
+          badge={githubOf(project.id) && <GitHubMark binding={githubOf(project.id)!} />}
           toggle={node.children.length ? <button type="button" className="todo-side-fold" aria-label={hidden ? t('펼치기') : t('접기')} aria-expanded={!hidden} onClick={() => fold(key)}>{hidden ? <ChevronRight size={12} /> : <ChevronDown size={12} />}</button> : undefined} /></ul>}
       {editing?.kind === 'new-project' && editing.parentId === project.id && <NameInput initial="" label={t('하위 프로젝트 이름')} onCancel={() => setEditing(null)}
         onSave={name => { client.apply([{ op: 'project.create', id: newId(), name, parentId: project.id }]); setEditing(null); }} />}
@@ -170,6 +177,7 @@ export function TodoSidebar({ world, counts, view, query, client, readOnly, sear
       return <Row key={project.id} active={current === `p:${project.id}`} icon={<Archive size={14} />} label={project.name} onClick={() => onNavigate({ kind: 'project', id: project.id })} menu={open} />;
     })}</ul>)}
     {menu && <Menu anchor={menuAnchor} label={menu.label} items={menu.items} onClose={() => setMenu(null)} />}
+    {githubFor && !menu && <GitHubBindingDialog anchor={menuAnchor} client={client} scope={{ kind: 'project', id: githubFor.id }} name={githubFor.name} binding={githubOf(githubFor.id)} onClose={() => setGithubFor(null)} />}
     {parentFor && !menu && <Menu anchor={menuAnchor} label={t('상위 프로젝트 바꾸기')} onClose={() => setParentFor(null)} items={parentCandidates(world, parentFor.id).map(parent => parent
       ? { key: parent.id, label: <span style={{ paddingLeft: (depthOf(world.projects, parent) - 1) * 12 }}>{parent.name}</span>, icon: <i className="todo-dot" style={{ background: colorOf(parent.color) }} />, run: () => client.apply([{ op: 'project.move', id: parentFor.id, parentId: parent.id }]) }
       : { key: 'top', label: t('없음 (최상위)'), icon: <Hash size={13} />, run: () => client.apply([{ op: 'project.move', id: parentFor.id, parentId: null }]) })} />}

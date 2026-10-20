@@ -23,6 +23,8 @@ import { TodoStore } from './todo/store.js';
 import { TodoFiles } from './todo/files.js';
 import { TodoBackup } from './todo/backup.js';
 import { TodoAgents } from './todo/agents.js';
+import { ghTodoGitHub } from './todo/github/client.js';
+import { TodoGitHubSync } from './todo/github/sync.js';
 import { removeTodoMasterGuide, writeTodoMasterGuide } from './master/guide.js';
 import { DurableRunManager } from './runs/durable-runner.js';
 import { runRunnerWorker } from './runs/worker.js';
@@ -261,6 +263,10 @@ async function main() {
   const todos = new TodoStore(stateDir);
   const todoFiles = new TodoFiles(stateDir, todos);
   const todoBackup = new TodoBackup(todos, todoFiles, { onChange: () => changed() });
+  // Linked projects and sections keep their todos and GitHub issues alike (todo/github/sync.ts); what comes down from
+  // GitHub moves issue masters and pages as the page's own changes do.
+  const todoSync = new TodoGitHubSync({ store: todos, stateDir, github: ghTodoGitHub(),
+    changed: changes => { todoAgents.settle(changes.tasks.map(task => task.id)); changed(); } });
   // The page's and the agents' todo calls: a change tells the pages either way.
   const todoCalls = {
     overview: () => todos.overview(),
@@ -272,11 +278,13 @@ async function main() {
       const changes = todos.apply(request, by);
       const agents = todoAgents.settle(changes.tasks.map(task => task.id));
       changed();
+      todoSync.nudge();
       return Object.keys(agents).length ? { ...changes, revision: todos.revision(), agents } : changes;
     },
     attachFile: async (input: { taskId: string; commentId: string | null; path: string }) => {
       const attached = await todoFiles.attachLocal(input);
       changed();
+      todoSync.nudge();
       return attached.file;
     },
   };
@@ -567,11 +575,16 @@ async function main() {
       agentSessions: () => todos.agentSessions(),
       chatPresets: () => todos.chatPresets(),
       setChatPresets: presets => { const saved = todos.setChatPresets(presets); changed(); return saved; },
+      github: {
+        check: repo => todoSync.check(repo),
+        link: async input => { const binding = await todoSync.link(input); changed(); return binding; },
+        unlink: id => { todoSync.unlink(id); changed(); },
+      },
       files: {
         startUpload: input => todoFiles.startUpload(input),
         uploadOffset: id => todoFiles.uploadOffset(id),
         appendUpload: (id, offset, chunks) => todoFiles.appendUpload(id, offset, chunks),
-        completeUpload: async id => { const attached = await todoFiles.completeUpload(id); changed(); return attached; },
+        completeUpload: async id => { const attached = await todoFiles.completeUpload(id); changed(); todoSync.nudge(); return attached; },
         cancelUpload: id => todoFiles.cancelUpload(id),
         openFile: (id, inline) => todoFiles.openFile(id, inline),
       },
@@ -826,6 +839,7 @@ async function main() {
     dispose();
     auth.close();
     clearInterval(todoPurge);
+    todoSync.stop();
     todoAgents.close();
     todoBackup.close();
     todos.close();
@@ -837,6 +851,7 @@ async function main() {
   webCredentials = { port: listening && typeof listening === 'object' ? listening.port : port, token: pageToken, callerSecret: masterCallerSecret };
   master.start();
   todoAgents.start();
+  todoSync.start();
   console.log(`\n  Agent Session Tower\n  ${access.browserUrl}\n`);
   printRemoteAccess(host, port, stateDir, publicUrls);
   if (!auth.configured()) console.log(`  Remote account not configured. Open http://localhost:${port} and select Account management in the expanded navigation.\n`);
@@ -908,6 +923,7 @@ async function main() {
     dispose();
     server.closeAllConnections();
     clearInterval(todoPurge);
+    todoSync.stop();
     todoAgents.close();
     todoBackup.close();
     todos.close();

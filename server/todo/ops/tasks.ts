@@ -98,7 +98,8 @@ export function createTask(ctx: TodoContext, op: TodoOpOf<'task.create'>, inbox:
   dueDate, dueTime, recurrence, op.durationMin ?? null, op.deadlineDate ?? null, key, ctx.now, ctx.now);
   if (op.labelIds?.length) setLabels(ctx, op.id, op.labelIds);
   ctx.touched.tasks.add(op.id);
-  ctx.event(op.id, 'created');
+  // Who made it, as the request's sender (TodoStore.apply): GitHub sync marks an agent's todo in its issue.
+  ctx.event(op.id, 'created', ctx.by ? { by: ctx.by } : {});
 }
 
 export function updateTask(ctx: TodoContext, op: TodoOpOf<'task.update'>): void {

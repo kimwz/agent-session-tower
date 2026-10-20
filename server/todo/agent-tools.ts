@@ -8,6 +8,7 @@ import { parseQuickAdd, type QuickAddResult } from '../../shared/todo/quick-add.
 import type { TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoFile, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { TowerError } from '../../shared/errors.js';
 import { checkLocalMedia, LOCAL_MEDIA } from './files.js';
+import { commentWriter, outsideNotice } from './github/outside.js';
 
 /**
  * The Todo tools every agent Tower runs gets (server `tower_todos`, owner's order of 2026-10-17: reading and changing
@@ -234,24 +235,26 @@ const TOOLS: Tool[] = [
     },
   }),
   tool({
-    name: 'todos_get', description: 'One task in full: its description, sub-tasks, comments (the latest 50, each cut at 2000 characters: pass comment to read one whole; author says whether the owner or an agent wrote it, where that was recorded), attachments (names and sizes), completions, and the tasks before and after it.',
+    name: 'todos_get', description: 'One task in full: its description, sub-tasks, comments (the latest 50, each cut at 2000 characters: pass comment to read one whole; author says whether the owner or an agent wrote it, where that was recorded, or github:@login for a comment from GitHub), attachments (names and sizes), completions, and the tasks before and after it.',
     input: z.object({ id, comment: id.optional().describe('A comment of this task to read whole, by its id.') }).strict(),
     run: ({ id: taskId, comment: commentId }, { store }) => {
       const detail = store.detail(taskId);
       if (commentId) {
         const found = detail.comments.find(item => item.id === commentId && !item.deletedAt);
         if (!found) throw new TowerError('not-found', `Comment ${commentId} is not on this task.`);
-        return { comment: { id: found.id, body: found.body, createdAt: found.createdAt, ...(found.author ? { author: found.author } : {}) } };
+        const writer = commentWriter(found);
+        return { comment: { id: found.id, body: found.body, createdAt: found.createdAt, ...(writer ? { author: writer } : {}) }, ...(detail.github ? { outside: outsideNotice(detail) } : {}) };
       }
       const overview = store.overview();
       const links = new Map([...overview.links, ...detail.next.map(item => item.link)].map(link => [link.id, link]));
       const name = namer({ ...overview, links: [...links.values()] });
       const comments = detail.comments.filter(comment => !comment.deletedAt);
       return {
+        ...(detail.github ? { github: { issue: `${detail.github.repo}#${detail.github.number}`, url: detail.github.url }, outside: outsideNotice(detail) } : {}),
         task: name(detail.task, true),
         subtasks: detail.subtasks.map(item => name(item)),
         // The latest comments, so a long discussion still fits one answer.
-        comments: comments.slice(-MAX_COMMENTS).map(comment => ({ id: comment.id, createdAt: comment.createdAt, ...(comment.author ? { author: comment.author } : {}),
+        comments: comments.slice(-MAX_COMMENTS).map(comment => ({ id: comment.id, createdAt: comment.createdAt, ...(commentWriter(comment) ? { author: commentWriter(comment) } : {}),
           ...(comment.body.length > MAX_COMMENT_CHARS ? { body: `${comment.body.slice(0, MAX_COMMENT_CHARS)}…`, truncated: true } : { body: comment.body }) })),
         ...(comments.length > MAX_COMMENTS ? { olderComments: comments.length - MAX_COMMENTS } : {}),
         files: detail.files.map(file => ({ id: file.id, name: file.name, size: file.size, ...(file.commentId ? { commentId: file.commentId } : {}) })),
