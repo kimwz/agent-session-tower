@@ -96,7 +96,8 @@ export function ImageViewer({ images, start, opener, onClose }: { images: readon
     pointers.current.clear(); gesture.current = null; lastTap.current = null;
   };
   const fit = natural ? fitScale(stage, natural) : 1;
-  const zoomed = zoomedIn(view, fit);
+  // A picture still loading, or one that failed, is never zoomed: the last picture's scale says nothing of it.
+  const zoomed = natural !== null && zoomedIn(view, fit);
   const zoomBy = (factor: number) => { if (natural) setView(current => zoomAt(current, factor, { x: 0, y: 0 }, stage, natural)); };
   const toggleAt = (point: Point, small?: number) => { if (natural) setView(current => toggleZoom(current, point, stage, natural, { small })); };
   const panKeys = (dx: number, dy: number) => { if (natural) setView(current => panBy(current, dx, dy, stage, natural)); };
