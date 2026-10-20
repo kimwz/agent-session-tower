@@ -1,6 +1,7 @@
 /**
  * The Todo page's keys: `Q` add, `/` search, `B` board, `C` calendar (each pressed again goes back to the other,
- * `layoutFor`), `W`/`M` calendar by week or month, `Shift+V` board or calendar, `V` the list of lists to go to
+ * `layoutFor`), `W`/`M` calendar by week or month (each pressed again on the calendar goes back to the other,
+ * `calendarFor`), `Shift+V` board or calendar, `V` the list of lists to go to
  * (`readSwitchKey`), `G` then `A`/`T`/`U`/`I` everything, today, upcoming, inbox;
  * arrows move the chosen task on the board; on the chosen task `E` complete, `Shift+E` complete and add the next, `N`
  * add the next, `Enter` open; `Esc` close, or let go of the chosen task; `⌘Z`/`Ctrl+Z` undo the last change. `1` and
@@ -8,6 +9,7 @@
  */
 
 import type { TodoLayout } from '../../../shared/todo/types';
+import type { CalendarMode } from './calendar/calendar-layout';
 
 export type Direction = 'up' | 'down' | 'left' | 'right';
 export type TodoShortcut =
@@ -36,8 +38,8 @@ export function readShortcut(event: ShortcutKey, pending: boolean): { shortcut?:
     const go = ({ a: 'all', t: 'today', u: 'upcoming', i: 'inbox' } as const)[key as 'a' | 't' | 'u' | 'i'];
     return go && !event.shiftKey ? { shortcut: { action: go }, pending: false } : { pending: false };
   }
-  // A held key repeats; a layout key would then flip the page back and forth.
-  if (event.repeat && (key === 'b' || key === 'c' || (key === 'v' && event.shiftKey))) return { pending: false };
+  // A held key repeats; a layout or calendar view key would then flip the page back and forth.
+  if (event.repeat && (key === 'b' || key === 'c' || key === 'w' || key === 'm' || (key === 'v' && event.shiftKey))) return { pending: false };
   if (event.shiftKey) {
     if (key === 'v') return { shortcut: { action: 'layout' }, pending: false };
     if (key === 'e') return { shortcut: { action: 'complete-next' }, pending: false };
@@ -64,6 +66,10 @@ export const otherLayout = (layout: TodoLayout): TodoLayout => layout === 'board
 
 /** The layout `B` or `C` (`pressed`) goes to: its own, or, already there, back to the other one. */
 export const layoutFor = (current: TodoLayout, pressed: TodoLayout): TodoLayout => current === pressed ? otherLayout(pressed) : pressed;
+
+/** The calendar view `W` or `M` (`pressed`) opens: its own, or, the calendar already showing it, back to the other one. */
+export const calendarFor = (layout: TodoLayout, current: CalendarMode, pressed: CalendarMode): CalendarMode =>
+  layout === 'calendar' && current === pressed ? (pressed === 'week' ? 'month' : 'week') : pressed;
 
 export type SwitchKey = { action: 'choose' | 'mark'; index: number } | { action: 'close' };
 
