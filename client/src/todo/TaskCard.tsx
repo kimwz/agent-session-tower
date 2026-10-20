@@ -214,5 +214,5 @@ export function SubtaskAgent({ task, agent, onChat }: { task: TodoTask; agent: T
   </>;
 }
 
-/** The first line of a Markdown description, without its marks. */
-export const plain = (text: string) => (text.split('\n').find(line => line.trim()) ?? '').replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[#>*_`~[\]]/g, '').trim().slice(0, 140);
+/** The first line of a Markdown description, without its marks. A single `~` is text (a range: 18~20%); `~~` is a mark. */
+export const plain = (text: string) => (text.split('\n').find(line => line.trim()) ?? '').replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/~~/g, '').replace(/[#>*_`[\]]/g, '').trim().slice(0, 140);

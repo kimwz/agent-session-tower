@@ -4,6 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { Markdown } from '../../../client/src/chat/Markdown.js';
 import { TodoMarkdown } from '../../../client/src/todo/TodoMarkdown.js';
+import { plain } from '../../../client/src/todo/TaskCard.js';
 
 // Every Markdown in Tower: a chat message (with and without the master's line breaks), and a todo description or comment.
 const renderers: [string, (text: string) => string][] = [
@@ -26,4 +27,9 @@ test('~~text~~ still strikes text through', () => {
     assert.match(render('이건 ~~취소~~ 되었습니다'), /이건 <del>취소<\/del> 되었습니다/, name);
     assert.match(render('1~3일, ~~취소~~, 5~6일'), /1~3일, <del>취소<\/del>, 5~6일/, `${name}: beside single ones`);
   }
+});
+
+test('a todo card\'s one-line description keeps a single ~ and drops only the ~~ marks', () => {
+  assert.equal(plain('방문→가입 전환율은 18~20%, 가입→결제 전환율은 6~7% 정도입니다'), '방문→가입 전환율은 18~20%, 가입→결제 전환율은 6~7% 정도입니다');
+  assert.equal(plain('**3~4주** 안에, ~~지난주 추정치~~ 대신'), '3~4주 안에, 지난주 추정치 대신');
 });
