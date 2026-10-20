@@ -78,7 +78,7 @@ export function useTodoReadState(world: Pick<TodoWorld, 'outside' | 'availabilit
   }, [openId, mark, started, save]);
   useEffect(() => {
     // What is stored now, not the event's value: a late event would bring back marks written since.
-    const sync = (event: StorageEvent) => { if (event.key === TODO_READ_KEY && writable.current) setRead(previous => stored() ?? previous); };
+    const sync = (event: StorageEvent) => { if (event.key === TODO_READ_KEY) setRead(previous => (writable.current ? stored() : undefined) ?? previous); };
     window.addEventListener('storage', sync);
     return () => window.removeEventListener('storage', sync);
   }, []);
