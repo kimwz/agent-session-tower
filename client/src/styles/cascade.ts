@@ -40,3 +40,4 @@ import './settings.css';
 
 import './secrets.css';
 import './todo.css';
+import './image-viewer.css';

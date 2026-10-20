@@ -5,7 +5,8 @@ import type { AttachmentUploads } from '../stores/attachment-uploads.js';
 import { createServer, STATUS_CODES, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocketServer } from 'ws';
-import { chatImageReference, isChatImageLink, readChatImage, sendChatImage, sendChatImageReopen, withChatImages } from './chat-images.js';
+import { chatImageReference, readChatImage, sendChatImage, withChatImages } from './chat-images.js';
+import { isReopenableLink, sendLinkReopen } from './link-reopen.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
@@ -292,16 +293,17 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
     if (!req.headers.host || !hosts.has(req.headers.host)) return json(res, 403, { error: '허용되지 않은 호스트입니다.' });
     // Opening the page itself from elsewhere is allowed: a login in front of Tower (such as Cloudflare Access) redirects
     // back from its own site, and links arrive from chat apps. That load carries no Tower session (SameSite=Strict),
-    // and the API stays same-site only. An image link opened that way gets a page that opens it again from Tower.
+    // and the API stays same-site only. An image or attachment link opened that way gets a page that opens it again
+    // from Tower.
     const navigation = (req.method === 'GET' || req.method === 'HEAD') && req.headers['sec-fetch-mode'] === 'navigate'
       && req.headers['sec-fetch-dest'] === 'document';
     const crossSite = req.headers['sec-fetch-site'] === 'cross-site';
     const pageNavigation = navigation && !(req.url || '/').startsWith('/api/');
-    const imageReopen = crossSite && navigation && isChatImageLink(req.url || '/');
-    if (crossSite && !pageNavigation && !imageReopen) return json(res, 403, { error: '다른 사이트에서의 접근은 허용되지 않습니다.' });
+    const linkReopen = crossSite && navigation && isReopenableLink(req.url || '/');
+    if (crossSite && !pageNavigation && !linkReopen) return json(res, 403, { error: '다른 사이트에서의 접근은 허용되지 않습니다.' });
     const origin = req.headers.origin;
     if (origin && !origins.has(origin)) return json(res, 403, { error: '허용되지 않은 출처입니다.' });
-    if (imageReopen) return sendChatImageReopen(res, req.url!, req.method === 'HEAD');
+    if (linkReopen) return sendLinkReopen(res, req.url!, req.method === 'HEAD');
     try {
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
       const path = decodeURIComponent(url.pathname);

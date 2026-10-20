@@ -40,6 +40,8 @@ const ID = /^[A-Za-z0-9_-]{1,64}$/;
 const number = (value: string | null) => value === null || !/^\d{1,4}$/.test(value) ? undefined : Number(value);
 const UPLOAD = /^\/api\/todos\/uploads\/([^/]+?)(?:\/(complete|cancel))?$/;
 const FILE = /^\/api\/todos\/files\/([^/]+)$/;
+/** A link to an attachment exactly as the Todo page makes it (shown inline or downloaded): nothing else, no other query. */
+export const isTodoFileLink = (url: string) => /^\/api\/todos\/files\/[A-Za-z0-9_-]{1,64}(?:\?inline=1)?$/.test(url);
 const AGENT = /^\/api\/todos\/tasks\/([^/]+)\/agent$/;
 const MAX_AGENT_TEXT = 32_000;
 

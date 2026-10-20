@@ -10,6 +10,7 @@ import { TodoStore } from '../../../server/todo/store.js';
 import { TodoFiles } from '../../../server/todo/files.js';
 import type { Snapshot } from '../../../shared/types.js';
 import type { TodoFile, TodoOverview } from '../../../shared/todo/types.js';
+import { createRemoteAuthFixture } from '../../helpers/auth.js';
 
 test('the todo routes take the page token and JSON, check every change, and have their own change budget', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-todo-http-'));
@@ -198,6 +199,70 @@ test('attachments upload in pieces apart from the change budget, and come back a
   const cancelled = await (await post('/api/todos/uploads', { taskId: 't', name: 'a.txt', mimeType: 'text/plain', size: 1 })).json() as { id: string };
   assert.equal((await post(`/api/todos/uploads/${cancelled.id}/cancel`, {})).status, 200);
   assert.equal((await fetch(`${base}/api/todos/uploads/${cancelled.id}`)).status, 404);
+});
+
+test('an attachment link opened from another site opens again from Tower; embeds, reads and foreign origins stay closed', async t => {
+  const { request } = await import('node:http');
+  const dir = await mkdtemp(join(tmpdir(), 'tower-todo-files-reopen-'));
+  const store = new TodoStore(dir);
+  store.start();
+  const files = new TodoFiles(dir, store);
+  await files.start();
+  const { auth, origins, cookie } = await createRemoteAuthFixture(join(dir, 'auth'));
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, auth, remote: { origins }, backend: {
+    snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: '' }),
+    detail: async () => undefined, enqueue: async () => { throw new Error('unused'); }, cancel: async () => {}, subscribe: () => () => {},
+    todos: {
+      overview: () => store.overview(), detail: id => store.detail(id), completed: input => store.completed(input), search: (query, input) => store.search(query, input),
+      apply: (request, by) => store.apply(request, by), files,
+    },
+  } });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); store.close(); await rm(dir, { recursive: true, force: true }); });
+  const port = (server.address() as { port: number }).port;
+  origins.add(`http://remote.test:${port}`);
+  store.apply({ requestId: randomUUID(), ops: [{ op: 'task.create', id: 't', content: 'With a screenshot' }] }, 'owner');
+  const shot = join(dir, 'shot.png'); await writeFile(shot, PNG);
+  const { file } = await files.attachLocal({ taskId: 't', commentId: null, path: shot });
+  const link = `/api/todos/files/${file.id}?inline=1`;
+  // Raw requests carrying exactly what Chromium and WebKit send (fetch() would set its own Sec-Fetch-Mode).
+  const send = (path: string, headers: Record<string, string>, method = 'GET') => new Promise<{ status?: number; type?: string; body: Buffer }>((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port, path, method, headers: { Host: `remote.test:${port}`, 'X-Forwarded-For': '192.0.2.1', ...headers } }, res => {
+      const chunks: Buffer[] = []; res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode, type: res.headers['content-type'], body: Buffer.concat(chunks) }));
+    });
+    req.on('error', reject); req.end();
+  });
+  const navigation = (site: string, dest = 'document') => ({ 'Sec-Fetch-Site': site, 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': dest });
+  // Opened in a window without the page's session, or back from a login in front of Tower: only a page that opens the
+  // same link again comes back, never the file; the download link too.
+  for (const [path, headers] of [[link, navigation('cross-site')], [link, { ...navigation('cross-site'), cookie }], [`/api/todos/files/${file.id}`, navigation('cross-site')]] as const) {
+    const reopen = await send(path, headers);
+    assert.equal(reopen.status, 200);
+    assert.equal(reopen.type, 'text/html; charset=utf-8');
+    assert.ok(reopen.body.toString().includes(`<meta http-equiv="refresh" content="0;url=${path}">`));
+    assert.equal(reopen.body.includes(PNG), false);
+  }
+  assert.equal((await send(link, navigation('cross-site'), 'HEAD')).body.length, 0);
+  // The browser then opens it from Tower itself, which carries the session and passes every usual check.
+  const opened = await send(link, { ...navigation('same-origin'), cookie });
+  assert.equal(opened.status, 200); assert.equal(opened.type, 'image/png'); assert.deepEqual(opened.body, PNG);
+  assert.equal((await send(link, navigation('same-origin'))).status, 401);
+  // Embeds, reads, changes, foreign origins and anything not shaped like an attachment link stay closed.
+  const closed: Array<[string, Record<string, string>, string?]> = [
+    [link, { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'image', cookie }],
+    [link, { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty', cookie }],
+    [link, { ...navigation('cross-site', 'iframe'), cookie }],
+    [link, { ...navigation('cross-site'), cookie }, 'POST'],
+    [link, { ...navigation('cross-site'), Origin: 'https://attacker.example' }],
+    [`${link}&x=1`, navigation('cross-site')],
+    [`/api/todos/files/${file.id}?inline=0`, navigation('cross-site')],
+    [`/api/todos/files/${file.id}%22%3E`, navigation('cross-site')],
+    [`/api/todos/files/${encodeURIComponent('../x')}`, navigation('cross-site')],
+    ['/api/todos/uploads/x', navigation('cross-site')],
+    ['/api/todos', navigation('cross-site')],
+  ];
+  for (const [path, headers, method] of closed) assert.equal((await send(path, headers, method)).status, 403, `${method || 'GET'} ${path} ${JSON.stringify(headers)}`);
 });
 
 test('a controlling computer has no route to the todos', async () => {

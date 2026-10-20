@@ -2966,4 +2966,10 @@ export const english: Record<string, string> = {
   "프리셋은 12개까지 저장할 수 있습니다.": "Up to 12 presets can be saved.",
   "프리셋은 1자 이상, 500자 이하여야 합니다.": "Each preset must be 1 to 500 characters.",
   "같은 프리셋이 두 번 있습니다.": "The same preset appears twice.",
+  "“{0}” 크게 보기": "View “{0}” larger",
+  "화면에 맞추기": "Fit to screen",
+  "원본 크기로 보기": "View at actual size",
+  "새 탭에서 원본 열기": "Open original in a new tab",
+  "이전 이미지": "Previous image",
+  "다음 이미지": "Next image",
 };
