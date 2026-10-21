@@ -114,12 +114,14 @@ test('a card shows only the properties it has, with the next-task count and its 
   assert.match(b, /todo-check p1/);
   assert.match(b, /class="todo-chip date overdue"/);
   assert.match(b, /다음 1/);
-  assert.doesNotMatch(b, /todo-chip deadline|todo-chip label|todo-chip project/);
+  assert.doesNotMatch(b, /todo-chip deadline|todo-chip label|todo-card-project/);
   const a = render('a', true);
   assert.match(a, /오늘/);
   assert.match(a, /@전화/);
   assert.match(a, /title="댓글"[^>]*>.*2/);
-  assert.match(a, /todo-chip project/);
+  // Its project heads the card, left above the title, not among the chips.
+  assert.match(a, /<div class="todo-card-body"><span class="todo-card-context"><span class="todo-card-project"><i style="background:[^"]+"><\/i><span>[^<]+<\/span><\/span><\/span><span class="todo-card-title"/);
+  assert.doesNotMatch(a.slice(a.indexOf('todo-meta')), /todo-card-project/);
   assert.match(render('c'), /하위 작업 1/);
 });
 
@@ -438,17 +440,27 @@ test('the calendar shows completions by default, and leaves out those of archive
   assert.deepEqual(calendarDone(items, world, true).map(entry => entry.task.id), ['a', 'b', 'c', 'd']);
 });
 
-test('a card shows unread dots on its own title and on the sub-task rows with unread comments at or below them', () => {
+test('a card shows unread comments by its border and comment count, and on the sub-task rows with unread comments at or below them, never by a dot', () => {
   const world = worldFromOverview(overview([
     task('p', { content: 'Parent' }), task('a', { parentId: 'p', content: 'Child A' }), task('g', { parentId: 'a', content: 'Grandchild' }),
     task('b', { parentId: 'p', content: 'Child B' }), task('c', { parentId: 'p', content: 'Child C', completedAt: '2026-10-14T01:00:00.000Z' }),
     task('q', { content: 'Other' }),
-  ]));
+  ], { commentCounts: { p: 2 } }));
   const html = (id: string, unread: string[]) => renderToStaticMarkup(createElement(TaskCard, { task: world.tasks[id], context: cardContext(world, '2026-10-14', false, undefined, new Set(unread)), onOpen() {}, onComplete() {}, onCompleteNext() {} }));
-  const dotted = (markup: string) => [...markup.matchAll(/class="unread-dot"[^>]*\/?>(?:<\/i>)?([^<]*)/g)].map(match => match[1]);
-  // The grandchild has no row on the card: its child row carries the dot. A completed row never does.
-  assert.deepEqual(dotted(html('p', ['g', 'c'])), ['Child A']);
-  assert.deepEqual(dotted(html('p', ['p', 'b'])), ['Parent', 'Child B']);
-  assert.deepEqual(dotted(html('q', ['g'])), []);
+  const rows = (markup: string) => [...markup.matchAll(/class="todo-subtask-title unread"[^>]*>([^<]*)/g)].map(match => match[1]);
+  // The grandchild has no row on the card: its child row carries it. A completed row never does.
+  assert.deepEqual(rows(html('p', ['g', 'c'])), ['Child A']);
+  assert.deepEqual(rows(html('p', ['p', 'b'])), ['Child B']);
+  assert.deepEqual(rows(html('q', ['g'])), []);
   assert.match(html('p', ['p']), /class="todo-card +unread"|todo-card[^"]* unread"/);
+  assert.match(html('p', ['p']), /<span class="todo-chip comments unread" title="새 댓글">/);
+  assert.match(html('p', []), /<span class="todo-chip comments" title="댓글">/);
+  assert.doesNotMatch(html('p', ['p', 'a', 'b']), /unread-dot/);
+  // Named so for a screen reader too, the card and its row.
+  assert.match(html('p', ['p', 'b']), /role="button" aria-label="Parent · 새 댓글"/);
+  assert.match(html('p', ['p', 'b']), /class="todo-subtask-title unread" title="새 댓글" aria-label="Child B · 새 댓글"/);
+  assert.match(html('p', []), /role="button" aria-label="Parent"/);
+  // Completed, nothing shows unread.
+  const done = { ...world.tasks.p, completedAt: '2026-10-14T02:00:00.000Z' };
+  assert.doesNotMatch(renderToStaticMarkup(createElement(TaskCard, { task: done, context: cardContext(world, '2026-10-14', false, undefined, new Set(['p'])), onOpen() {}, onComplete() {}, onCompleteNext() {} })), /unread/);
 });
