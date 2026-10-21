@@ -169,7 +169,7 @@ function SubtaskZone() {
   </div>;
 }
 
-/** The Today panel: its own scroll area, all of it a target for cards from the overview; `zone` lies over it. */
+/** The Today panel: its own scroll area, all of it a target for cards from the overview; `zone` stands over its header and above it. */
 export function TodayArea({ panel, over, count, zone, children }: { panel: TodayPanel; over: boolean; count: number; zone: boolean; children: ReactNode }) {
   const { setNodeRef } = useDroppable({ id: TODAY_PANEL, data: { type: 'column', column: panel.target } });
   return <div className="todo-today-wrap">
