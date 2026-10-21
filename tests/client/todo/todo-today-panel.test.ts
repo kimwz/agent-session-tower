@@ -95,12 +95,6 @@ test('a card let go in the panel lands there (or on its sub-task zone), never on
   assert.deepEqual(at(150, 100), ['column:today/date:today'], "a panel column wins over the panel");
   assert.deepEqual(at(150, 20), [TODAY_SUBTASK], 'the sub-task zone, likewise');
   assert.deepEqual(at(400, 100), ['column:tower/section:none'], 'the overview as before');
-  // A column's done cards sit in its section (sorted by its header) but outside its cards: let go there, nothing moves.
-  const sections = new Map([...droppableRects, ['section:doing', rect(640, 0, 280, 600)], ['column:tower/section:doing', rect(640, 40, 280, 200)], ['done:tower/section:doing', rect(640, 260, 280, 200)]]);
-  const containers = [...sections.keys()].map(id => ({ id, rect: { current: sections.get(id) }, data: { current: {} }, disabled: false, node: { current: null } })) as never[];
-  const over = (x: number, y: number, pointer = true) => collisionsFor(true)({ active: { id: 'task:later' } as never, collisionRect: rect(x, y, 10, 10), droppableRects: sections as never, droppableContainers: containers, pointerCoordinates: pointer ? { x, y } : null }).map(item => item.id);
-  assert.deepEqual(over(700, 300), ['done:tower/section:doing']);
-  assert.ok(!over(700, 300, false).some(id => String(id).startsWith('done:')), 'never the nearest for the keyboard');
 });
 
 test('the arrow keys go from the card chosen, when a task has one in Today and one on the overview', () => {
@@ -328,7 +322,7 @@ test('what was done today stays on the overview and in Today beside it, struck t
   const html = board(seen, panel, foldGroups(groups, new Set()));
   const doing = html.slice(html.indexOf('data-column="tower/section:doing"'));
   assert.match(doing, /data-task="open"[\s\S]*todo-add-card[^<]*<svg[\s\S]*?<\/button><\/div><div class="todo-done-cards"><div class="todo-card\s+done[^"]*" data-task="report"/,
-    'open card, add button, then the done one, outside the drop area');
+    'open card, add button, then the done one, outside the cards’ drop area');
   assert.match(doing, /aria-label="“report” 완료 취소" aria-pressed="true"/, 'its check reopens it');
   assert.doesNotMatch(doing.slice(0, doing.indexOf('</section>')), /todo-sortable[^>]*>\s*<div class="todo-card\s+done/, 'never picked up');
 

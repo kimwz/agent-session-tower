@@ -69,7 +69,6 @@ export interface BoardProps {
 /** A card's drag id; the Today panel's (`area`) differ, as a task can show there and on the overview at once. */
 const cardId = (id: string, area?: string) => area ? `task:${area}:${id}` : `task:${id}`;
 const columnDrop = (id: string) => `column:${id}`;
-const doneDrop = (id: string) => `done:${id}`;
 const sectionDrag = (id: string) => `section:${id}`;
 
 /**
@@ -87,13 +86,10 @@ export const collisionsFor = (overview: boolean): CollisionDetection => args => 
   const within = pointerWithin(args).filter(item => !panel || !pointer || ofPanel(String(item.id)) === inPanel);
   const card = within.find(item => String(item.id).startsWith('task:'));
   if (card) return [card];
-  // A column's done cards take what is let go on them, to keep it where it was; never the nearest for the keyboard.
-  const done = within.find(item => String(item.id).startsWith('done:'));
-  if (done) return [done];
   const inner = within.filter(item => item.id !== TODAY_PANEL);
   if (inner.length) return inner;
   if (within.length) return within;
-  return overview && args.pointerCoordinates ? [] : closestCorners({ ...args, droppableContainers: args.droppableContainers.filter(item => !String(item.id).startsWith('done:')) });
+  return overview && args.pointerCoordinates ? [] : closestCorners(args);
 };
 const collisions = collisionsFor(false), overviewCollisions = collisionsFor(true);
 
@@ -119,17 +115,15 @@ function SortableCard({ task, column, dndId, ...props }: { task: TodoTask; colum
   </div>;
 }
 
-/** Cards done today: shown and opened, never picked up, chosen by the keyboard, or given files. */
+/**
+ * Cards done today: shown and opened, never picked up, chosen by the keyboard, or given files. A column's sit under its
+ * cards and add button, outside the cards' drop area: let go there, a card goes where it would on the column's header.
+ */
 function DoneCards({ cards, board, context }: { cards: readonly DoneCard[]; board: BoardProps; context: CardContext }) {
   return <>{cards.map(card => <TaskCard key={card.completionId} task={card.task} context={context} {...board.card} onSelect={undefined} onMenu={undefined} onFiles={undefined}
     readOnly={board.card.readOnly || board.taskLocked?.(card.task)} onReopen={board.onReopen && (() => board.onReopen!(card))} />)}</>;
 }
 
-/** A column's done cards: what is let go on them stays where it was (`collisionsFor`), never going first in the column. */
-function DoneArea({ column, board }: { column: BoardColumn; board: BoardProps }) {
-  const { setNodeRef } = useDroppable({ id: doneDrop(column.id), data: { type: 'done' } });
-  return <div ref={setNodeRef} className="todo-done-cards"><DoneCards cards={column.done!} board={board} context={board.context} /></div>;
-}
 
 function Column({ column, board, active, over, children }: { column: BoardColumn; board: BoardProps; active: boolean; over: boolean; children: ReactNode }) {
   const { setNodeRef } = useDroppable({ id: columnDrop(column.id), data: { type: 'column', column } });
@@ -151,7 +145,7 @@ function Column({ column, board, active, over, children }: { column: BoardColumn
         : board.onFold && !inTodayPanel(column) && column.tasks.length > OVERVIEW_SHOWN && <button type="button" className="todo-fold-cards" onClick={() => board.onFold?.(column.id)}>{t('접기')}</button>}
       {column.drop && <button type="button" className="todo-add-card" onClick={() => board.onAdd(column)}><Plus size={14} />{t('작업 추가')}</button>}
     </div>
-    {!!column.done?.length && <DoneArea column={column} board={board} />}
+    {!!column.done?.length && <div className="todo-done-cards"><DoneCards cards={column.done} board={board} context={board.context} /></div>}
   </section>;
 }
 
