@@ -72,7 +72,8 @@ const columnDrop = (id: string) => `column:${id}`;
 const sectionDrag = (id: string) => `section:${id}`;
 
 /**
- * A press on a card's empty area first lands on the column under it; the card wins when the pointer is on it, and a
+ * The Today panel's sub-task zone, while it shows, takes what is let go on it. Otherwise a press on a card's empty area
+ * first lands on the column under it; the card wins when the pointer is on it, and a
  * column of the Today panel wins over the panel around it, which takes what is let go anywhere else in it. Off every column the nearest one takes it, but on the
  * overview, where the nearest can be another project's, nothing does (a keyboard drag, without a pointer, still goes to
  * the nearest).
@@ -82,8 +83,12 @@ export const collisionsFor = (overview: boolean): CollisionDetection => args => 
   // where it would be, under the Today panel.
   const panel = args.droppableRects.get(TODAY_PANEL), pointer = args.pointerCoordinates;
   const inPanel = !!panel && !!pointer && pointer.x >= panel.left && pointer.x <= panel.right && pointer.y >= panel.top && pointer.y <= panel.bottom;
-  const ofPanel = (id: string) => id === TODAY_PANEL || id === TODAY_SUBTASK || id.startsWith('task:today:') || id.startsWith('column:today/');
-  const within = pointerWithin(args).filter(item => !panel || !pointer || ofPanel(String(item.id)) === inPanel);
+  const ofPanel = (id: string) => id === TODAY_PANEL || id.startsWith('task:today:') || id.startsWith('column:today/');
+  const under = pointerWithin(args);
+  // The zone stands over the panel's header and above it, partly outside the panel.
+  const zone = under.find(item => item.id === TODAY_SUBTASK);
+  if (zone) return [zone];
+  const within = under.filter(item => !panel || !pointer || ofPanel(String(item.id)) === inPanel);
   const card = within.find(item => String(item.id).startsWith('task:'));
   if (card) return [card];
   const inner = within.filter(item => item.id !== TODAY_PANEL);
@@ -167,27 +172,34 @@ function AddSection({ onAdd }: { onAdd: (name: string) => void }) {
   </div>;
 }
 
-/** The Today panel's sub-task zone: shown at all times, marked while a card is dragged, lit with one over it. */
-function SubtaskZone({ active }: { active: boolean }) {
+/**
+ * The Today panel's sub-task zone, shown only while a card is dragged: laid over the panel's header and the page's title
+ * above it (neither takes a card), outside the panel's scroll area, so appearing moves and covers no card at the panel's
+ * top and it stays in sight however far the panel is scrolled. Lit with a card over it.
+ */
+function SubtaskZone() {
   const { setNodeRef, isOver } = useDroppable({ id: TODAY_SUBTASK, data: { type: 'subtask' } });
-  return <div ref={setNodeRef} className={`todo-subtask-zone ${active ? 'active' : ''} ${active && isOver ? 'drop-target' : ''}`}>
-    <ListPlus size={14} /><b>{t('하위 작업 만들기')}</b><span>{t('놓으면 오늘 할 일로')}</span>
+  return <div ref={setNodeRef} className={`todo-subtask-zone ${isOver ? 'drop-target' : ''}`}>
+    <ListPlus size={22} /><b>{t('하위 작업 만들기')}</b><span>{t('놓으면 오늘 할 일로')}</span>
   </div>;
 }
 
 /**
- * The Today panel: its own scroll area, all of it a target for cards from the overview. Under its header (and sub-task
- * zone), with nothing left to do, it says so first, then offers to add a task (its own button when no column takes one), above what was done.
+ * The Today panel: its own scroll area, all of it a target for cards from the overview; `zone` stands over its header and
+ * above it. Under its `header`, with nothing left to do, it says so first; then its columns (`children`), and `after` them
+ * an add button when no column takes one, and what was done.
  */
-function TodayArea({ panel, board, over, count, header, children }: { panel: TodayPanel & { context: CardContext }; board: BoardProps; over: boolean; count: number; header: ReactNode; children: ReactNode }) {
+export function TodayArea({ panel, over, count, zone, header, after, children }: { panel: TodayPanel; over: boolean; count: number; zone: boolean; header?: ReactNode; after?: ReactNode; children: ReactNode }) {
   const { setNodeRef } = useDroppable({ id: TODAY_PANEL, data: { type: 'column', column: panel.target } });
-  return <section ref={setNodeRef} className={`todo-board todo-today-panel ${over ? 'drop-target' : ''} ${count === 0 ? 'empty' : ''}`} aria-label={t('오늘')}>
-    {header}
-    {count === 0 && <p className="todo-muted todo-today-empty">{t('오늘 할 일을 모두 끝냈습니다.')}</p>}
-    {children}
-    {count === 0 && !panel.columns.some(column => column.drop) && <button type="button" className="todo-add-card" onClick={() => board.onAdd(panel.target)}><Plus size={14} />{t('작업 추가')}</button>}
-    {panel.done.length > 0 && <div className="todo-done-cards"><DoneCards cards={panel.done} board={board} context={panel.context} /></div>}
-  </section>;
+  return <div className="todo-today-wrap">
+    <section ref={setNodeRef} className={`todo-board todo-today-panel ${over ? 'drop-target' : ''} ${count === 0 ? 'empty' : ''}`} aria-label={t('오늘')}>
+      {header}
+      {count === 0 && <p className="todo-muted todo-today-empty">{t('오늘 할 일을 모두 끝냈습니다.')}</p>}
+      {children}
+      {after}
+    </section>
+    {zone && <SubtaskZone />}
+  </div>;
 }
 
 export function BoardView(board: BoardProps) {
@@ -302,9 +314,12 @@ export function BoardView(board: BoardProps) {
     </div>}
     {/* Today and the overview side by side, each scrolling on its own. */}
     {groups ? board.today ? <div className="todo-board-split">
-      <TodayArea panel={board.today} board={board} over={overToday} count={todayCount}
-        header={<><header className="todo-today-head"><h3>{t('오늘')}</h3><span className="todo-column-note">{board.today.note}</span><span className="todo-column-count">{todayCount || ''}</span></header>
-          {board.onSubtask && <SubtaskZone active={!!activeTask} />}</>}>
+      <TodayArea panel={board.today} over={overToday} count={todayCount} zone={!!activeTask && !!board.onSubtask}
+        header={<header className="todo-today-head"><h3>{t('오늘')}</h3><span className="todo-column-note">{board.today.note}</span><span className="todo-column-count">{todayCount || ''}</span></header>}
+        after={<>
+          {todayCount === 0 && !board.today.columns.some(column => column.drop) && <button type="button" className="todo-add-card" onClick={() => board.onAdd(board.today!.target)}><Plus size={14} />{t('작업 추가')}</button>}
+          {board.today.done.length > 0 && <div className="todo-done-cards"><DoneCards cards={board.today.done} board={board} context={board.today.context} /></div>}
+        </>}>
         {board.today.columns.map(column => renderColumn(column, 'today'))}
       </TodayArea>
       {overviewBoard}

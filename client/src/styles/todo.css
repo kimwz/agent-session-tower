@@ -102,19 +102,21 @@
 /* Today beside the overview: two areas side by side, each scrolling on its own, one drag area (BoardView `today`). */
 .todo-board-split { display:flex; flex:1; min-height:0; }
 .todo-board-split > .todo-board.todo-overview { padding-left:16px; }
-.todo-board.todo-today-panel { flex:0 0 324px; flex-direction:column; align-items:stretch; gap:6px; padding:4px 14px 32px 32px; overflow-x:hidden; overflow-y:auto; border-right:1px solid var(--todo-group-line); transition:background .15s; }
+/* The panel and what lies over it (the sub-task zone while a card is dragged); the panel scrolls, the wrap does not. */
+.todo-today-wrap { position:relative; display:flex; flex:0 0 324px; min-width:0; min-height:0; }
+.todo-board.todo-today-panel { flex:1 1 auto; min-width:0; flex-direction:column; align-items:stretch; gap:6px; padding:4px 14px 32px 32px; overflow-x:hidden; overflow-y:auto; border-right:1px solid var(--todo-group-line); transition:background .15s; }
 .todo-board.todo-today-panel.drop-target { background:#15253a55; box-shadow:inset 0 0 0 1px #3e5f8a; }
 .todo-today-head { display:flex; align-items:center; gap:8px; min-height:30px; padding:0 4px; }
 .todo-today-head h3 { color:#a9c3ee; font-size:14px; font-weight:650; }
 .todo-today-panel .todo-column { flex:none; width:auto; max-height:none; }
 .todo-today-panel .todo-column-cards { overflow-y:visible; }
 .todo-today-empty { padding:8px 4px; font-size:12px; }
-/* The panel's sub-task zone (BoardView `SubtaskZone`): always there, marked while a card is dragged, lit with one over it. */
-.todo-subtask-zone { display:flex; flex:none; align-items:center; gap:8px; min-height:34px; padding:0 10px; border:1px dashed #33465f; border-radius:8px; color:#7d8ca2; font-size:12px; transition:background .15s, border-color .15s, color .15s; }
-.todo-subtask-zone svg { flex:none; }
-.todo-subtask-zone b { flex:none; color:#a9c3ee; font-weight:600; white-space:nowrap; }
-.todo-subtask-zone span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#6d7c92; }
-.todo-subtask-zone.active { border-color:#4a6d9c; background:#111c2a; }
+/* The panel's sub-task zone (BoardView `SubtaskZone`): only while a card is dragged, its bottom on the panel header's
+   (4px padding + 30px header), rising over the page's title; lit with a card over it. */
+.todo-subtask-zone { position:absolute; z-index:3; top:-68px; left:32px; right:14px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; height:102px; border:1.5px dashed #4a6d9c; border-radius:10px; background:#111c2a; box-shadow:0 8px 24px #0008; color:#7d8ca2; font-size:12px; transition:background .15s, border-color .15s, color .15s; }
+.todo-subtask-zone svg { flex:none; color:#a9c3ee; }
+.todo-subtask-zone b { color:#a9c3ee; font-size:14px; font-weight:650; white-space:nowrap; }
+.todo-subtask-zone span { white-space:nowrap; color:#7d8ca2; }
 .todo-subtask-zone.drop-target { border-style:solid; border-color:#6d97d4; background:#1d3250; color:#cfe0fa; }
 /* Nothing left today: the add button shows without a hover, above what was done. */
 .todo-today-panel.empty .todo-add-card { opacity:1; }
