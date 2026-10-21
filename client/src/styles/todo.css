@@ -108,8 +108,9 @@
 .todo-today-panel .todo-column { flex:none; width:auto; max-height:none; }
 .todo-today-panel .todo-column-cards { overflow-y:visible; }
 .todo-today-empty { padding:8px 4px; font-size:12px; }
-/* The panel's sub-task zone (BoardView `SubtaskZone`): only while a card is dragged, over the panel's top (the wrap's), lit with one over it. */
-.todo-subtask-zone { position:absolute; z-index:3; top:4px; left:32px; right:14px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; height:102px; border:1.5px dashed #4a6d9c; border-radius:10px; background:#111c2a; box-shadow:0 8px 24px #0008; color:#7d8ca2; font-size:12px; transition:background .15s, border-color .15s, color .15s; }
+/* The panel's sub-task zone (BoardView `SubtaskZone`): only while a card is dragged, its bottom on the panel header's
+   (4px padding + 30px header), rising over the page's title; lit with a card over it. */
+.todo-subtask-zone { position:absolute; z-index:3; top:-68px; left:32px; right:14px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; height:102px; border:1.5px dashed #4a6d9c; border-radius:10px; background:#111c2a; box-shadow:0 8px 24px #0008; color:#7d8ca2; font-size:12px; transition:background .15s, border-color .15s, color .15s; }
 .todo-subtask-zone svg { flex:none; color:#a9c3ee; }
 .todo-subtask-zone b { color:#a9c3ee; font-size:14px; font-weight:650; white-space:nowrap; }
 .todo-subtask-zone span { white-space:nowrap; color:#7d8ca2; }

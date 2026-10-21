@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement, type ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { BoardView, collisionsFor } from '../../../client/src/todo/BoardView.js';
+import { BoardView, collisionsFor, TodayArea } from '../../../client/src/todo/BoardView.js';
+import { DndContext } from '@dnd-kit/core';
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
 import type { TodoTask } from '../../../shared/todo/types.js';
@@ -83,10 +84,10 @@ test('a card let go in the panel lands there (or on its sub-task zone), never on
   const rect = (left: number, top: number, width: number, height: number) => ({ left, top, width, height, right: left + width, bottom: top + height });
   const droppableRects = new Map<string, ReturnType<typeof rect>>([
     [TODAY_PANEL, rect(0, 0, 320, 800)],
-    // While a card is dragged, the zone lies over the panel's top: over its first column and card.
-    [TODAY_SUBTASK, rect(30, 4, 280, 102)],
+    // While a card is dragged, the zone stands over the panel's header and above the panel, short of its first card.
+    [TODAY_SUBTASK, rect(30, -68, 280, 102)],
     ['column:today/date:today', rect(30, 40, 280, 200)],
-    ['task:today:now', rect(30, 60, 280, 46)],
+    ['task:today:now', rect(30, 44, 280, 46)],
     ['column:tower/section:none', rect(340, 40, 280, 200)],
     // An overview card scrolled out of sight sideways: it still measures under the panel.
     ['task:later', rect(100, 300, 280, 60)],
@@ -95,8 +96,9 @@ test('a card let go in the panel lands there (or on its sub-task zone), never on
   const at = (x: number, y: number) => collisionsFor(true)({ active: { id: 'task:later' } as never, collisionRect: rect(x, y, 10, 10), droppableRects: droppableRects as never, droppableContainers, pointerCoordinates: { x, y } }).map(item => item.id);
   assert.deepEqual(at(150, 320), [TODAY_PANEL], "the panel's empty space, over the hidden card");
   assert.deepEqual(at(150, 150), ['column:today/date:today'], "a panel column wins over the panel");
+  assert.deepEqual(at(150, 60), ['task:today:now'], "the panel's first card stays a target");
   assert.deepEqual(at(150, 20), [TODAY_SUBTASK], 'the sub-task zone');
-  assert.deepEqual(at(150, 80), [TODAY_SUBTASK], 'the zone wins over the card and column it covers');
+  assert.deepEqual(at(150, -40), [TODAY_SUBTASK], 'above the panel too');
   assert.deepEqual(at(400, 100), ['column:tower/section:none'], 'the overview as before');
 });
 
@@ -221,4 +223,11 @@ test("a mouse's right-click on a card opens its menu at the pointer; a touch, a 
   assert.equal(press(false, { on: 'a' }), false, 'a link keeps its own menu');
   assert.equal(press(true), false, 'read-only');
   assert.equal(menus.length, 1);
+});
+
+test('the zone, when it shows, stands beside the scrolling panel in its wrap, not inside it', () => {
+  const panel = todayPanel(defaultDisplay({ kind: 'today' }), context);
+  const html = (zone: boolean) => renderToStaticMarkup(createElement(DndContext, null, createElement(TodayArea, { panel, over: false, count: 1, zone, children: null })));
+  assert.match(html(true), /^<div class="todo-today-wrap"><section[^>]*class="todo-board todo-today-panel[^"]*"[^>]*>[\s\S]*<\/section><div class="todo-subtask-zone ?"><svg[\s\S]*<b>하위 작업 만들기<\/b><span>놓으면 오늘 할 일로<\/span><\/div><\/div>$/);
+  assert.doesNotMatch(html(false), /todo-subtask-zone/);
 });
