@@ -123,3 +123,30 @@ test('the overview shows Today beside it in an area of its own, its cards apart 
   assert.match(html, /data-column="today\/date:today"[\s\S]*data-task="now"[\s\S]*class="todo-board todo-overview/);
   assert.doesNotMatch(renderToStaticMarkup(createElement(BoardView, props)), /todo-today-panel|todo-board-split/, 'off: the overview alone, as before');
 });
+
+test('the panel names Today once: its lone Today column shows no header of its own, beside overdue both keep theirs', () => {
+  const display = defaultDisplay({ kind: 'today' });
+  const calm = worldFromOverview(overview([task('now', { dueDate: today, content: 'Write the report' }), task('more', { dueDate: today })],
+    { projects: [project('inbox', { inbox: true, name: 'Inbox' })] }));
+  const alone = todayPanel(display, { ...context, world: calm });
+  assert.deepEqual(alone.columns.map(column => [column.id, !!column.headless]), [['today/date:today', true]]);
+  assert.deepEqual(todayPanel(display, context).columns.map(column => [column.id, !!column.headless]), [['today/date:overdue', false], ['today/date:today', false]]);
+  assert.ok(todayPanel({ ...display, group: 'priority' }, { ...context, world: calm }).columns.every(column => !column.headless), 'other groupings keep their headers');
+  assert.ok(todayPanel({ ...display, group: 'project' }, { ...context, world: calm }).columns.every(column => !column.headless));
+
+  const board = (world: typeof calm, panel: ReturnType<typeof todayPanel>) => {
+    const groups = foldGroups(overviewGroups(defaultDisplay({ kind: 'all' }), { ...context, world }), new Set());
+    return renderToStaticMarkup(createElement(BoardView, {
+      columns: groups.flatMap(group => group.columns), groups, context: cardContext(world, today, false), manual: true, sections: true, mobile: false, selectedId: null,
+      card: { onOpen() {}, onComplete() {}, onCompleteNext() {} }, onAdd() {}, onDrop() {}, onSectionMove() {}, onAddSection() {}, onSectionMenu() {},
+      today: { ...panel, context: cardContext(world, today, true), manual: true, note: 'Oct 17' },
+    }));
+  };
+  const panelOf = (html: string) => html.slice(html.indexOf('todo-today-panel'), html.indexOf('todo-overview'));
+  const once = panelOf(board(calm, alone));
+  assert.equal(once.match(/<h3>오늘<\/h3>/g)?.length, 1, 'the panel header only');
+  // The column stays: named for screen readers, its cards and its add button there.
+  assert.match(once, /<section[^>]*data-column="today\/date:today" aria-label="오늘"><div class="todo-column-cards">[\s\S]*data-task="now"[\s\S]*todo-add-card/);
+  const both = panelOf(board(world, todayPanel(display, context)));
+  assert.match(both, /<h3>오늘<\/h3>[\s\S]*<h3>기한 지남<\/h3>[\s\S]*<h3>오늘<\/h3>/, 'the panel header, then overdue and Today told apart');
+});
