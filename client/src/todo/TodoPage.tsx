@@ -220,7 +220,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   // The overview: every project with its sections, each column showing its first cards until opened.
   // This page's completions, and today's once they have come.
   const doneList = overviewDone && state.completed?.projectId === '' && !state.completed.labelId && state.completed.range?.since === overviewDone.since && state.completed.range.until === overviewDone.until ? state.completed.items : null;
-  const done = useMemo(() => overviewDone ? doneToday([...state.completing, ...(doneList ?? [])], world, overviewDone) : [], [overviewDone, state.completing, doneList, world]);
+  const done = useMemo(() => overviewDone ? doneToday({ mine: state.completing, read: doneList ?? [], undoing: state.undoing }, world, overviewDone) : [], [overviewDone, state.completing, state.undoing, doneList, world]);
   const groups = useMemo(() => view.kind !== 'all' ? null : overviewGroups(display, { world, today, start: today, query: '', searchResults: null }, done), [view.kind, display, world, today, done]);
   const overview = useMemo(() => groups && foldGroups(groups, expanded), [groups, expanded]);
   // The overview's board offers Today beside it where there is room for both (not on a phone).

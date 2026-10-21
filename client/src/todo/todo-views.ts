@@ -100,23 +100,26 @@ export function calendarDone<T extends { task: TodoTask }>(items: readonly T[], 
  * A task done today, as the overview and Today beside it keep showing it under the open ones: `task` with the time it
  * was done, the completion that did it, and the date that was done.
  */
-export interface DoneCard { key: string; task: TodoTask; completionId: string; date: string | null }
+export interface DoneCard { task: TodoTask; completionId: string; date: string | null }
+
+type DoneItem = { completion: TodoCompletion; task: TodoTask };
 
 /**
- * What was done in `range` (today), newest first, each task once by its latest completion: `items` are this page's own
- * completions (`TodoState.completing`) and the list read for the range. A completion that came with its parent's shows as
- * the parent; one whose task is deleted or open again (here, or elsewhere and read since) does not, but a repeating
- * task stays open and its completion shows for the date that was done; nothing of an archived project or section does.
- * Where a task is placed comes from the item, which the server answers fresh: the page keeps completed tasks as last seen.
+ * What was done in `range` (today), newest first, each task once by its latest completion: this page's own completions
+ * (`mine`, `TodoState.completing`) before the list read for the range (`read`), none being taken back (`undoing`). A
+ * completion that came with its parent's shows as the parent; one whose task is deleted or open again (here, or elsewhere
+ * and read since) does not, but a repeating task stays open and its completion shows for the date that was done; nothing
+ * of an archived project or section does. Where a task is placed comes from the item, which the server answers fresh:
+ * the page keeps completed tasks as last seen.
  */
-export function doneToday(items: readonly { completion: TodoCompletion; task: TodoTask }[], world: TodoWorld, range: { since: string; until: string }): DoneCard[] {
-  const live = liveProjects(world), shelved = archivedSectionIds(world);
+export function doneToday(lists: { mine: readonly DoneItem[]; read: readonly DoneItem[]; undoing: readonly string[] }, world: TodoWorld, range: { since: string; until: string }): DoneCard[] {
+  const live = liveProjects(world), shelved = archivedSectionIds(world), undoing = new Set(lists.undoing);
   const cards = new Map<string, DoneCard>();
-  for (const { completion, task } of items) {
+  for (const { completion, task } of [...lists.mine, ...lists.read]) {
     const known = world.tasks[task.id];
-    if (completion.causeId || cards.has(task.id) || completion.completedAt < range.since || completion.completedAt >= range.until) continue;
+    if (completion.causeId || undoing.has(completion.id) || cards.has(task.id) || completion.completedAt < range.since || completion.completedAt >= range.until) continue;
     if (task.deletedAt || known?.deletedAt || (isOpen(known) && !known!.recurrence) || !live.has(task.projectId) || (task.sectionId && shelved.has(task.sectionId))) continue;
-    cards.set(task.id, { key: completion.id, task: { ...task, completedAt: completion.completedAt }, completionId: completion.id, date: completion.occurrenceDate ?? task.dueDate });
+    cards.set(task.id, { task: { ...task, completedAt: completion.completedAt }, completionId: completion.id, date: completion.occurrenceDate ?? task.dueDate });
   }
   return [...cards.values()].sort((a, b) => compare(b.task.completedAt!, a.task.completedAt!));
 }

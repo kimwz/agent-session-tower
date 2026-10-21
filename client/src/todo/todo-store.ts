@@ -89,9 +89,11 @@ export interface TodoState {
   completed: CompletedList | null;
   /**
    * The completions this page made, newest first, that a completed list may not have yet: each stays from the moment it
-   * shows until a list read after the server took it has come (listing it or not), or until it is taken back or refused.
+   * shows until a list read after the server took it has come (listing it or not), or until it is refused or taken back.
    */
   completing: TodoCompletedPage['items'];
+  /** The completions this page is taking back, not yet answered: they show as taken back, and again if refused. */
+  undoing: string[];
   toasts: TodoToast[];
   canUndo: boolean;
 }
@@ -123,7 +125,7 @@ export class TodoClient {
   private toastId = 0;
   private toastTimers = new Set<ReturnType<typeof setTimeout>>();
   private listeners = new Set<() => void>();
-  private state: TodoState = { phase: 'loading', error: '', world: emptyWorld(), detailId: null, detailError: '', completed: null, completing: [], toasts: [], canUndo: false };
+  private state: TodoState = { phase: 'loading', error: '', world: emptyWorld(), detailId: null, detailError: '', completed: null, completing: [], undoing: [], toasts: [], canUndo: false };
 
   constructor(private readonly transport: TodoTransport, private readonly options: { now?: () => Date; batchMs?: number; toastMs?: number } = {}) {}
 
@@ -142,7 +144,8 @@ export class TodoClient {
     let world = this.base;
     for (const action of [...(this.inflight ?? []), ...this.queue]) world = applyOps(world, action.ops, context);
     this.completing = this.completing.filter(entry => !entry.action.refused);
-    this.set({ ...patch, world, completing: this.completing.map(entry => entry.item), canUndo: !!this.lastUndo });
+    const undoing = [...(this.inflight ?? []), ...this.queue].flatMap(action => action.ops.flatMap(op => op.op === 'task.uncomplete' ? [op.completionId] : []));
+    this.set({ ...patch, world, completing: this.completing.map(entry => entry.item), undoing, canUndo: !!this.lastUndo });
   }
 
   start() { this.wantRead = true; this.pump(); }
@@ -266,7 +269,6 @@ export class TodoClient {
     const action: Action = { ops, undo, settled: options.settled };
     this.queue.push(action);
     this.lastUndo = undo ? { ops: undo, action } : options.undoable === false ? this.lastUndo : null;
-    for (const op of ops) if (op.op === 'task.uncomplete') this.completing = this.completing.filter(entry => entry.item.completion.id !== op.completionId);
     this.publish();
     const completedAt = this.now().toISOString();
     const made = ops.flatMap(op => op.op === 'task.complete' && this.state.world.tasks[op.id]
@@ -342,7 +344,9 @@ export class TodoClient {
       const changes = await this.transport.apply(request);
       this.inflight = null;
       // Read again with the list shown (`accept`), or by the next list asked for; with none shown, no list needs them.
-      this.completing = this.completing.filter(entry => !batch.includes(entry.action) || !!this.state.completed);
+      // One taken back is gone for good.
+      const undone = new Set(request.ops.flatMap(op => op.op === 'task.uncomplete' ? [op.completionId] : []));
+      this.completing = this.completing.filter(entry => !undone.has(entry.item.completion.id) && (!batch.includes(entry.action) || !!this.state.completed));
       for (const entry of this.completing) if (batch.includes(entry.action)) entry.answered = this.completedRead;
       this.accept(changes, request.ops);
       for (const action of batch) action.settled?.(true);

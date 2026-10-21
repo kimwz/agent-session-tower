@@ -95,6 +95,12 @@ test('a card let go in the panel lands there (or on its sub-task zone), never on
   assert.deepEqual(at(150, 100), ['column:today/date:today'], "a panel column wins over the panel");
   assert.deepEqual(at(150, 20), [TODAY_SUBTASK], 'the sub-task zone, likewise');
   assert.deepEqual(at(400, 100), ['column:tower/section:none'], 'the overview as before');
+  // A column's done cards sit in its section (sorted by its header) but outside its cards: let go there, nothing moves.
+  const sections = new Map([...droppableRects, ['section:doing', rect(640, 0, 280, 600)], ['column:tower/section:doing', rect(640, 40, 280, 200)], ['done:tower/section:doing', rect(640, 260, 280, 200)]]);
+  const containers = [...sections.keys()].map(id => ({ id, rect: { current: sections.get(id) }, data: { current: {} }, disabled: false, node: { current: null } })) as never[];
+  const over = (x: number, y: number, pointer = true) => collisionsFor(true)({ active: { id: 'task:later' } as never, collisionRect: rect(x, y, 10, 10), droppableRects: sections as never, droppableContainers: containers, pointerCoordinates: pointer ? { x, y } : null }).map(item => item.id);
+  assert.deepEqual(over(700, 300), ['done:tower/section:doing']);
+  assert.ok(!over(700, 300, false).some(id => String(id).startsWith('done:')), 'never the nearest for the keyboard');
 });
 
 test('the arrow keys go from the card chosen, when a task has one in Today and one on the overview', () => {
@@ -219,6 +225,19 @@ test("a mouse's right-click on a card opens its menu at the pointer; a touch, a 
   assert.equal(menus.length, 1);
 });
 
+test('a card nothing chooses (done today) takes neither the choice nor the keyboard when the mouse moves over it', () => {
+  const focused: string[] = [], chosen: string[] = [];
+  const move = (onSelect?: (id: string) => void) => (rendered(TaskCard, { task: world.tasks.now, context: cardContext(world, today, true), onOpen() {}, onComplete() {}, onCompleteNext() {}, onSelect })
+    .props as { onPointerMove: (event: unknown) => void }).onPointerMove({ pointerType: 'mouse', currentTarget: { focus: () => focused.push('now'), contains: () => false } });
+  move();
+  assert.deepEqual([focused, chosen], [[], []]);
+  const globals = globalThis as { document?: unknown; HTMLElement?: unknown };
+  globals.document = { activeElement: null };
+  globals.HTMLElement = class {};
+  try { move(id => chosen.push(id)); } finally { delete globals.document; delete globals.HTMLElement; }
+  assert.deepEqual(chosen, ['now'], 'any other card, as before');
+});
+
 test('what was done today stays on the overview and in Today beside it, struck through under the open cards and the add button', () => {
   const range = { since: '2026-10-17T00:00:00.000Z', until: '2026-10-18T00:00:00.000Z' };
   const done = (at: string) => ({ completedAt: at });
@@ -253,8 +272,7 @@ test('what was done today stays on the overview and in Today beside it, struck t
     { completion: completion('c-again-2', 'again', '2026-10-17T09:45:00.000Z'), task: seen.tasks.again },
     { completion: completion('c-boss', 'boss', '2026-10-17T09:30:00.000Z'), task: seen.tasks.boss },
   ];
-  const items = [
-    ...mine,
+  const read = [
     { completion: completion('c-report', 'report', '2026-10-17T09:00:00.000Z'), task: tasks.report },
     { completion: completion('c-child', 'child', '2026-10-17T09:00:00.000Z', { causeId: 'c-report' }), task: tasks.child },
     { completion: completion('c-helper', 'helper', '2026-10-17T09:10:00.000Z'), task: seen.tasks.helper },
@@ -270,17 +288,20 @@ test('what was done today stays on the overview and in Today beside it, struck t
     { completion: completion('c-old', 'old', '2026-10-16T23:59:59.000Z'), task: task('old', { projectId: 'inbox', ...done('2026-10-16T23:59:59.000Z') }) },
     { completion: completion('c-next', 'next', range.until), task: task('next', { projectId: 'inbox', ...done(range.until) }) },
   ];
-  const cards = doneToday(items, seen, range);
-  assert.deepEqual(cards.map(card => [card.key, card.task.id, card.completionId, card.date, !!card.task.completedAt]), [
-    ['c-fresh', 'fresh', 'c-fresh', '2026-10-16', true],
-    ['c-again-2', 'again', 'c-again-2', null, true],
-    ['c-boss', 'boss', 'c-boss', null, true],
-    ['c-helper', 'helper', 'c-helper', today, true],
-    ['c-report', 'report', 'c-report', today, true],
-    ['c-moved', 'moved', 'c-moved', null, true],
-    ['c-loose', 'loose', 'c-loose', null, true],
-    ['c-daily', 'daily', 'c-daily', today, true],
-  ], 'newest first, each task once by its latest completion; nothing the page only remembers (ghost, minion)');
+  const cards = doneToday({ mine, read, undoing: [] }, seen, range);
+  assert.deepEqual(cards.map(card => [card.task.id, card.completionId, card.date, !!card.task.completedAt]), [
+    ['fresh', 'c-fresh', '2026-10-16', true],
+    ['again', 'c-again-2', null, true],
+    ['boss', 'c-boss', null, true],
+    ['helper', 'c-helper', today, true],
+    ['report', 'c-report', today, true],
+    ['moved', 'c-moved', null, true],
+    ['loose', 'c-loose', null, true],
+    ['daily', 'c-daily', today, true],
+  ], 'newest first, each task once by its latest completion, this page’s first; nothing the page only remembers (ghost, minion)');
+  // Being taken back: gone at once, this page's and the list's alike (a repeating task's too, which stays open anyway).
+  assert.deepEqual(doneToday({ mine, read, undoing: ['c-boss', 'c-report', 'c-daily'] }, seen, range).map(card => card.completionId),
+    ['c-fresh', 'c-again-2', 'c-helper', 'c-moved', 'c-loose']);
 
   const at = { ...context, world: seen };
   const groups = overviewGroups(defaultDisplay({ kind: 'all' }), at, cards);
