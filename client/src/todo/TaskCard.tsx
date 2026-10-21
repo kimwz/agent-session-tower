@@ -20,8 +20,15 @@ import { subtaskWindow, type CardContext } from './todo-views';
 
 /**
  * A task on the board: a check circle in its priority's color, its title, and one line of what it has. The line is a
- * list of chips, each shown only when the task has that value, so a new property is one entry in `CARD_META`.
+ * list of chips, each shown only when the task has that value, so a new property is one entry in `CARD_META`. Where it
+ * sits (its project, its parent) heads the card instead, above the title.
  */
+
+/**
+ * A comment the owner has not seen on an open task (todo-read-state.ts): the card's border and its comment count say so,
+ * in the sessions list's unread blue, never a dot before the title, which a project's colored dot beside it would echo.
+ */
+const unreadOf = (task: TodoTask, context: CardContext) => !task.completedAt && !!context.unread?.has(task.id);
 
 export interface MetaChip { key: string; visible: (task: TodoTask, context: CardContext) => boolean; render: (task: TodoTask, context: CardContext) => ReactNode }
 
@@ -34,14 +41,15 @@ export const CARD_META: MetaChip[] = [
   { key: 'labels', visible: task => task.labelIds.length > 0, render: (task, { world }) => <>{task.labelIds.map(id => world.labels.find(label => label.id === id)).filter(label => !!label).map(label =>
     <span key={label!.id} className="todo-chip label" style={{ color: colorOf(label!.color) }}>@{label!.name}</span>)}</> },
   // Sub-tasks are counted by the card's own fold-out list below this line.
-  { key: 'comments', visible: (task, { world }) => (world.commentCounts[task.id] ?? 0) > 0, render: (task, { world }) => <span className="todo-chip" title={t('댓글')}><MessageSquare size={11} />{world.commentCounts[task.id]}</span> },
+  { key: 'comments', visible: (task, { world }) => (world.commentCounts[task.id] ?? 0) > 0, render: (task, context) => unreadOf(task, context)
+    ? <span className="todo-chip comments unread" title={t('새 댓글')}><MessageSquare size={11} />{context.world.commentCounts[task.id]}</span>
+    : <span className="todo-chip comments" title={t('댓글')}><MessageSquare size={11} />{context.world.commentCounts[task.id]}</span> },
   // Attachments counted by the server; the upload itself lives in the task detail.
   { key: 'files', visible: (task, { world }) => (world.fileCounts[task.id] ?? 0) > 0, render: (task, { world }) => <span className="todo-chip" title={t('첨부 파일')}><Paperclip size={11} />{world.fileCounts[task.id]}</span> },
   { key: 'github', visible: (task, { world }) => !!world.github?.issues[task.id], render: (task, { world }) => { const issue = world.github!.issues[task.id];
     return <a className={`todo-chip github ${issue.error ? 'error' : ''}`} href={issue.url} target="_blank" rel="noreferrer" title={issue.error ? `${issue.repo}#${issue.number} — ${translateMessage(issue.error)}` : `${issue.repo}#${issue.number}`}
       onClick={event => event.stopPropagation()} onPointerDown={event => event.stopPropagation()}><Github size={11} />#{issue.number}</a>; } },
   { key: 'next', visible: (task, { next }) => (next.get(task.id) ?? 0) > 0, render: (task, { next }) => <span className="todo-chip next" title={t('후속 작업')}><ArrowRight size={11} />{t('다음 {0}', { 0: next.get(task.id)! })}</span> },
-  { key: 'project', visible: (task, { showProject }) => showProject, render: (task, { world }) => { const project = world.projects.find(item => item.id === task.projectId); return project ? <span className="todo-chip project"><i style={{ background: colorOf(project.color) }} />{project.inbox ? t('관리함') : project.name}</span> : null; } },
 ];
 
 /** Done and all sub-tasks of each task, from the server (`TodoWorld.subtaskCounts`, which may not have come yet). */
@@ -125,11 +133,13 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
   const rowUnread = (child: TodoTask) => !child.completedAt && (!!context.unread?.has(child.id) || !!context.unreadBelow?.has(child.id));
   const subtasks: CardSubtasksProps = { task, listed, world: context.world, unread: rowUnread, readOnly, onOpen, onComplete, onReopen, onChat };
   // A completed card (a repeating task's past occurrence among them) is done with.
-  const unread = !task.completedAt && !!context.unread?.has(task.id);
+  const unread = unreadOf(task, context);
   const chips = CARD_META.filter(chip => chip.visible(task, context));
   const agent = context.world.agents[task.id];
   // A sub-task with a card of its own (Today, Upcoming, a label, a search) names the task it belongs to above its title.
   const parent = task.parentId ? context.world.tasks[task.parentId] : undefined;
+  // Where the list is not one project, the card names its own first, left above the title, before its parent.
+  const project = context.showProject ? context.world.projects.find(item => item.id === task.projectId) : undefined;
   // A file dragged from the computer is not a card being dragged (dnd-kit follows the pointer, not HTML drag events).
   // A paste is the detail's: a card taking one would attach files to whichever card the keyboard is on.
   const drop = useFileDrop(files => onFiles?.(task, files), !onFiles || readOnly || !!task.completedAt);
@@ -163,8 +173,11 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
     <div className="todo-card-main">
       <CheckCircle task={task} disabled={readOnly} onComplete={() => onComplete(task)} onCompleteNext={() => onCompleteNext(task)} onReopen={onReopen && (() => onReopen(task))} />
       <div className="todo-card-body">
-        {parent && <span className="todo-card-parent" title={parent.content}>{parent.content}</span>}
-        <span className="todo-card-title" title={task.content}>{unread && <UnreadDot />}{task.content}</span>
+        {(project || parent) && <span className="todo-card-context">
+          {project && <span className="todo-card-project"><i style={{ background: colorOf(project.color) }} /><span>{project.inbox ? t('관리함') : project.name}</span></span>}
+          {parent && <span className="todo-card-parent" title={parent.content}>{parent.content}</span>}
+        </span>}
+        <span className="todo-card-title" title={task.content}>{task.content}</span>
         {task.description && <span className="todo-card-description">{plain(task.description)}</span>}
         {chips.length > 0 && <div className="todo-meta">{chips.map(chip => <span key={chip.key} className="todo-meta-item">{chip.render(task, context)}</span>)}</div>}
       </div>
@@ -184,7 +197,7 @@ interface CardSubtasksProps extends Pick<TaskCardProps, 'task' | 'readOnly' | 'o
   /** The sub-tasks the card lists, in their order. */
   listed: TodoTask[];
   world: TodoWorld;
-  /** A sub-task's row shows the unread dot: its own comments or those of one below it. */
+  /** A sub-task's row shows unread, its title in blue: its own comments or those of one below it. */
   unread?: (task: TodoTask) => boolean;
   /** Sub-tasks at work: never left out of the list. */
   working?: (task: TodoTask) => boolean;
@@ -218,7 +231,7 @@ function CardSubtasks({ task, listed, world, unread, working, readOnly, onOpen, 
     </button>
     {shown.length > 0 && <ul>{shown.map(child => <li key={child.id} className={child.completedAt ? 'done' : undefined}>
       <CheckCircle task={child} size="small" disabled={readOnly} onComplete={() => onComplete(child)} onReopen={onReopen && (() => onReopen(child))} />
-      <button type="button" className="todo-subtask-title" onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{unread?.(child) && <UnreadDot />}{child.content}</button>
+      <button type="button" className={unread?.(child) ? 'todo-subtask-title unread' : 'todo-subtask-title'} title={unread?.(child) ? t('새 댓글') : undefined} onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{child.content}</button>
       {world.agents[child.id] && <SubtaskAgent task={child} agent={world.agents[child.id]} onChat={onChat} />}
     </li>)}</ul>}
     {more > 0 && <button type="button" className="todo-subtask-more" {...OWN_PRESS} onClick={event => { event.stopPropagation(); onOpen(task.id); }}>{t('{0}건 더 있음', { 0: more })}</button>}

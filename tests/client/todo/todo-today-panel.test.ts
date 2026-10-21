@@ -113,7 +113,10 @@ test('the arrow keys go from the card chosen, when a task has one in Today and o
 
 test('a sub-task with a card of its own names its parent above its title', () => {
   const html = (id: string) => renderToStaticMarkup(createElement(TaskCard, { task: world.tasks[id], context: cardContext(world, today, true), onOpen() {}, onComplete() {}, onCompleteNext() {} }));
-  assert.match(html('child'), /<span class="todo-card-parent" title="Quarterly report">Quarterly report<\/span><span class="todo-card-title"[^>]*>Draft the summary/);
+  assert.match(html('child'), /<span class="todo-card-context"><span class="todo-card-project">[\s\S]*?<span>관리함<\/span><\/span><span class="todo-card-parent" title="Quarterly report">Quarterly report<\/span><\/span><span class="todo-card-title"[^>]*>Draft the summary/,
+    'its project first, then its parent, on one line above its title');
+  assert.match(renderToStaticMarkup(createElement(TaskCard, { task: world.tasks.child, context: cardContext(world, today, false), onOpen() {}, onComplete() {}, onCompleteNext() {} })),
+    /<span class="todo-card-context"><span class="todo-card-parent" title="Quarterly report">Quarterly report<\/span><\/span>/, 'without the project where the list names it');
   assert.doesNotMatch(html('now'), /todo-card-parent/);
 });
 
