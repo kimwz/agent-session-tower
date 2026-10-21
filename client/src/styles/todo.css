@@ -106,6 +106,13 @@
 .todo-today-panel .todo-column { flex:none; width:auto; max-height:none; }
 .todo-today-panel .todo-column-cards { overflow-y:visible; }
 .todo-today-empty { padding:8px 4px; font-size:12px; }
+/* The panel's sub-task zone (BoardView `SubtaskZone`): always there, marked while a card is dragged, lit with one over it. */
+.todo-subtask-zone { display:flex; flex:none; align-items:center; gap:8px; min-height:34px; padding:0 10px; border:1px dashed #33465f; border-radius:8px; color:#7d8ca2; font-size:12px; transition:background .15s, border-color .15s, color .15s; }
+.todo-subtask-zone svg { flex:none; }
+.todo-subtask-zone b { flex:none; color:#a9c3ee; font-weight:600; white-space:nowrap; }
+.todo-subtask-zone span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#6d7c92; }
+.todo-subtask-zone.active { border-color:#4a6d9c; background:#111c2a; }
+.todo-subtask-zone.drop-target { border-style:solid; border-color:#6d97d4; background:#1d3250; color:#cfe0fa; }
 .todo-today-toggle { cursor:pointer; }
 .todo-today-toggle input { margin:0; accent-color:var(--blue); }
 /* The board's sideways scrollbars only hint that more columns lie to the side; they show plainly when pointed at. */

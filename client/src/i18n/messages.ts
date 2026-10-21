@@ -2803,6 +2803,8 @@ export const english: Record<string, string> = {
   "설명 추가": "Add a description",
   "하위 작업 이름": "Sub-task name",
   "하위 작업 추가": "Add sub-task",
+  "하위 작업 만들기": "Make a sub-task",
+  "놓으면 오늘 할 일로": "drop a task: due today",
   "기존 작업 연결": "Link an existing task",
   "다음에 할 작업 검색": "Search for the task that comes next",
   "찾은 작업이 없습니다": "No tasks found",

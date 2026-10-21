@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from 'react';
-import { Archive, ArchiveRestore, ArrowRight, CalendarDays, Check, CheckCheck, ChevronsDownUp, ChevronsUpDown, Columns3, ChevronLeft, ChevronRight, Flag, Github, LoaderCircle, Pencil, Plus, RefreshCw, Trash2, TriangleAlert, X } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowRight, CalendarDays, Check, CheckCheck, ChevronsDownUp, ChevronsUpDown, Columns3, ChevronLeft, ChevronRight, Flag, Github, ListPlus, LoaderCircle, Pencil, Plus, RefreshCw, Trash2, TriangleAlert, X } from 'lucide-react';
 import { liveProjectIds } from '../../../shared/todo/compose';
 import { addDays } from '../../../shared/todo/dates';
 import type { TodoProject, TodoTask } from '../../../shared/todo/types';
@@ -94,7 +94,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   const [searchResults, setSearchResults] = useState<TodoTask[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [quick, setQuick] = useState<{ preset: QuickAddPreset; follow: FollowUp | null } | null>(null);
-  const [cardMenu, setCardMenu] = useState<{ task: TodoTask; anchor: HTMLElement } | null>(null);
+  // `at`: opened by a right-click, at the pointer.
+  const [cardMenu, setCardMenu] = useState<{ task: TodoTask; anchor: HTMLElement; at?: { x: number; y: number } } | null>(null);
   const [sectionMenu, setSectionMenu] = useState<string | null>(null);
   // A section's GitHub link dialog, opened from its menu once the menu has closed.
   const [sectionGithub, setSectionGithub] = useState<string | null>(null);
@@ -260,6 +261,11 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
     if (readOnly || lockedTask(task.id) || (complete && task.completedAt)) return;
     setQuick({ preset: { projectId: task.projectId, sectionId: task.sectionId }, follow: { taskId: task.id, complete } });
   }, [readOnly, lockedTask]);
+  // The dialog in its sub-task form (the sub-task takes its parent's project and section), dated when given (Today's zone).
+  const addSubtask = useCallback((task: TodoTask, dueDate?: string) => {
+    if (readOnly || lockedTask(task.id) || task.completedAt) return;
+    setQuick({ preset: { parentId: task.id, dueDate }, follow: null });
+  }, [readOnly, lockedTask]);
 
   // The completed list as it shows (the list's own filter), each row chosen by its completion: a repeating task has several.
   // A label's are chosen by the server (`readCompleted` with the label).
@@ -406,7 +412,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
     onCompleteNext: (task: TodoTask) => followUp(task, true),
     onReopen: (task: TodoTask) => { if (!isLocked(task)) void actions.reopen(task); },
     onSelect: select,
-    onMenu: frozen ? undefined : (task: TodoTask, anchor: HTMLElement) => { if (!isLocked(task)) { menuAnchor.current = anchor; setCardMenu({ task, anchor }); } },
+    onMenu: frozen ? undefined : (task: TodoTask, anchor: HTMLElement, at?: { x: number; y: number }) => { if (!isLocked(task)) { menuAnchor.current = anchor; setCardMenu({ task, anchor, at }); } },
     // Files dropped on a card go to its task's description.
     onFiles: frozen ? undefined : (task: TodoTask, files: File[]) => { if (!isLocked(task)) attach(task.id, files); },
     readOnly: frozen,
@@ -421,6 +427,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   const cardMenuItems = (task: TodoTask): (MenuItem | 'separator')[] => [
     { key: 'complete-next', label: t('완료 및 후속작업'), hint: '⇧E', icon: <Check size={13} />, run: () => followUp(task, true) },
     { key: 'next', label: t('후속 작업 추가'), hint: 'N', icon: <ArrowRight size={13} />, run: () => followUp(task, false) },
+    { key: 'subtask', label: t('하위 작업 추가'), icon: <ListPlus size={13} />, run: () => addSubtask(task) },
     ...shareItems(task, actions),
     'separator',
     { key: 'today', label: t('오늘'), icon: <CalendarDays size={13} />, run: () => actions.date(task, today) },
@@ -484,7 +491,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
     onSectionMove={(id, afterId) => client.apply([{ op: 'section.move', id, afterId }])}
     onAddSection={name => project && client.apply([{ op: 'section.create', id: newId(), projectId: project.id, name }])}
     onSectionMenu={(id, anchor) => { if (locked) return; menuAnchor.current = anchor; setSectionRename(null); setSectionGithub(null); setSectionMenu(id); }} sectionBinding={sectionBinding} completed={doneColumn}
-    today={todayColumns ? { ...todayColumns, context: todayContext, manual: manualOrder(todayDisplay) && !readOnly, note: longDate(today) } : undefined} />;
+    today={todayColumns ? { ...todayColumns, context: todayContext, manual: manualOrder(todayDisplay) && !readOnly, note: longDate(today) } : undefined}
+    onSubtask={frozen ? undefined : task => addSubtask(task, today)} />;
 
   return <div className={`todo-page ${sidebarOpen ? 'with-sidebar' : ''} ${drawer ? 'drawer' : ''} ${openTaskId ? 'with-detail' : ''}`}>
     {drawer && sidebarOpen && <button type="button" className="todo-scrim" aria-label={t('목록 닫기')} onClick={() => onSidebarOpen(false)} />}
@@ -532,7 +540,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
       tab={detailTab} onTab={chooseTab} />}
     {switcher && state.phase === 'ready' && <ViewSwitcher anchor={titleRef} world={world} current={view} onClose={() => setSwitcher(false)} onChoose={next => { setSwitcher(false); goTo(next); }} />}
     {quick && <QuickAdd world={world} today={today} client={client} preset={quick.preset} follow={quick.follow} attach={attach} onClose={() => setQuick(null)} onAdded={id => setSelectedId(id)} />}
-    {cardMenu && <Menu anchor={menuAnchor} label={t('작업 메뉴')} items={cardMenuItems(cardMenu.task)} onClose={() => setCardMenu(null)} align="end" />}
+    {cardMenu && <Menu anchor={menuAnchor} label={t('작업 메뉴')} items={cardMenuItems(cardMenu.task)} onClose={() => setCardMenu(null)} align={cardMenu.at ? 'start' : 'end'} at={cardMenu.at} />}
     {sectionMenu && section && <Menu anchor={menuAnchor} label={t('섹션 메뉴')} onClose={() => setSectionMenu(null)} items={[
       { key: 'rename', label: t('이름 바꾸기'), icon: <Pencil size={13} />, run: () => setSectionRename(section.id) },
       ...(section.archivedAt ? [] : [

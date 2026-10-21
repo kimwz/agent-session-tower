@@ -2,12 +2,12 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNod
 import { closestCorners, DndContext, DragOverlay, pointerWithin, useDroppable, type CollisionDetection, type DragEndEvent, type DragOverEvent, type DragStartEvent } from '@dnd-kit/core';
 import { horizontalListSortingStrategy, SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { useTodoSensors } from './todo-dnd';
-import { GripVertical, Inbox, MoreHorizontal, Plus } from 'lucide-react';
+import { GripVertical, Inbox, ListPlus, MoreHorizontal, Plus } from 'lucide-react';
 import type { TodoGitHubBinding, TodoProject, TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { TaskCard, type TaskCardProps } from './TaskCard';
 import { colorOf } from './todo-format';
-import { dayAfterOf, dropPlace, inTodayPanel, OVERVIEW_SHOWN, sectionDropAfter, shownTasks, TODAY_PANEL, todayPanelDrop, type BoardColumn, type BoardGroup, type CardContext, type TodayPanel } from './todo-views';
+import { dayAfterOf, dropPlace, inTodayPanel, OVERVIEW_SHOWN, sectionDropAfter, shownTasks, TODAY_PANEL, TODAY_SUBTASK, todayPanelDrop, type BoardColumn, type BoardGroup, type CardContext, type TodayPanel } from './todo-views';
 import { GitHubMark } from './GitHubMark';
 
 /**
@@ -17,7 +17,8 @@ import { GitHubMark } from './GitHubMark';
  *
  * The overview (`groups`) shows one project after another, each with its section columns, in one drag area: a card
  * goes to another project's section, and a section moves only among its own project's. Beside it, Today (`today`) shows
- * in an area of its own in the same drag area: a card from the overview let go anywhere there is dated today.
+ * in an area of its own in the same drag area: a card from the overview let go anywhere there is dated today, and any card
+ * let go on its "하위 작업 만들기" zone gets a sub-task due today instead (`onSubtask`).
  */
 
 export interface BoardProps {
@@ -57,6 +58,8 @@ export interface BoardProps {
    * order by hand (the Today list's display), and the date it names.
    */
   today?: TodayPanel & { context: CardContext; manual: boolean; note: string };
+  /** A card let go on the Today panel's sub-task zone (shown only with this): add a sub-task due today to its task. */
+  onSubtask?: (task: TodoTask) => void;
 }
 
 /** A card's drag id; the Today panel's (`area`) differ, as a task can show there and on the overview at once. */
@@ -75,7 +78,7 @@ export const collisionsFor = (overview: boolean): CollisionDetection => args => 
   // where it would be, under the Today panel.
   const panel = args.droppableRects.get(TODAY_PANEL), pointer = args.pointerCoordinates;
   const inPanel = !!panel && !!pointer && pointer.x >= panel.left && pointer.x <= panel.right && pointer.y >= panel.top && pointer.y <= panel.bottom;
-  const ofPanel = (id: string) => id === TODAY_PANEL || id.startsWith('task:today:') || id.startsWith('column:today/');
+  const ofPanel = (id: string) => id === TODAY_PANEL || id === TODAY_SUBTASK || id.startsWith('task:today:') || id.startsWith('column:today/');
   const within = pointerWithin(args).filter(item => !panel || !pointer || ofPanel(String(item.id)) === inPanel);
   const card = within.find(item => String(item.id).startsWith('task:'));
   if (card) return [card];
@@ -149,6 +152,14 @@ function AddSection({ onAdd }: { onAdd: (name: string) => void }) {
   </div>;
 }
 
+/** The Today panel's sub-task zone: shown at all times, marked while a card is dragged, lit with one over it. */
+function SubtaskZone({ active }: { active: boolean }) {
+  const { setNodeRef, isOver } = useDroppable({ id: TODAY_SUBTASK, data: { type: 'subtask' } });
+  return <div ref={setNodeRef} className={`todo-subtask-zone ${active ? 'active' : ''} ${active && isOver ? 'drop-target' : ''}`}>
+    <ListPlus size={14} /><b>{t('하위 작업 만들기')}</b><span>{t('놓으면 오늘 할 일로')}</span>
+  </div>;
+}
+
 /** The Today panel: its own scroll area, all of it a target for cards from the overview. */
 function TodayArea({ panel, over, count, children }: { panel: TodayPanel; over: boolean; count: number; children: ReactNode }) {
   const { setNodeRef } = useDroppable({ id: TODAY_PANEL, data: { type: 'column', column: panel.target } });
@@ -211,6 +222,8 @@ export function BoardView(board: BoardProps) {
     }
     if (data?.type !== 'task') return;
     const task = data.task as TodoTask, source = columnOf(data)!, target = columnOf(over.data.current);
+    // The sub-task zone, from the overview or the panel alike: the task itself stays as it is.
+    if (over.id === TODAY_SUBTASK) { board.onSubtask?.(task); return; }
     const overTask = over.data.current?.type === 'task' ? (over.data.current.task as TodoTask) : undefined;
     if (board.today && target) {
       const drop = todayPanelDrop(source, target);
@@ -270,6 +283,7 @@ export function BoardView(board: BoardProps) {
     {groups ? board.today ? <div className="todo-board-split">
       <TodayArea panel={board.today} over={overToday} count={todayCount}>
         <header className="todo-today-head"><h3>{t('오늘')}</h3><span className="todo-column-note">{board.today.note}</span><span className="todo-column-count">{todayCount || ''}</span></header>
+        {board.onSubtask && <SubtaskZone active={!!activeTask} />}
         {board.today.columns.map(column => renderColumn(column, 'today'))}
       </TodayArea>
       {overviewBoard}

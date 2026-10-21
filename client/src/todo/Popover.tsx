@@ -4,15 +4,17 @@ import { useMediaQuery } from '../common/use-media-query';
 
 /**
  * A panel opened from a control: placed under it on a wide page, a sheet from the bottom on a phone. It closes on
- * Escape or a press outside it (but not on its opener, which toggles it itself).
+ * Escape or a press outside it (but not on its opener, which toggles it itself). Opened at a point instead (`at`, a
+ * right-click), it is placed there, the anchor still being the opener.
  */
-export function Popover({ anchor, onClose, children, label, className = '', align = 'start' }: {
+export function Popover({ anchor, onClose, children, label, className = '', align = 'start', at }: {
   anchor: RefObject<HTMLElement | null>;
   onClose: () => void;
   children: ReactNode;
   label: string;
   className?: string;
   align?: 'start' | 'end';
+  at?: { x: number; y: number };
 }) {
   const sheet = useMediaQuery('(max-width: 680px)');
   const ref = useRef<HTMLDivElement>(null);
@@ -23,7 +25,7 @@ export function Popover({ anchor, onClose, children, label, className = '', alig
   useLayoutEffect(() => {
     if (sheet) return;
     const measure = () => {
-      const box = anchor.current?.getBoundingClientRect();
+      const box = at ? { left: at.x, right: at.x, top: at.y, bottom: at.y } : anchor.current?.getBoundingClientRect();
       const panel = ref.current;
       if (!box || !panel) return;
       const width = panel.offsetWidth, height = panel.offsetHeight;
@@ -35,7 +37,7 @@ export function Popover({ anchor, onClose, children, label, className = '', alig
     measure();
     window.addEventListener('resize', measure);
     return () => window.removeEventListener('resize', measure);
-  }, [anchor, sheet, align]);
+  }, [anchor, sheet, align, at]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape' && !event.isComposing) { event.preventDefault(); event.stopPropagation(); close.current(); } };
@@ -68,8 +70,8 @@ export interface MenuItem {
 }
 
 /** A list of actions in a popover; choosing one closes it unless the item keeps it open (`checked` toggles). */
-export function Menu({ anchor, items, onClose, label, header, align }: { anchor: RefObject<HTMLElement | null>; items: (MenuItem | 'separator')[]; onClose: () => void; label: string; header?: ReactNode; align?: 'start' | 'end' }) {
-  return <Popover anchor={anchor} onClose={onClose} label={label} className="todo-menu" align={align}>
+export function Menu({ anchor, items, onClose, label, header, align, at }: { anchor: RefObject<HTMLElement | null>; items: (MenuItem | 'separator')[]; onClose: () => void; label: string; header?: ReactNode; align?: 'start' | 'end'; at?: { x: number; y: number } }) {
+  return <Popover anchor={anchor} onClose={onClose} label={label} className="todo-menu" align={align} at={at}>
     {header}
     <div role="menu" aria-label={label}>
       {items.map((item, index) => item === 'separator' ? <hr key={`separator-${index}`} /> : <button key={item.key} type="button" role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
