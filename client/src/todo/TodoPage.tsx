@@ -26,7 +26,7 @@ import { useTodoReadState } from './todo-read-state';
 import { doneRange } from './calendar/calendar-layout';
 import { backgroundClose } from './todo-background';
 import { setTodayPanelShown, todayPanelShown } from './todo-prefs';
-import { archivedColumns, calendarDone as calendarDoneItems, foldGroups, overviewGroups, shapeSections, shownTasks, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, todayPanel, manualOrder, moveSelection, moveSelectionAt, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
+import { archivedColumns, calendarDone as calendarDoneItems, foldGroups, overviewGroups, shapeSections, shownTasks, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, todayPanel, manualOrder, moveSelectionAt, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
 import { CalendarView } from './calendar/CalendarView';
 import type { TodoLayout } from '../../../shared/todo/types';
 
@@ -341,19 +341,20 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
           // The choice goes on to a card that stays: below, above, or in the next column; never one of its own sub-tasks,
           // which complete with it.
           const under = (id: string) => { for (let item = current.world.tasks[id]; item?.parentId; item = current.world.tasks[item.parentId]) if (item.parentId === task.id) return true; return false; };
+          // From the chosen card's own column, when the task has a card in Today beside the overview too.
           const step = (direction: 'down' | 'up' | 'right' | 'left') => {
-            // Past its own sub-tasks, as far as the list goes.
-            for (let id: string | null = task.id, count = 0; count < 500; count++) {
-              const next: string | null = moveSelection(current.navColumns, id, direction);
-              if (!next || next === id) return null;
-              if (next !== task.id && !under(next)) return next;
-              id = next;
+            // Past its own sub-tasks (and its other card), as far as the list goes.
+            for (let id = task.id, at = current.chosenColumn.current, count = 0; count < 500; count++) {
+              const next = moveSelectionAt(current.navColumns, id, direction, at);
+              if (!next || (next.id === id && (next.column ?? null) === at)) return null;
+              if (next.id !== task.id && !under(next.id)) return next;
+              id = next.id; at = next.column ?? null;
             }
             return null;
           };
           const neighbour = (['down', 'up', 'right', 'left'] as const).map(step).find(Boolean);
           current.actions.complete(task);
-          if (!current.openTaskId && neighbour && neighbour !== task.id) current.choose(neighbour);
+          if (!current.openTaskId && neighbour) current.choose(neighbour.id, neighbour.column);
           break;
         }
         case 'complete-next': if (task) current.followUp(task, true); break;
