@@ -456,6 +456,10 @@ test('a card shows unread comments by its border and comment count, and on the s
   assert.match(html('p', ['p']), /<span class="todo-chip comments unread" title="새 댓글">/);
   assert.match(html('p', []), /<span class="todo-chip comments" title="댓글">/);
   assert.doesNotMatch(html('p', ['p', 'a', 'b']), /unread-dot/);
+  // Named so for a screen reader too, the card and its row.
+  assert.match(html('p', ['p', 'b']), /role="button" aria-label="Parent · 새 댓글"/);
+  assert.match(html('p', ['p', 'b']), /class="todo-subtask-title unread" title="새 댓글" aria-label="Child B · 새 댓글"/);
+  assert.match(html('p', []), /role="button" aria-label="Parent"/);
   // Completed, nothing shows unread.
   const done = { ...world.tasks.p, completedAt: '2026-10-14T02:00:00.000Z' };
   assert.doesNotMatch(renderToStaticMarkup(createElement(TaskCard, { task: done, context: cardContext(world, '2026-10-14', false, undefined, new Set(['p'])), onOpen() {}, onComplete() {}, onCompleteNext() {} })), /unread/);

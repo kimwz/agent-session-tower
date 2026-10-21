@@ -145,7 +145,7 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
   const drop = useFileDrop(files => onFiles?.(task, files), !onFiles || readOnly || !!task.completedAt);
   const { onDragOver, onDragLeave, onDrop } = drop.handlers;
   const dropHandlers = { onDragOver, onDragLeave, onDrop };
-  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''} ${drop.over ? 'file-target' : ''} ${unread ? 'unread' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={task.content}
+  return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''} ${drop.over ? 'file-target' : ''} ${unread ? 'unread' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={unread ? `${task.content} · ${t('새 댓글')}` : task.content}
     {...dropHandlers}
     onClick={() => onOpen(task.id)} onFocus={event => onSelect?.(selectId, event.currentTarget)}
     onPointerMove={event => {
@@ -231,7 +231,7 @@ function CardSubtasks({ task, listed, world, unread, working, readOnly, onOpen, 
     </button>
     {shown.length > 0 && <ul>{shown.map(child => <li key={child.id} className={child.completedAt ? 'done' : undefined}>
       <CheckCircle task={child} size="small" disabled={readOnly} onComplete={() => onComplete(child)} onReopen={onReopen && (() => onReopen(child))} />
-      <button type="button" className={unread?.(child) ? 'todo-subtask-title unread' : 'todo-subtask-title'} title={unread?.(child) ? t('새 댓글') : undefined} onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{child.content}</button>
+      <button type="button" className={unread?.(child) ? 'todo-subtask-title unread' : 'todo-subtask-title'} title={unread?.(child) ? t('새 댓글') : undefined} aria-label={unread?.(child) ? `${child.content} · ${t('새 댓글')}` : undefined} onClick={event => { event.stopPropagation(); onOpen(child.id); }}>{child.content}</button>
       {world.agents[child.id] && <SubtaskAgent task={child} agent={world.agents[child.id]} onChat={onChat} />}
     </li>)}</ul>}
     {more > 0 && <button type="button" className="todo-subtask-more" {...OWN_PRESS} onClick={event => { event.stopPropagation(); onOpen(task.id); }}>{t('{0}건 더 있음', { 0: more })}</button>}
