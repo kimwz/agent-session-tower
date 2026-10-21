@@ -2713,6 +2713,8 @@ export const english: Record<string, string> = {
   "캔버스·할 일 전환": "Canvas or todos",
   "보드·캘린더 (다시 누르면 돌아감)": "Board or calendar (again to go back)",
   "캘린더 주·월 (다시 누르면 돌아감)": "Calendar by week or month (again to go back)",
+  "전체에서 오늘 표시 켜기·끄기": "Show or hide Today beside everything",
+  "오늘 표시": "Show Today",
   "작업 고르기": "Choose a task",
   "고른 작업 열기": "Open the chosen task",
   "닫기·선택 해제": "Close, or let go of the choice",

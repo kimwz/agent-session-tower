@@ -107,7 +107,8 @@ export interface TaskCardProps {
   onReopen?: (task: TodoTask) => void;
   /** Opens the card's menu from its button. */
   onMenu?: (task: TodoTask, anchor: HTMLElement) => void;
-  onSelect?: (id: string) => void;
+  /** The card chosen, by its `selectId`; `card` is its element, to tell which of a task's two cards it is. */
+  onSelect?: (id: string, card: HTMLElement) => void;
   /** What choosing this card chooses: the task, or one of its completions in the completed list. */
   selectId?: string;
   /** Files dropped on the card, for its task's description; not offered on a completed card. */
@@ -127,6 +128,8 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
   const unread = !task.completedAt && !!context.unread?.has(task.id);
   const chips = CARD_META.filter(chip => chip.visible(task, context));
   const agent = context.world.agents[task.id];
+  // A sub-task with a card of its own (Today, Upcoming, a label, a search) names the task it belongs to above its title.
+  const parent = task.parentId ? context.world.tasks[task.parentId] : undefined;
   // A file dragged from the computer is not a card being dragged (dnd-kit follows the pointer, not HTML drag events).
   // A paste is the detail's: a card taking one would attach files to whichever card the keyboard is on.
   const drop = useFileDrop(files => onFiles?.(task, files), !onFiles || readOnly || !!task.completedAt);
@@ -134,11 +137,11 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
   const dropHandlers = { onDragOver, onDragLeave, onDrop };
   return <div className={`todo-card ${selected ? 'selected' : ''} ${task.completedAt ? 'done' : ''} ${drop.over ? 'file-target' : ''} ${unread ? 'unread' : ''}`} data-task={task.id} data-select={selectId} tabIndex={0} role="button" aria-label={task.content}
     {...dropHandlers}
-    onClick={() => onOpen(task.id)} onFocus={() => onSelect?.(selectId)}
+    onClick={() => onOpen(task.id)} onFocus={event => onSelect?.(selectId, event.currentTarget)}
     onPointerMove={event => {
       // Only a mouse that moves chooses: cards passing under a still mouse while the arrow keys scroll do not.
       if (event.pointerType !== 'mouse' || selected) return;
-      onSelect?.(selectId);
+      onSelect?.(selectId, event.currentTarget);
       // With the keyboard on another card (or a button in one), it follows the mouse, so Enter opens the card that shows
       // chosen. A field or the task's detail keeps the keyboard.
       const active = document.activeElement;
@@ -149,6 +152,7 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
     <div className="todo-card-main">
       <CheckCircle task={task} disabled={readOnly} onComplete={() => onComplete(task)} onCompleteNext={() => onCompleteNext(task)} onReopen={onReopen && (() => onReopen(task))} />
       <div className="todo-card-body">
+        {parent && <span className="todo-card-parent" title={parent.content}>{parent.content}</span>}
         <span className="todo-card-title" title={task.content}>{unread && <UnreadDot />}{task.content}</span>
         {task.description && <span className="todo-card-description">{plain(task.description)}</span>}
         {chips.length > 0 && <div className="todo-meta">{chips.map(chip => <span key={chip.key} className="todo-meta-item">{chip.render(task, context)}</span>)}</div>}

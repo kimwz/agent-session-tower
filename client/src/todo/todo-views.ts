@@ -360,18 +360,25 @@ export function subtaskWindow<T extends Pick<TodoTask, 'completedAt'>>(subtasks:
 /**
  * The card an arrow key goes to on the board: up and down within a column, left and right to the next column that has
  * cards (the same place, or its last card). Without a chosen card (or one no longer shown), the first card there is.
+ * A task can have a card in two columns (Today beside the overview): `at` names the column of the chosen one, and the
+ * answer names the column of the card gone to.
  */
-export function moveSelection(columns: readonly Pick<BoardColumn, 'tasks'>[], from: string | null, direction: Direction): string | null {
-  const filled = columns.map(column => column.tasks.map(task => task.id)).filter(ids => ids.length);
+export function moveSelectionAt(columns: readonly (Pick<BoardColumn, 'tasks'> & { id?: string })[], from: string | null, direction: Direction, at?: string | null): { id: string; column?: string } | null {
+  const filled = columns.filter(column => column.tasks.length);
   if (!filled.length) return null;
-  const column = from ? filled.findIndex(ids => ids.includes(from)) : -1;
-  if (column < 0) return filled[0][0];
-  const ids = filled[column], row = ids.indexOf(from!);
-  if (direction === 'up') return ids[Math.max(0, row - 1)];
-  if (direction === 'down') return ids[Math.min(ids.length - 1, row + 1)];
-  const next = filled[column + (direction === 'left' ? -1 : 1)];
-  return next ? next[Math.min(row, next.length - 1)] : from;
+  const holds = (column: Pick<BoardColumn, 'tasks'>) => column.tasks.some(task => task.id === from);
+  let index = from && at ? filled.findIndex(column => column.id === at && holds(column)) : -1;
+  if (index < 0 && from) index = filled.findIndex(holds);
+  const card = (column: (typeof filled)[number], row: number) => ({ id: column.tasks[row].id, column: column.id });
+  if (index < 0) return card(filled[0], 0);
+  const column = filled[index], row = column.tasks.findIndex(task => task.id === from);
+  if (direction === 'up') return card(column, Math.max(0, row - 1));
+  if (direction === 'down') return card(column, Math.min(column.tasks.length - 1, row + 1));
+  const next = filled[index + (direction === 'left' ? -1 : 1)];
+  return next ? card(next, Math.min(row, next.tasks.length - 1)) : card(column, row);
 }
+
+export const moveSelection = (columns: readonly Pick<BoardColumn, 'tasks'>[], from: string | null, direction: Direction): string | null => moveSelectionAt(columns, from, direction)?.id ?? null;
 
 export function archivedColumns(view: TodoView, display: DisplaySettings, context: ViewContext, projectId: string): BoardColumn[] {
   const group = groupingsFor(view).includes(display.group) ? display.group : groupingsFor(view)[0];
@@ -428,6 +435,23 @@ export function overviewGroups(display: DisplaySettings, context: ViewContext): 
     return { project, depth, parents, count: columns.reduce((sum, column) => sum + column.tasks.length, 0), columns: shaped.map(column => ({ ...column, id: `${project.id}/${column.id}` })) };
   });
 }
+
+/**
+ * Today beside the overview (`T`): the Today list's columns as its own display lays them out, under ids of their own
+ * (`today/…`), and the panel itself as a target that dates whatever comes from the overview today, whichever of its
+ * columns or empty space takes it, so the task always lands in Today.
+ */
+export interface TodayPanel { columns: BoardColumn[]; target: BoardColumn }
+
+export const TODAY_PANEL = 'today-panel';
+
+export function todayPanel(display: DisplaySettings, context: ViewContext): TodayPanel {
+  const columns = boardColumns({ kind: 'today' }, display, context).map(column => ({ ...column, id: `today/${column.id}` }));
+  return { columns, target: { id: TODAY_PANEL, title: t('오늘'), tasks: [], drop: { kind: 'date', date: context.today }, preset: { dueDate: context.today } } };
+}
+
+/** Whether `column` is the Today panel or one of its columns. */
+export const inTodayPanel = (column: Pick<BoardColumn, 'id'>) => column.id === TODAY_PANEL || column.id.startsWith('today/');
 
 /** The overview's columns as they show: each its first cards (`OVERVIEW_SHOWN`), but those opened (`expanded`) whole. */
 export const foldGroups = (groups: readonly BoardGroup[], expanded: ReadonlySet<string>): BoardGroup[] =>
