@@ -105,8 +105,8 @@ export interface TaskCardProps {
   onComplete: (task: TodoTask) => void;
   onCompleteNext: (task: TodoTask) => void;
   onReopen?: (task: TodoTask) => void;
-  /** Opens the card's menu from its button. */
-  onMenu?: (task: TodoTask, anchor: HTMLElement) => void;
+  /** Opens the card's menu from its button, or at the pointer (`at`) on a right-click, still anchored to the button. */
+  onMenu?: (task: TodoTask, anchor: HTMLElement, at?: { x: number; y: number }) => void;
   /** The card chosen, by its `selectId`; `card` is its element, to tell which of a task's two cards it is. */
   onSelect?: (id: string, card: HTMLElement) => void;
   /** What choosing this card chooses: the task, or one of its completions in the completed list. */
@@ -148,7 +148,16 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
       const active = document.activeElement;
       if (active instanceof HTMLElement && !event.currentTarget.contains(active) && active.closest('.todo-card')) event.currentTarget.focus({ preventScroll: true });
     }}
-    onKeyDown={event => { if (event.key === 'Enter' && event.target === event.currentTarget) { event.preventDefault(); onOpen(task.id); } }}>
+    onKeyDown={event => { if (event.key === 'Enter' && event.target === event.currentTarget) { event.preventDefault(); onOpen(task.id); } }}
+    onContextMenu={event => {
+      // A mouse's right-click opens the card's menu where the button would. A held touch is the board's drag, and a link
+      // or a sub-task's row (another task) keeps the browser's own menu.
+      const button = event.currentTarget.querySelector<HTMLElement>(':scope > .todo-card-main > .todo-card-more');
+      if (!onMenu || !button || (event.nativeEvent as Partial<PointerEvent>).pointerType === 'touch') return;
+      if (event.target instanceof Element && event.target.closest('a, .todo-card-subtasks')) return;
+      event.preventDefault();
+      onMenu(task, button, { x: event.clientX, y: event.clientY });
+    }}>
     {agent && !task.completedAt && <AgentActivity agent={agent} />}
     <div className="todo-card-main">
       <CheckCircle task={task} disabled={readOnly} onComplete={() => onComplete(task)} onCompleteNext={() => onCompleteNext(task)} onReopen={onReopen && (() => onReopen(task))} />

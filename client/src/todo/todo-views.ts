@@ -446,6 +446,8 @@ export function overviewGroups(display: DisplaySettings, context: ViewContext): 
 export interface TodayPanel { columns: BoardColumn[]; target: BoardColumn }
 
 export const TODAY_PANEL = 'today-panel';
+/** The zone under the Today panel's header: a card let go there gets a sub-task due today (Quick Add opens for it). */
+export const TODAY_SUBTASK = 'today-subtask';
 
 export function todayPanel(display: DisplaySettings, context: ViewContext): TodayPanel {
   const columns = boardColumns({ kind: 'today' }, display, context).map(column => ({ ...column, id: `today/${column.id}` }));

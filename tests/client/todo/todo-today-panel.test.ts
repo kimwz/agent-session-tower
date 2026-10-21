@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { BoardView, collisionsFor } from '../../../client/src/todo/BoardView.js';
+import { subtaskPreset } from '../../../client/src/todo/QuickAdd.js';
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
 import { forgetFoldedForTests, setTodayPanelShown, todayPanelShown } from '../../../client/src/todo/todo-prefs.js';
 import { readShortcut } from '../../../client/src/todo/todo-shortcuts.js';
-import { cardContext, defaultDisplay, dropOps, foldGroups, inTodayPanel, moveSelection, moveSelectionAt, overviewGroups, TODAY_PANEL, todayPanel, todayPanelDrop, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { cardContext, defaultDisplay, dropOps, foldGroups, inTodayPanel, moveSelection, moveSelectionAt, overviewGroups, TODAY_PANEL, TODAY_SUBTASK, todayPanel, todayPanelDrop, type ViewContext } from '../../../client/src/todo/todo-views.js';
 import { overview, project, task } from './fixtures.js';
 
 const today = '2026-10-17';
@@ -149,4 +150,36 @@ test('the panel names Today once: its lone Today column shows no header of its o
   assert.match(once, /<section[^>]*data-column="today\/date:today" aria-label="오늘"><div class="todo-column-cards">[\s\S]*data-task="now"[\s\S]*todo-add-card/);
   const both = panelOf(board(world, todayPanel(display, context)));
   assert.match(both, /<h3>오늘<\/h3>[\s\S]*<h3>기한 지남<\/h3>[\s\S]*<h3>오늘<\/h3>/, 'the panel header, then overdue and Today told apart');
+});
+
+test("the panel's sub-task zone shows under its header with the handler, and nowhere without it", () => {
+  const groups = foldGroups(overviewGroups(defaultDisplay({ kind: 'all' }), context), new Set());
+  const panel = todayPanel(defaultDisplay({ kind: 'today' }), context);
+  const props = {
+    columns: groups.flatMap(group => group.columns), groups, context: cardContext(world, today, false), manual: true, sections: true, mobile: false, selectedId: null,
+    card: { onOpen() {}, onComplete() {}, onCompleteNext() {} }, onAdd() {}, onDrop() {}, onSectionMove() {}, onAddSection() {}, onSectionMenu() {},
+  };
+  const withPanel = { ...props, today: { ...panel, context: cardContext(world, today, true), manual: true, note: 'Oct 17' } };
+  const html = renderToStaticMarkup(createElement(BoardView, { ...withPanel, onSubtask() {} }));
+  assert.match(html, /<header class="todo-today-head">[\s\S]*?<\/header><div class="todo-subtask-zone[^"]*">[\s\S]*?<b>하위 작업 만들기<\/b><span>놓으면 오늘 할 일로<\/span><\/div>[\s\S]*data-column="today\/date:overdue"/);
+  assert.doesNotMatch(renderToStaticMarkup(createElement(BoardView, withPanel)), /todo-subtask-zone/, 'read-only: no handler, no zone');
+  assert.doesNotMatch(renderToStaticMarkup(createElement(BoardView, { ...props, onSubtask() {} })), /todo-subtask-zone/, 'without the panel');
+});
+
+test('a card let go on the sub-task zone lands there, over the panel around it; the zone presets today, the menu no date', () => {
+  const rect = (left: number, top: number, width: number, height: number) => ({ left, top, width, height, right: left + width, bottom: top + height });
+  const droppableRects = new Map<string, ReturnType<typeof rect>>([
+    [TODAY_PANEL, rect(0, 0, 320, 800)],
+    [TODAY_SUBTASK, rect(30, 36, 280, 34)],
+    ['column:today/date:today', rect(30, 80, 280, 200)],
+    ['column:tower/section:none', rect(340, 40, 280, 200)],
+  ]);
+  const droppableContainers = [...droppableRects.keys()].map(id => ({ id, rect: { current: droppableRects.get(id) }, data: { current: {} }, disabled: false, node: { current: null } })) as never[];
+  const at = (x: number, y: number) => collisionsFor(true)({ active: { id: 'task:later' } as never, collisionRect: rect(x, y, 10, 10), droppableRects: droppableRects as never, droppableContainers, pointerCoordinates: { x, y } }).map(item => item.id);
+  assert.deepEqual(at(150, 50), [TODAY_SUBTASK]);
+  assert.deepEqual(at(150, 120), ['column:today/date:today']);
+  assert.deepEqual(at(150, 400), [TODAY_PANEL]);
+  assert.deepEqual(at(400, 100), ['column:tower/section:none']);
+  assert.deepEqual(subtaskPreset('parent', today), { parentId: 'parent', dueDate: today });
+  assert.deepEqual(subtaskPreset('parent'), { parentId: 'parent' });
 });
