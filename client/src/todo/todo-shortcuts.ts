@@ -1,7 +1,7 @@
 /**
  * The Todo page's keys: `Q` add, `/` search, `B` board, `C` calendar (each pressed again goes back to the other,
  * `layoutFor`), `W`/`M` calendar by week or month (each pressed again on the calendar goes back to the other,
- * `calendarFor`), `Shift+V` board or calendar, `V` the list of lists to go to
+ * `calendarFor`), `T` Today beside the overview, `Shift+V` board or calendar, `V` the list of lists to go to
  * (`readSwitchKey`), `G` then `A`/`T`/`U`/`I` everything, today, upcoming, inbox;
  * arrows move the chosen task on the board; on the chosen task `E` complete, `Shift+E` complete and add the next, `N`
  * add the next, `Enter` open; `Esc` close, or let go of the chosen task; `⌘Z`/`Ctrl+Z` undo the last change. `1` and
@@ -13,7 +13,7 @@ import type { CalendarMode } from './calendar/calendar-layout';
 
 export type Direction = 'up' | 'down' | 'left' | 'right';
 export type TodoShortcut =
-  | { action: 'add' | 'search' | 'views' | 'layout' | 'board' | 'calendar' | 'week' | 'month' | 'all' | 'today' | 'upcoming' | 'inbox' | 'complete' | 'complete-next' | 'add-next' | 'open' | 'close' | 'undo' }
+  | { action: 'add' | 'search' | 'views' | 'layout' | 'board' | 'calendar' | 'week' | 'month' | 'today-panel' | 'all' | 'today' | 'upcoming' | 'inbox' | 'complete' | 'complete-next' | 'add-next' | 'open' | 'close' | 'undo' }
   | { action: 'move'; direction: Direction };
 
 const ARROWS: Record<string, Direction> = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
@@ -38,8 +38,8 @@ export function readShortcut(event: ShortcutKey, pending: boolean): { shortcut?:
     const go = ({ a: 'all', t: 'today', u: 'upcoming', i: 'inbox' } as const)[key as 'a' | 't' | 'u' | 'i'];
     return go && !event.shiftKey ? { shortcut: { action: go }, pending: false } : { pending: false };
   }
-  // A held key repeats; a layout or calendar view key would then flip the page back and forth.
-  if (event.repeat && (key === 'b' || key === 'c' || key === 'w' || key === 'm' || (key === 'v' && event.shiftKey))) return { pending: false };
+  // A held key repeats; a layout, calendar view or panel key would then flip the page back and forth.
+  if (event.repeat && (key === 'b' || key === 'c' || key === 'w' || key === 'm' || key === 't' || (key === 'v' && event.shiftKey))) return { pending: false };
   if (event.shiftKey) {
     if (key === 'v') return { shortcut: { action: 'layout' }, pending: false };
     if (key === 'e') return { shortcut: { action: 'complete-next' }, pending: false };
@@ -56,6 +56,7 @@ export function readShortcut(event: ShortcutKey, pending: boolean): { shortcut?:
     case 'c': return { shortcut: { action: 'calendar' }, pending: false };
     case 'w': return { shortcut: { action: 'week' }, pending: false };
     case 'm': return { shortcut: { action: 'month' }, pending: false };
+    case 't': return { shortcut: { action: 'today-panel' }, pending: false };
     case 'Enter': return { shortcut: { action: 'open' }, pending: false };
     case 'Escape': return { shortcut: { action: 'close' }, pending: false };
     default: return ARROWS[key] ? { shortcut: { action: 'move', direction: ARROWS[key] }, pending: false } : { pending: false };

@@ -96,6 +96,18 @@
 .todo-add-section input { width:100%; height:34px; padding:0 10px; border:1px solid #3a5476; border-radius:8px; background:#0a111b; color:var(--text); }
 .todo-completed-column .todo-card { opacity:.6; }
 .todo-board.dragging, .todo-board.dragging .todo-group-columns { scroll-snap-type:none !important; }
+/* Today beside the overview: two areas side by side, each scrolling on its own, one drag area (BoardView `today`). */
+.todo-board-split { display:flex; flex:1; min-height:0; }
+.todo-board-split > .todo-board.todo-overview { padding-left:16px; }
+.todo-board.todo-today-panel { flex:0 0 324px; flex-direction:column; align-items:stretch; gap:6px; padding:4px 14px 32px 32px; overflow-x:hidden; overflow-y:auto; border-right:1px solid var(--todo-group-line); transition:background .15s; }
+.todo-board.todo-today-panel.drop-target { background:#15253a55; box-shadow:inset 0 0 0 1px #3e5f8a; }
+.todo-today-head { display:flex; align-items:center; gap:8px; min-height:30px; padding:0 4px; }
+.todo-today-head h3 { color:#a9c3ee; font-size:14px; font-weight:650; }
+.todo-today-panel .todo-column { flex:none; width:auto; max-height:none; }
+.todo-today-panel .todo-column-cards { overflow-y:visible; }
+.todo-today-empty { padding:8px 4px; font-size:12px; }
+.todo-today-toggle { cursor:pointer; }
+.todo-today-toggle input { margin:0; accent-color:var(--blue); }
 /* The board's sideways scrollbars only hint that more columns lie to the side; they show plainly when pointed at. */
 .todo-board::-webkit-scrollbar-thumb:horizontal, .todo-group-columns::-webkit-scrollbar-thumb:horizontal { background:#18212e; }
 .todo-board::-webkit-scrollbar-thumb:horizontal:hover, .todo-group-columns::-webkit-scrollbar-thumb:horizontal:hover { background:#3a485c; }
@@ -130,6 +142,7 @@
 .todo-card-body { display:flex; flex-direction:column; gap:4px; flex:1; min-width:0; }
 /* Three lines at most; the whole title is in the card's detail and its hover text. */
 .todo-card-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; color:#e2e9f3; font-size:13px; line-height:1.4; overflow-wrap:anywhere; }
+.todo-card-parent { margin-bottom:-2px; color:#7c8aa0; font-size:11px; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .todo-card-description { color:#7c8aa0; font-size:11.5px; line-height:1.4; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .todo-card-more { width:24px; height:24px; margin:-3px -4px 0 0; opacity:0; }
 .todo-card:hover .todo-card-more, .todo-card:focus-within .todo-card-more { opacity:1; }

@@ -25,7 +25,8 @@ import { isOpen } from './todo-model';
 import { useTodoReadState } from './todo-read-state';
 import { doneRange } from './calendar/calendar-layout';
 import { backgroundClose } from './todo-background';
-import { archivedColumns, calendarDone as calendarDoneItems, foldGroups, overviewGroups, shapeSections, shownTasks, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, manualOrder, moveSelection, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
+import { setTodayPanelShown, todayPanelShown } from './todo-prefs';
+import { archivedColumns, calendarDone as calendarDoneItems, foldGroups, overviewGroups, shapeSections, shownTasks, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, todayPanel, manualOrder, moveSelectionAt, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
 import { CalendarView } from './calendar/CalendarView';
 import type { TodoLayout } from '../../../shared/todo/types';
 
@@ -104,6 +105,9 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   // The list of lists (`V`), opened under the page's title.
   const [switcher, setSwitcher] = useState(false);
+  // Today beside the overview (`T`), as this browser last had it.
+  const [todayShown, setTodayShown] = useState(todayPanelShown);
+  const showToday = useCallback((shown: boolean) => { setTodayPanelShown(shown); setTodayShown(shown); }, []);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>(shownTab);
   const chooseTab = useCallback((tab: DetailTab) => { shownTab = tab; setDetailTab(tab); }, []);
@@ -213,6 +217,11 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   // The overview: every project with its sections, each column showing its first cards until opened.
   const groups = useMemo(() => view.kind !== 'all' ? null : overviewGroups(display, { world, today, start: today, query: '', searchResults: null }), [view.kind, display, world, today]);
   const overview = useMemo(() => groups && foldGroups(groups, expanded), [groups, expanded]);
+  // The overview's board offers Today beside it where there is room for both (not on a phone).
+  const todayAvailable = view.kind === 'all' && layout === 'board' && !mobile && state.phase === 'ready';
+  // As the Today list shows it, by that list's own display.
+  const todayDisplay = useMemo(() => displays.today ?? loadDisplay('today', defaultDisplay({ kind: 'today' })), [displays.today]);
+  const todayColumns = useMemo(() => todayAvailable && todayShown ? todayPanel(todayDisplay, { world, today, start: today, query: '', searchResults: null }) : null, [todayAvailable, todayShown, todayDisplay, world, today]);
   const sectionShape = useMemo(() => {
     if (overview) return { columns: overview.flatMap(group => group.columns), archived: 0 };
     const context = { world, today, start, query, searchResults };
@@ -229,11 +238,16 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   // The cards that show: a column that shows only its first ones hides the rest from the arrow keys too.
   const visibleColumns = useMemo(() => columns.map(column => column.shown === undefined ? column : { ...column, tasks: shownTasks(column) }), [columns]);
   const shown = useMemo(() => new Set(visibleColumns.flatMap(column => column.tasks.map(item => item.id))), [visibleColumns]);
-  // A card folded out of sight on the overview is no longer the chosen one, so E never completes a task not shown.
-  useEffect(() => { if (overview && selectedId && !selectedId.startsWith('done:') && !shown.has(selectedId)) setSelectedId(null); }, [overview, selectedId, shown]);
+  const todayIds = useMemo(() => new Set(todayColumns?.columns.flatMap(column => column.tasks.map(item => item.id)) ?? []), [todayColumns]);
+  // A card folded out of sight on the overview (and not in Today beside it) is no longer the chosen one, so E never
+  // completes a task not shown.
+  useEffect(() => { if (overview && selectedId && !selectedId.startsWith('done:') && !shown.has(selectedId) && !todayIds.has(selectedId)) setSelectedId(null); }, [overview, selectedId, shown, todayIds]);
   // Comments show on the detail's own tab only: a todo opened on its chat stays unread.
   const unread = useTodoReadState(world, state.phase === 'ready', detailTab === 'detail' ? openTaskId : null);
   const context = useMemo(() => cardContext(world, today, showProject, shown, unread), [world, today, showProject, shown, unread]);
+  // Today's cards read as the Today list's: their project named unless grouped by it, a sub-task with a card of its own
+  // not listed again under its parent there.
+  const todayContext = useMemo(() => cardContext(world, today, todayDisplay.group !== 'project', todayIds, unread), [world, today, todayDisplay.group, todayIds, unread]);
   const unreadProjects = useMemo(() => new Set([...unread].flatMap(id => isOpen(world.tasks[id]) ? [world.tasks[id].projectId] : [])), [unread, world.tasks]);
   const counts = useMemo(() => sidebarCounts(world, today), [world, today]);
 
@@ -262,13 +276,18 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   const doneChosen = !!chosenDone && (!openTaskId || chosenDone.id === openTaskId);
   const boardChosen = doneChosen ? null : openTaskId ?? selectedId;
   const target = (): TodoTask | undefined => (openTaskId ? world.tasks[openTaskId] : undefined) ?? chosenDone ?? (selectedId ? world.tasks[selectedId] : undefined);
-  /** Chooses a card and puts the keyboard on it, so Enter and Space act on the card that shows chosen. */
+  /** The column of the chosen card: a task can have one in Today beside the overview and one on it. */
+  const chosenColumn = useRef<string | null>(null);
+  const select = useCallback((id: string, element: HTMLElement) => { chosenColumn.current = element.closest('[data-column]')?.getAttribute('data-column') ?? null; setSelectedId(id); }, []);
+  /** Chooses a card (in `column`, when it says) and puts the keyboard on it, so Enter and Space act on the card that shows chosen. */
   const focusFrame = useRef(0);
-  const choose = (id: string) => {
+  const choose = (id: string, column?: string) => {
     setSelectedId(id);
+    chosenColumn.current = column ?? null;
     cancelAnimationFrame(focusFrame.current);
     focusFrame.current = requestAnimationFrame(() => {
-      const card = document.querySelector<HTMLElement>(`.todo-board .todo-card[data-select="${CSS.escape(id)}"]`);
+      const selector = `.todo-card[data-select="${CSS.escape(id)}"]`;
+      const card = (column ? document.querySelector<HTMLElement>(`.todo-board [data-column="${CSS.escape(column)}"] ${selector}`) : null) ?? document.querySelector<HTMLElement>(`.todo-board ${selector}`);
       card?.focus({ preventScroll: true });
       card?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     });
@@ -280,8 +299,10 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   };
   const setCalendar = (mode: DisplaySettings['calendar']) => { setLayout('calendar'); if (display.calendar !== mode) setDisplay({ ...display, calendar: mode }); };
   // The columns the arrow keys go through: the board's, and the completed list when it shows.
-  const navColumns = completedItems.length ? [...visibleColumns, { tasks: completedItems.map(item => ({ ...item.task, id: doneKey(item.completion.id) })) }] : visibleColumns;
-  const shortcuts = { ready: state.phase === 'ready', setSwitcher, target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout, calendar: display.calendar, setCalendar, navColumns, selectedId, choose, letGo, world, locked, lockedTask };
+  // Today beside the overview comes first, as it shows on the left.
+  const boardNav = todayColumns ? [...todayColumns.columns, ...visibleColumns] : visibleColumns;
+  const navColumns = completedItems.length ? [...boardNav, { tasks: completedItems.map(item => ({ ...item.task, id: doneKey(item.completion.id) })) }] : boardNav;
+  const shortcuts = { chosenColumn, todayAvailable, todayShown, showToday, ready: state.phase === 'ready', setSwitcher, target, openAdd, followUp, actions, closeTask, goTo, openTaskId, quick, drawer, sidebarOpen, onSidebarOpen, client, openTask, layout, setLayout, calendar: display.calendar, setCalendar, navColumns, selectedId, choose, letGo, world, locked, lockedTask };
   const shortcutState = useRef(shortcuts);
   shortcutState.current = shortcuts;
   useEffect(() => {
@@ -320,19 +341,20 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
           // The choice goes on to a card that stays: below, above, or in the next column; never one of its own sub-tasks,
           // which complete with it.
           const under = (id: string) => { for (let item = current.world.tasks[id]; item?.parentId; item = current.world.tasks[item.parentId]) if (item.parentId === task.id) return true; return false; };
+          // From the chosen card's own column, when the task has a card in Today beside the overview too.
           const step = (direction: 'down' | 'up' | 'right' | 'left') => {
-            // Past its own sub-tasks, as far as the list goes.
-            for (let id: string | null = task.id, count = 0; count < 500; count++) {
-              const next: string | null = moveSelection(current.navColumns, id, direction);
-              if (!next || next === id) return null;
-              if (next !== task.id && !under(next)) return next;
-              id = next;
+            // Past its own sub-tasks (and its other card), as far as the list goes.
+            for (let id = task.id, at = current.chosenColumn.current, count = 0; count < 500; count++) {
+              const next = moveSelectionAt(current.navColumns, id, direction, at);
+              if (!next || (next.id === id && (next.column ?? null) === at)) return null;
+              if (next.id !== task.id && !under(next.id)) return next;
+              id = next.id; at = next.column ?? null;
             }
             return null;
           };
           const neighbour = (['down', 'up', 'right', 'left'] as const).map(step).find(Boolean);
           current.actions.complete(task);
-          if (!current.openTaskId && neighbour && neighbour !== task.id) current.choose(neighbour);
+          if (!current.openTaskId && neighbour) current.choose(neighbour.id, neighbour.column);
           break;
         }
         case 'complete-next': if (task) current.followUp(task, true); break;
@@ -342,11 +364,12 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
           // itself (its detail, or the page after a popover there closed, keeps the arrows).
           if (current.layout !== 'board' || document.querySelector('.todo-board.dragging')) return;
           if (current.openTaskId && !(event.target instanceof Element && event.target.closest('.todo-board'))) return;
-          const next = moveSelection(current.navColumns, current.openTaskId ?? current.selectedId, shortcut.direction);
-          if (next === (current.openTaskId ?? current.selectedId) && !current.openTaskId) break;
+          const from = current.openTaskId ?? current.selectedId;
+          const next = moveSelectionAt(current.navColumns, from, shortcut.direction, current.chosenColumn.current);
+          if (next?.id === from && next.column === (current.chosenColumn.current ?? next.column) && !current.openTaskId) break;
           if (!next) return;
           if (current.openTaskId) current.closeTask();
-          current.choose(next);
+          current.choose(next.id, next.column);
           break;
         }
         // Enter on a focused button or link is that control's, not the task under the mouse.
@@ -364,6 +387,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
         case 'layout': current.setLayout(otherLayout(current.layout)); break;
         case 'board': case 'calendar': current.setLayout(layoutFor(current.layout, shortcut.action)); break;
         case 'week': case 'month': current.setCalendar(calendarFor(current.layout, current.calendar, shortcut.action)); break;
+        // Only where the checkbox shows: the overview's board, with room for both.
+        case 'today-panel': if (!current.todayAvailable) return; current.showToday(!current.todayShown); break;
       }
       event.preventDefault();
     };
@@ -380,7 +405,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
     onComplete: (task: TodoTask) => { if (!isLocked(task)) actions.complete(task); },
     onCompleteNext: (task: TodoTask) => followUp(task, true),
     onReopen: (task: TodoTask) => { if (!isLocked(task)) void actions.reopen(task); },
-    onSelect: setSelectedId,
+    onSelect: select,
     onMenu: frozen ? undefined : (task: TodoTask, anchor: HTMLElement) => { if (!isLocked(task)) { menuAnchor.current = anchor; setCardMenu({ task, anchor }); } },
     // Files dropped on a card go to its task's description.
     onFiles: frozen ? undefined : (task: TodoTask, files: File[]) => { if (!isLocked(task)) attach(task.id, files); },
@@ -458,7 +483,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
     onDayMove={(task, afterId) => { if (!locked && !isLocked(task)) client.apply([{ op: 'task.move', id: task.id, dayAfterId: afterId }]); }} taskLocked={isLocked}
     onSectionMove={(id, afterId) => client.apply([{ op: 'section.move', id, afterId }])}
     onAddSection={name => project && client.apply([{ op: 'section.create', id: newId(), projectId: project.id, name }])}
-    onSectionMenu={(id, anchor) => { if (locked) return; menuAnchor.current = anchor; setSectionRename(null); setSectionGithub(null); setSectionMenu(id); }} sectionBinding={sectionBinding} completed={doneColumn} />;
+    onSectionMenu={(id, anchor) => { if (locked) return; menuAnchor.current = anchor; setSectionRename(null); setSectionGithub(null); setSectionMenu(id); }} sectionBinding={sectionBinding} completed={doneColumn}
+    today={todayColumns ? { ...todayColumns, context: todayContext, manual: manualOrder(todayDisplay) && !readOnly, note: longDate(today) } : undefined} />;
 
   return <div className={`todo-page ${sidebarOpen ? 'with-sidebar' : ''} ${drawer ? 'drawer' : ''} ${openTaskId ? 'with-detail' : ''}`}>
     {drawer && sidebarOpen && <button type="button" className="todo-scrim" aria-label={t('목록 닫기')} onClick={() => onSidebarOpen(false)} />}
@@ -486,6 +512,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
             <button type="button" className="todo-tool" disabled={start === today} onClick={() => setStart(today)}>{t('오늘')}</button>
             <button type="button" className="icon-button" aria-label={t('다음 주')} onClick={() => setStart(value => addDays(value, 7))}><ChevronRight size={15} /></button>
           </div>}
+          {todayAvailable && <label className="todo-tool todo-today-toggle" title={`${t('오늘 표시')} (T)`}>
+            <input type="checkbox" checked={todayShown} onChange={event => showToday(event.target.checked)} /><span>{t('오늘 표시')}</span></label>}
           {view.kind === 'search' && state.phase === 'ready' && <button type="button" className={`todo-tool ${searchDone ? 'active' : ''}`} aria-pressed={searchDone} onClick={() => setDisplay({ ...display, completed: !display.completed })}><CheckCheck size={14} /><span>{t('완료 포함')}</span></button>}
           {sectionShape.archived > 0 && layout === 'board' && <button type="button" className={`todo-tool ${showArchivedSections ? 'active' : ''}`} aria-pressed={showArchivedSections} onClick={() => setShowArchivedSections(value => !value)}><Archive size={14} /><span>{t('보관된 섹션 {0}', { 0: sectionShape.archived })}</span></button>}
           {state.phase === 'ready' && <DisplayMenu view={view} layout={layout} value={display} onChange={setDisplay} completedAvailable={completedAvailable} />}
