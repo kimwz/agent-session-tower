@@ -43,6 +43,8 @@ export interface BoardColumn {
   count?: number;
   /** How many of its first tasks show, the rest behind "더 보기" (the overview's columns); all when absent. */
   shown?: number;
+  /** Its header is not shown: what holds it names it already (Today's only column beside the overview). */
+  headless?: boolean;
   /** What a task added in this column starts with. */
   preset: { projectId?: string; sectionId?: string | null; dueDate?: string; priority?: TodoPriority };
 }
@@ -447,6 +449,8 @@ export const TODAY_PANEL = 'today-panel';
 
 export function todayPanel(display: DisplaySettings, context: ViewContext): TodayPanel {
   const columns = boardColumns({ kind: 'today' }, display, context).map(column => ({ ...column, id: `today/${column.id}` }));
+  // The panel's own header reads "오늘": a lone Today column under it would say it again (beside overdue it tells them apart).
+  if (columns.length === 1 && columns[0].id === 'today/date:today') columns[0] = { ...columns[0], headless: true };
   return { columns, target: { id: TODAY_PANEL, title: t('오늘'), tasks: [], drop: { kind: 'date', date: context.today }, preset: { dueDate: context.today } } };
 }
 

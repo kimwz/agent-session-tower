@@ -88,7 +88,7 @@
 .todo-column-cards { display:flex; flex-direction:column; gap:8px; min-height:60px; padding:4px 2px 12px; overflow-y:auto; border-radius:10px; transition:background .15s; }
 .todo-column.drop-target .todo-column-cards { background:#15253a80; box-shadow:inset 0 0 0 1px #3e5f8a; }
 .todo-add-card { display:flex; align-items:center; gap:7px; height:32px; padding:0 8px; border-radius:7px; color:#6d7c92; font-size:12px; opacity:0; transition:opacity .12s; }
-.todo-column:hover .todo-add-card, .todo-add-card:focus-visible, .todo-column-cards:only-child .todo-add-card { opacity:1; }
+.todo-column:hover .todo-add-card, .todo-add-card:focus-visible { opacity:1; }
 .todo-add-card:hover { color:#e6a16f; background:#151f2c; }
 .todo-add-section { padding-top:34px; }
 .todo-add-section > button { display:flex; align-items:center; gap:7px; height:34px; padding:0 10px; color:#6d7c92; font-size:12px; border-radius:7px; opacity:.7; }

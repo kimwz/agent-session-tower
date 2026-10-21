@@ -114,13 +114,13 @@ function Column({ column, board, active, over, children }: { column: BoardColumn
   const menu = useRef<HTMLButtonElement>(null);
   const style: CSSProperties = { transform: transformOf(sortable.transform), transition: sortable.transition };
   return <section ref={sortable.setNodeRef} style={style} className={`todo-column ${column.tone ?? ''} ${column.collapsed ? 'collapsed' : ''} ${column.locked ? 'locked' : ''} ${over && active && column.drop ? 'drop-target' : ''} ${sortable.isDragging ? 'dragging' : ''}`} data-column={column.id} aria-label={column.title}>
-    <header className="todo-column-head">
+    {!column.headless && <header className="todo-column-head">
       {board.sections && column.sectionId && !column.locked && <button type="button" className="todo-column-grip" aria-label={t('“{0}” 섹션 옮기기', { 0: column.title })} {...sortable.attributes} {...sortable.listeners}><GripVertical size={13} /></button>}
       <h3>{column.title}{column.sectionId && board.sectionBinding?.(column.sectionId) && <GitHubMark binding={board.sectionBinding(column.sectionId)!} />}</h3>
       <span className="todo-column-count">{column.tasks.length || ''}</span>
       {column.note && <span className="todo-column-note">{column.note}</span>}
       {column.sectionId && <button ref={menu} type="button" className="icon-button todo-column-more" aria-label={t('섹션 메뉴')} onClick={() => menu.current && board.onSectionMenu(column.sectionId!, menu.current)}><MoreHorizontal size={14} /></button>}
-    </header>
+    </header>}
     <div ref={setNodeRef} className="todo-column-cards">
       {children}
       {column.shown !== undefined && column.tasks.length > column.shown
