@@ -217,10 +217,15 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   }, [client, completedScope, completedLabel, doneSince, doneUntil]);
 
   const setDisplay = (value: DisplaySettings) => { setDisplays(previous => ({ ...previous, [key]: value })); saveDisplay(key, value); };
-  // The overview: every project with its sections, each column showing its first cards until opened.
+  // The completed list read for the calendar's days or the overview's today: its project, label and period, never another
+  // list's for a moment while it is read.
+  const shownList = state.completed;
+  const periodList = doneSince && completedScope !== null && shownList?.projectId === completedScope && (shownList.labelId || undefined) === completedLabel
+    && shownList.range?.since === doneSince && shownList.range.until === doneUntil ? shownList : null;
   // This page's completions, and today's once they have come.
-  const doneList = overviewDone && state.completed?.projectId === '' && !state.completed.labelId && state.completed.range?.since === overviewDone.since && state.completed.range.until === overviewDone.until ? state.completed.items : null;
+  const doneList = overviewDone ? periodList?.items ?? null : null;
   const done = useMemo(() => overviewDone ? doneToday({ mine: state.completing, read: doneList ?? [], undoing: state.undoing }, world, overviewDone) : [], [overviewDone, state.completing, state.undoing, doneList, world]);
+  // The overview: every project with its sections, each column showing its first cards until opened.
   const groups = useMemo(() => view.kind !== 'all' ? null : overviewGroups(display, { world, today, start: today, query: '', searchResults: null }, done), [view.kind, display, world, today, done]);
   const overview = useMemo(() => groups && foldGroups(groups, expanded), [groups, expanded]);
   // The overview's board offers Today beside it where there is room for both (not on a phone).
@@ -276,10 +281,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   // A label's are chosen by the server (`readCompleted` with the label).
   const completedItems = display.completed && state.completed && !state.completed.range ? state.completed.items.filter(({ completion }) => view.kind === 'today' ? localToday(new Date(completion.completedAt)) === today : true) : [];
   // The calendar's completions, once those of the days it shows have come.
-  const shownList = state.completed;
-  // The list read for this calendar: its project, label and days, never another list's for a moment while it is read.
-  const calendarList = calendarDone && completedScope !== null && shownList?.projectId === completedScope && (shownList.labelId || undefined) === completedLabel
-    && shownList.range?.since === doneSince && shownList.range?.until === doneUntil ? shownList : null;
+  const calendarList = calendarDone ? periodList : null;
   const doneShown = useMemo(() => calendarList ? calendarDoneItems(calendarList.items, world, locked) : undefined, [calendarList, world, locked]);
   const doneKey = (completionId: string) => `done:${completionId}`;
   const chosenDone = selectedId?.startsWith('done:') ? completedItems.find(item => doneKey(item.completion.id) === selectedId)?.task : undefined;

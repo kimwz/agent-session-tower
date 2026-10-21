@@ -94,10 +94,9 @@
 .todo-add-section > button { display:flex; align-items:center; gap:7px; height:34px; padding:0 10px; color:#6d7c92; font-size:12px; border-radius:7px; opacity:.7; }
 .todo-add-section > button:hover { opacity:1; color:#e6a16f; background:#151f2c; }
 .todo-add-section input { width:100%; height:34px; padding:0 10px; border:1px solid #3a5476; border-radius:8px; background:#0a111b; color:var(--text); }
-.todo-completed-column .todo-card { opacity:.6; }
+.todo-completed-column .todo-card, .todo-done-cards .todo-card { opacity:.6; }
 /* Done today on the overview and Today beside it: struck through (.todo-card.done) under the open cards and the add button. */
 .todo-done-cards { display:flex; flex-direction:column; gap:8px; padding:0 2px 12px; }
-.todo-done-cards .todo-card { opacity:.6; }
 .todo-board.dragging, .todo-board.dragging .todo-group-columns { scroll-snap-type:none !important; }
 /* Today beside the overview: two areas side by side, each scrolling on its own, one drag area (BoardView `today`). */
 .todo-board-split { display:flex; flex:1; min-height:0; }

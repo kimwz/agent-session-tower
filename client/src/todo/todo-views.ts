@@ -109,16 +109,18 @@ type DoneItem = { completion: TodoCompletion; task: TodoTask };
  * (`mine`, `TodoState.completing`) before the list read for the range (`read`), none being taken back (`undoing`). A
  * completion that came with its parent's shows as the parent; one whose task is deleted or open again (here, or elsewhere
  * and read since) does not, but a repeating task stays open and its completion shows for the date that was done; nothing
- * of an archived project or section does. Where a task is placed comes from the item, which the server answers fresh:
- * the page keeps completed tasks as last seen.
+ * of an archived project or section does. What the list says of a task (where it is, whether it is deleted) is the
+ * server's fresh answer, and the page keeps completed tasks as last seen: only this page's own completions follow the
+ * page's copy, deleted here included, until the list is read again.
  */
 export function doneToday(lists: { mine: readonly DoneItem[]; read: readonly DoneItem[]; undoing: readonly string[] }, world: TodoWorld, range: { since: string; until: string }): DoneCard[] {
   const live = liveProjects(world), shelved = archivedSectionIds(world), undoing = new Set(lists.undoing);
   const cards = new Map<string, DoneCard>();
-  for (const { completion, task } of [...lists.mine, ...lists.read]) {
-    const known = world.tasks[task.id];
+  const mine = new Set(lists.mine);
+  for (const item of [...lists.mine, ...lists.read]) {
+    const { completion, task } = item, known = world.tasks[task.id];
     if (completion.causeId || undoing.has(completion.id) || cards.has(task.id) || completion.completedAt < range.since || completion.completedAt >= range.until) continue;
-    if (task.deletedAt || known?.deletedAt || (isOpen(known) && !known!.recurrence) || !live.has(task.projectId) || (task.sectionId && shelved.has(task.sectionId))) continue;
+    if (task.deletedAt || (mine.has(item) && known?.deletedAt) || (isOpen(known) && !known!.recurrence) || !live.has(task.projectId) || (task.sectionId && shelved.has(task.sectionId))) continue;
     cards.set(task.id, { task: { ...task, completedAt: completion.completedAt }, completionId: completion.id, date: completion.occurrenceDate ?? task.dueDate });
   }
   return [...cards.values()].sort((a, b) => compare(b.task.completedAt!, a.task.completedAt!));

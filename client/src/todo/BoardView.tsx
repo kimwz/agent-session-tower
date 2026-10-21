@@ -124,11 +124,10 @@ function SortableCard({ task, column, dndId, ...props }: { task: TodoTask; colum
  * Cards done today: shown and opened, never picked up, chosen by the keyboard, or given files. A column's sit under its
  * cards and add button, outside the cards' drop area: let go there, a card goes where it would on the column's header.
  */
-function DoneCards({ cards, board, context }: { cards: readonly DoneCard[]; board: BoardProps; context: CardContext }) {
-  return <>{cards.map(card => <TaskCard key={card.completionId} task={card.task} context={context} {...board.card} onSelect={undefined} onMenu={undefined} onFiles={undefined}
-    readOnly={board.card.readOnly || board.taskLocked?.(card.task)} onReopen={board.onReopen && (() => board.onReopen!(card))} />)}</>;
+function DoneCards({ cards, board, context }: { cards: readonly DoneCard[] | undefined; board: BoardProps; context: CardContext }) {
+  return cards?.length ? <div className="todo-done-cards">{cards.map(card => <TaskCard key={card.completionId} task={card.task} context={context} {...board.card} onSelect={undefined} onMenu={undefined} onFiles={undefined}
+    readOnly={board.card.readOnly || board.taskLocked?.(card.task)} onReopen={board.onReopen && (() => board.onReopen!(card))} />)}</div> : null;
 }
-
 
 function Column({ column, board, active, over, children }: { column: BoardColumn; board: BoardProps; active: boolean; over: boolean; children: ReactNode }) {
   const { setNodeRef } = useDroppable({ id: columnDrop(column.id), data: { type: 'column', column } });
@@ -150,7 +149,7 @@ function Column({ column, board, active, over, children }: { column: BoardColumn
         : board.onFold && !inTodayPanel(column) && column.tasks.length > OVERVIEW_SHOWN && <button type="button" className="todo-fold-cards" onClick={() => board.onFold?.(column.id)}>{t('접기')}</button>}
       {column.drop && <button type="button" className="todo-add-card" onClick={() => board.onAdd(column)}><Plus size={14} />{t('작업 추가')}</button>}
     </div>
-    {!!column.done?.length && <div className="todo-done-cards"><DoneCards cards={column.done} board={board} context={board.context} /></div>}
+    <DoneCards cards={column.done} board={board} context={board.context} />
   </section>;
 }
 
@@ -318,7 +317,7 @@ export function BoardView(board: BoardProps) {
         header={<header className="todo-today-head"><h3>{t('오늘')}</h3><span className="todo-column-note">{board.today.note}</span><span className="todo-column-count">{todayCount || ''}</span></header>}
         after={<>
           {todayCount === 0 && !board.today.columns.some(column => column.drop) && <button type="button" className="todo-add-card" onClick={() => board.onAdd(board.today!.target)}><Plus size={14} />{t('작업 추가')}</button>}
-          {board.today.done.length > 0 && <div className="todo-done-cards"><DoneCards cards={board.today.done} board={board} context={board.today.context} /></div>}
+          <DoneCards cards={board.today.done} board={board} context={board.today.context} />
         </>}>
         {board.today.columns.map(column => renderColumn(column, 'today'))}
       </TodayArea>
