@@ -7,7 +7,7 @@ import type { TodoGitHubBinding, TodoProject, TodoTask } from '../../../shared/t
 import { translate as t } from '../i18n/i18n';
 import { TaskCard, type TaskCardProps } from './TaskCard';
 import { colorOf } from './todo-format';
-import { dayAfterOf, dropPlace, inTodayPanel, OVERVIEW_SHOWN, sectionDropAfter, shownTasks, TODAY_PANEL, type BoardColumn, type BoardGroup, type CardContext, type TodayPanel } from './todo-views';
+import { dayAfterOf, dropPlace, inTodayPanel, OVERVIEW_SHOWN, sectionDropAfter, shownTasks, TODAY_PANEL, todayPanelDrop, type BoardColumn, type BoardGroup, type CardContext, type TodayPanel } from './todo-views';
 import { GitHubMark } from './GitHubMark';
 
 /**
@@ -194,7 +194,7 @@ export function BoardView(board: BoardProps) {
     if (data?.type === 'task') { setActiveTask(data.task as TodoTask); setFromColumn(columnOf(data) ?? null); }
   };
   const stop = () => { setActiveTask(null); setFromColumn(null); setOverColumn(null); setDragging(false); };
-  const intoToday = (target: BoardColumn | undefined, source: BoardColumn | null | undefined) => !!board.today && !!target && !!source && inTodayPanel(target) && !inTodayPanel(source);
+  const intoToday = (target: Pick<BoardColumn, 'id'> | undefined, source: BoardColumn | null | undefined) => !!board.today && !!target && !!source && todayPanelDrop(source, target) === 'today';
   /** Whether cards are put in order by hand in `column`: the Today panel's as the Today list keeps them. */
   const manualIn = (column: BoardColumn) => inTodayPanel(column) ? !!board.today?.manual : manual;
   const onOver = (event: DragOverEvent) => setOverColumn(columnOf(event.over?.data.current)?.id ?? null);
@@ -212,7 +212,11 @@ export function BoardView(board: BoardProps) {
     if (data?.type !== 'task') return;
     const task = data.task as TodoTask, source = columnOf(data)!, target = columnOf(over.data.current);
     const overTask = over.data.current?.type === 'task' ? (over.data.current.task as TodoTask) : undefined;
-    if (intoToday(target, source)) { board.onDrop(task, board.today!.target, undefined); return; }
+    if (board.today && target) {
+      const drop = todayPanelDrop(source, target);
+      if (drop === 'stay') return;
+      if (drop === 'today') { board.onDrop(task, board.today.target, undefined); return; }
+    }
     // In a column of several dates (overdue, the next days, later), a card put among its own date's tasks takes its
     // place there; it never changes its date by being dropped in the column it came from.
     if (target && manualIn(target) && !target.drop && target.id === source.id && !target.locked && overTask) {
@@ -226,7 +230,7 @@ export function BoardView(board: BoardProps) {
   };
 
   // A card from the overview over the Today panel lights the panel, not the column of it under the pointer.
-  const overToday = !!overColumn && !!activeTask && intoToday({ id: overColumn } as BoardColumn, fromColumn);
+  const overToday = !!overColumn && !!activeTask && intoToday({ id: overColumn }, fromColumn);
   const renderColumn = (column: BoardColumn, area?: 'today') => <Column key={column.id} column={column} board={board} active={!!activeTask} over={overColumn === column.id && !overToday}>
     <SortableContext items={shownTasks(column).map(task => cardId(task.id, area))} strategy={verticalListSortingStrategy}>
       {shownTasks(column).map(task => <SortableCard key={task.id} dndId={cardId(task.id, area)} task={task} column={column.locked || !board.taskLocked?.(task) ? column : { ...column, locked: true }} context={area ? board.today!.context : context} selected={board.selectedId === task.id} {...board.card}

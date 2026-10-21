@@ -7,7 +7,7 @@ import { TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
 import { forgetFoldedForTests, setTodayPanelShown, todayPanelShown } from '../../../client/src/todo/todo-prefs.js';
 import { readShortcut } from '../../../client/src/todo/todo-shortcuts.js';
-import { cardContext, defaultDisplay, dropOps, foldGroups, inTodayPanel, moveSelection, moveSelectionAt, overviewGroups, TODAY_PANEL, todayPanel, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { cardContext, defaultDisplay, dropOps, foldGroups, inTodayPanel, moveSelection, moveSelectionAt, overviewGroups, TODAY_PANEL, todayPanel, todayPanelDrop, type ViewContext } from '../../../client/src/todo/todo-views.js';
 import { overview, project, task } from './fixtures.js';
 
 const today = '2026-10-17';
@@ -63,6 +63,19 @@ test('the panel shows the Today list as its display lays it out, and dates today
   assert.deepEqual(byPriority.target, panel.target, 'whatever its columns, the panel dates today');
   assert.deepEqual(dropOps(world.tasks.later, panel.target.drop!), [{ op: 'task.update', id: 'later', patch: { dueDate: today } }]);
   assert.deepEqual(dropOps(world.tasks.now, panel.target.drop!), [], 'already today');
+});
+
+test('a card from the overview let go anywhere in the panel is dated today; one moved within the panel follows the Today list', () => {
+  const panel = { id: TODAY_PANEL }, today = { id: 'today/date:today' }, overdue = { id: 'today/date:overdue' }, section = { id: 'tower/section:none' };
+  assert.equal(todayPanelDrop(section, panel), 'today', "the panel's empty space");
+  assert.equal(todayPanelDrop(section, today), 'today');
+  assert.equal(todayPanelDrop(section, overdue), 'today', 'even the overdue column: the task lands in Today');
+  // The Today list has no empty space of its own to drop on: nothing changes, never first or a new date.
+  assert.equal(todayPanelDrop(overdue, panel), 'stay');
+  assert.equal(todayPanelDrop(today, panel), 'stay');
+  assert.equal(todayPanelDrop(overdue, today), 'board', 'within the panel, as on the Today list');
+  assert.equal(todayPanelDrop(today, section), 'board', 'out to the overview, by its rules');
+  assert.equal(todayPanelDrop(section, section), 'board');
 });
 
 test('a card let go in the panel lands there, never on an overview card scrolled under it', () => {

@@ -220,7 +220,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   // The overview's board offers Today beside it where there is room for both (not on a phone).
   const todayAvailable = view.kind === 'all' && layout === 'board' && !mobile && state.phase === 'ready';
   // As the Today list shows it, by that list's own display.
-  const todayDisplay = displays.today ?? loadDisplay('today', defaultDisplay({ kind: 'today' }));
+  const todayDisplay = useMemo(() => displays.today ?? loadDisplay('today', defaultDisplay({ kind: 'today' })), [displays.today]);
   const todayColumns = useMemo(() => todayAvailable && todayShown ? todayPanel(todayDisplay, { world, today, start: today, query: '', searchResults: null }) : null, [todayAvailable, todayShown, todayDisplay, world, today]);
   const sectionShape = useMemo(() => {
     if (overview) return { columns: overview.flatMap(group => group.columns), archived: 0 };

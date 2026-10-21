@@ -453,6 +453,17 @@ export function todayPanel(display: DisplaySettings, context: ViewContext): Toda
 /** Whether `column` is the Today panel or one of its columns. */
 export const inTodayPanel = (column: Pick<BoardColumn, 'id'>) => column.id === TODAY_PANEL || column.id.startsWith('today/');
 
+/**
+ * What a card let go on `target` does where the Today panel shows: one from the overview anywhere in the panel is dated
+ * today (`today`); one moved within the panel and let go on its empty space stays (`stay`), as the Today list has no
+ * such place; anything else follows the board's own rules (`board`).
+ */
+export function todayPanelDrop(source: Pick<BoardColumn, 'id'>, target: Pick<BoardColumn, 'id'>): 'today' | 'stay' | 'board' {
+  if (!inTodayPanel(target)) return 'board';
+  if (!inTodayPanel(source)) return 'today';
+  return target.id === TODAY_PANEL ? 'stay' : 'board';
+}
+
 /** The overview's columns as they show: each its first cards (`OVERVIEW_SHOWN`), but those opened (`expanded`) whole. */
 export const foldGroups = (groups: readonly BoardGroup[], expanded: ReadonlySet<string>): BoardGroup[] =>
   groups.map(group => ({ ...group, columns: group.columns.map(column => expanded.has(column.id) ? column : { ...column, shown: OVERVIEW_SHOWN }) }));
