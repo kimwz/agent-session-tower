@@ -153,9 +153,9 @@ function AddSection({ onAdd }: { onAdd: (name: string) => void }) {
 }
 
 /** The Today panel's sub-task zone: shown at all times, marked while a card is dragged, lit with one over it. */
-function SubtaskZone({ active, over }: { active: boolean; over: boolean }) {
-  const { setNodeRef } = useDroppable({ id: TODAY_SUBTASK, data: { type: 'subtask' } });
-  return <div ref={setNodeRef} className={`todo-subtask-zone ${active ? 'active' : ''} ${over ? 'drop-target' : ''}`}>
+function SubtaskZone({ active }: { active: boolean }) {
+  const { setNodeRef, isOver } = useDroppable({ id: TODAY_SUBTASK, data: { type: 'subtask' } });
+  return <div ref={setNodeRef} className={`todo-subtask-zone ${active ? 'active' : ''} ${active && isOver ? 'drop-target' : ''}`}>
     <ListPlus size={14} /><b>{t('하위 작업 만들기')}</b><span>{t('놓으면 오늘 할 일로')}</span>
   </div>;
 }
@@ -177,7 +177,6 @@ export function BoardView(board: BoardProps) {
   // Anything dragged, a card or a section: the arrow keys are the drag's meanwhile.
   const [dragging, setDragging] = useState(false);
   const [overColumn, setOverColumn] = useState<string | null>(null);
-  const [overSubtask, setOverSubtask] = useState(false);
   // The column the dragged card came from: one from the overview over the Today panel is dated today, whatever takes it.
   const [fromColumn, setFromColumn] = useState<BoardColumn | null>(null);
   const [current, setCurrent] = useState(0);
@@ -205,11 +204,11 @@ export function BoardView(board: BoardProps) {
     const data = event.active.data.current;
     if (data?.type === 'task') { setActiveTask(data.task as TodoTask); setFromColumn(columnOf(data) ?? null); }
   };
-  const stop = () => { setActiveTask(null); setFromColumn(null); setOverColumn(null); setOverSubtask(false); setDragging(false); };
+  const stop = () => { setActiveTask(null); setFromColumn(null); setOverColumn(null); setDragging(false); };
   const intoToday = (target: Pick<BoardColumn, 'id'> | undefined, source: BoardColumn | null | undefined) => !!board.today && !!target && !!source && todayPanelDrop(source, target) === 'today';
   /** Whether cards are put in order by hand in `column`: the Today panel's as the Today list keeps them. */
   const manualIn = (column: BoardColumn) => inTodayPanel(column) ? !!board.today?.manual : manual;
-  const onOver = (event: DragOverEvent) => { setOverColumn(columnOf(event.over?.data.current)?.id ?? null); setOverSubtask(event.over?.id === TODAY_SUBTASK); };
+  const onOver = (event: DragOverEvent) => setOverColumn(columnOf(event.over?.data.current)?.id ?? null);
   const onEnd = (event: DragEndEvent) => {
     stop();
     const { active, over } = event;
@@ -224,7 +223,7 @@ export function BoardView(board: BoardProps) {
     if (data?.type !== 'task') return;
     const task = data.task as TodoTask, source = columnOf(data)!, target = columnOf(over.data.current);
     // The sub-task zone, from the overview or the panel alike: the task itself stays as it is.
-    if (over.id === TODAY_SUBTASK) { if (!source.locked) board.onSubtask?.(task); return; }
+    if (over.id === TODAY_SUBTASK) { board.onSubtask?.(task); return; }
     const overTask = over.data.current?.type === 'task' ? (over.data.current.task as TodoTask) : undefined;
     if (board.today && target) {
       const drop = todayPanelDrop(source, target);
@@ -284,7 +283,7 @@ export function BoardView(board: BoardProps) {
     {groups ? board.today ? <div className="todo-board-split">
       <TodayArea panel={board.today} over={overToday} count={todayCount}>
         <header className="todo-today-head"><h3>{t('오늘')}</h3><span className="todo-column-note">{board.today.note}</span><span className="todo-column-count">{todayCount || ''}</span></header>
-        {board.onSubtask && <SubtaskZone active={!!activeTask} over={overSubtask} />}
+        {board.onSubtask && <SubtaskZone active={!!activeTask} />}
         {board.today.columns.map(column => renderColumn(column, 'today'))}
       </TodayArea>
       {overviewBoard}

@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createElement } from 'react';
+import { createElement, type ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { BoardView, collisionsFor } from '../../../client/src/todo/BoardView.js';
-import { subtaskPreset } from '../../../client/src/todo/QuickAdd.js';
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
+import type { TodoTask } from '../../../shared/todo/types.js';
 import { forgetFoldedForTests, setTodayPanelShown, todayPanelShown } from '../../../client/src/todo/todo-prefs.js';
 import { readShortcut } from '../../../client/src/todo/todo-shortcuts.js';
-import { cardContext, defaultDisplay, dropOps, foldGroups, inTodayPanel, moveSelection, moveSelectionAt, overviewGroups, TODAY_PANEL, TODAY_SUBTASK, todayPanel, todayPanelDrop, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { cardContext, defaultDisplay, dropOps, foldGroups, inTodayPanel, moveSelection, moveSelectionAt, overviewGroups, TODAY_PANEL, TODAY_SUBTASK, todayPanel, todayPanelDrop, type BoardColumn, type ViewContext } from '../../../client/src/todo/todo-views.js';
 import { overview, project, task } from './fixtures.js';
 
 const today = '2026-10-17';
@@ -79,10 +79,11 @@ test('a card from the overview let go anywhere in the panel is dated today; one 
   assert.equal(todayPanelDrop(section, section), 'board');
 });
 
-test('a card let go in the panel lands there, never on an overview card scrolled under it', () => {
+test('a card let go in the panel lands there (or on its sub-task zone), never on an overview card scrolled under it', () => {
   const rect = (left: number, top: number, width: number, height: number) => ({ left, top, width, height, right: left + width, bottom: top + height });
   const droppableRects = new Map<string, ReturnType<typeof rect>>([
     [TODAY_PANEL, rect(0, 0, 320, 800)],
+    [TODAY_SUBTASK, rect(30, 4, 280, 30)],
     ['column:today/date:today', rect(30, 40, 280, 200)],
     ['column:tower/section:none', rect(340, 40, 280, 200)],
     // An overview card scrolled out of sight sideways: it still measures under the panel.
@@ -92,6 +93,7 @@ test('a card let go in the panel lands there, never on an overview card scrolled
   const at = (x: number, y: number) => collisionsFor(true)({ active: { id: 'task:later' } as never, collisionRect: rect(x, y, 10, 10), droppableRects: droppableRects as never, droppableContainers, pointerCoordinates: { x, y } }).map(item => item.id);
   assert.deepEqual(at(150, 320), [TODAY_PANEL], "the panel's empty space, over the hidden card");
   assert.deepEqual(at(150, 100), ['column:today/date:today'], "a panel column wins over the panel");
+  assert.deepEqual(at(150, 20), [TODAY_SUBTASK], 'the sub-task zone, likewise');
   assert.deepEqual(at(400, 100), ['column:tower/section:none'], 'the overview as before');
 });
 
@@ -166,20 +168,53 @@ test("the panel's sub-task zone shows under its header with the handler, and now
   assert.doesNotMatch(renderToStaticMarkup(createElement(BoardView, { ...props, onSubtask() {} })), /todo-subtask-zone/, 'without the panel');
 });
 
-test('a card let go on the sub-task zone lands there, over the panel around it; the zone presets today, the menu no date', () => {
-  const rect = (left: number, top: number, width: number, height: number) => ({ left, top, width, height, right: left + width, bottom: top + height });
-  const droppableRects = new Map<string, ReturnType<typeof rect>>([
-    [TODAY_PANEL, rect(0, 0, 320, 800)],
-    [TODAY_SUBTASK, rect(30, 36, 280, 34)],
-    ['column:today/date:today', rect(30, 80, 280, 200)],
-    ['column:tower/section:none', rect(340, 40, 280, 200)],
-  ]);
-  const droppableContainers = [...droppableRects.keys()].map(id => ({ id, rect: { current: droppableRects.get(id) }, data: { current: {} }, disabled: false, node: { current: null } })) as never[];
-  const at = (x: number, y: number) => collisionsFor(true)({ active: { id: 'task:later' } as never, collisionRect: rect(x, y, 10, 10), droppableRects: droppableRects as never, droppableContainers, pointerCoordinates: { x, y } }).map(item => item.id);
-  assert.deepEqual(at(150, 50), [TODAY_SUBTASK]);
-  assert.deepEqual(at(150, 120), ['column:today/date:today']);
-  assert.deepEqual(at(150, 400), [TODAY_PANEL]);
-  assert.deepEqual(at(400, 100), ['column:tower/section:none']);
-  assert.deepEqual(subtaskPreset('parent', today), { parentId: 'parent', dueDate: today });
-  assert.deepEqual(subtaskPreset('parent'), { parentId: 'parent' });
+/** What a component returns for these props, rendered once so its hooks run: its handlers can then be called directly. */
+function rendered<P extends object>(component: (props: P) => ReactElement, props: P): ReactElement {
+  let tree: ReactElement | undefined;
+  renderToStaticMarkup(createElement(() => { tree = component(props); return tree; }));
+  return tree!;
+}
+
+test('a card let go on the sub-task zone asks for its sub-task, from the overview or the panel, and keeps its date', () => {
+  const groups = foldGroups(overviewGroups(defaultDisplay({ kind: 'all' }), context), new Set());
+  const panel = todayPanel(defaultDisplay({ kind: 'today' }), context);
+  const subtasks: string[] = [], drops: [string, string][] = [];
+  const board = rendered(BoardView, {
+    columns: groups.flatMap(group => group.columns), groups, context: cardContext(world, today, false), manual: true, sections: true, mobile: false, selectedId: null,
+    card: { onOpen() {}, onComplete() {}, onCompleteNext() {} }, onAdd() {}, onSectionMove() {}, onAddSection() {}, onSectionMenu() {},
+    onDrop: (task: TodoTask, column: BoardColumn) => drops.push([task.id, column.id]), onSubtask: (task: TodoTask) => subtasks.push(task.id),
+    today: { ...panel, context: cardContext(world, today, true), manual: true, note: 'Oct 17' },
+  });
+  const end = (board.props as { onDragEnd: (event: unknown) => void }).onDragEnd;
+  const card = (task: TodoTask, column: Pick<BoardColumn, 'id'>) => ({ id: `task:${task.id}`, data: { current: { type: 'task', task, column } } });
+  end({ active: card(world.tasks.later, { id: 'tower/section:none' }), over: { id: TODAY_SUBTASK, data: { current: { type: 'subtask' } } } });
+  end({ active: card(world.tasks.now, panel.columns[1]), over: { id: TODAY_SUBTASK, data: { current: { type: 'subtask' } } } });
+  assert.deepEqual(subtasks, ['later', 'now']);
+  assert.deepEqual(drops, [], 'neither is moved or dated');
+  // The rest of the panel dates a card from the overview today, as before.
+  end({ active: card(world.tasks.later, { id: 'tower/section:none' }), over: { id: TODAY_PANEL, data: { current: { type: 'column', column: panel.target } } } });
+  assert.deepEqual(drops, [['later', TODAY_PANEL]]);
+  assert.deepEqual(subtasks, ['later', 'now']);
+});
+
+test("a mouse's right-click on a card opens its menu at the pointer; a touch, a sub-task's row and a read-only card keep the browser's", () => {
+  (globalThis as { Element?: unknown }).Element ??= class {};
+  const Element = (globalThis as unknown as { Element: new () => object }).Element;
+  const menus: [string, unknown, unknown][] = [];
+  const button = { name: 'more' };
+  const contextMenu = (readOnly: boolean) => (rendered(TaskCard, { task: world.tasks.now, context: cardContext(world, today, true), onOpen() {}, onComplete() {}, onCompleteNext() {}, readOnly,
+    onMenu: (task: TodoTask, anchor: HTMLElement, at?: { x: number; y: number }) => menus.push([task.id, anchor, at]) }).props as { onContextMenu: (event: unknown) => void }).onContextMenu;
+  const press = (readOnly: boolean, patch: { pointerType?: string; on?: string } = {}) => {
+    let prevented = false;
+    const target = Object.assign(new Element(), { closest: (selector: string) => patch.on && selector.includes(patch.on) ? {} : null });
+    contextMenu(readOnly)({ currentTarget: { querySelector: () => button }, target, nativeEvent: { pointerType: patch.pointerType ?? 'mouse' }, clientX: 120, clientY: 340, preventDefault: () => { prevented = true; } });
+    return prevented;
+  };
+  assert.equal(press(false), true);
+  assert.deepEqual(menus, [['now', button, { x: 120, y: 340 }]], "anchored to the card's … button, placed at the pointer");
+  assert.equal(press(false, { pointerType: 'touch' }), false, "a held touch is the board's drag");
+  assert.equal(press(false, { on: '.todo-card-subtasks' }), false, "a sub-task's row is another task");
+  assert.equal(press(false, { on: 'a' }), false, 'a link keeps its own menu');
+  assert.equal(press(true), false, 'read-only');
+  assert.equal(menus.length, 1);
 });

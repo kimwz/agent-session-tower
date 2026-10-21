@@ -26,12 +26,6 @@ import { projectTree } from './todo-views';
 
 export interface QuickAddPreset { projectId?: string; sectionId?: string | null; dueDate?: string; dueTime?: string; durationMin?: number; priority?: TodoPriority; labelIds?: string[]; parentId?: string }
 
-/**
- * Adding a sub-task of `parentId`: the dialog in its sub-task form (it takes the parent's project and section), dated
- * `dueDate` when given (the Today panel's zone gives today).
- */
-export const subtaskPreset = (parentId: string, dueDate?: string): QuickAddPreset => ({ parentId, ...(dueDate ? { dueDate } : {}) });
-
 interface Manual { date?: DateValue; priority?: TodoPriority; labelIds?: string[]; deadline?: string | null; place?: { projectId: string; sectionId: string | null } }
 
 const KIND_LABELS: Record<QuickAddKind, string> = { project: '프로젝트', section: '섹션', label: '라벨', priority: '우선순위', deadline: '마감일', repeat: '반복', date: '날짜', time: '시간', duration: '소요 시간' };

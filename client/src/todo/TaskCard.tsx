@@ -153,7 +153,7 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
       // A mouse's right-click opens the card's menu where the button would. A held touch is the board's drag, and a link
       // or a sub-task's row (another task) keeps the browser's own menu.
       const button = event.currentTarget.querySelector<HTMLElement>(':scope > .todo-card-main > .todo-card-more');
-      if (!onMenu || !button || (event.nativeEvent as Partial<PointerEvent>).pointerType === 'touch') return;
+      if (!onMenu || readOnly || !button || (event.nativeEvent as Partial<PointerEvent>).pointerType === 'touch') return;
       if (event.target instanceof Element && event.target.closest('a, .todo-card-subtasks')) return;
       event.preventDefault();
       onMenu(task, button, { x: event.clientX, y: event.clientY });

@@ -9,7 +9,7 @@ import { BoardView } from './BoardView';
 import { DisplayMenu, loadDisplay, saveDisplay } from './DisplayMenu';
 import { GitHubBindingDialog } from './GitHubBindingDialog';
 import { Menu, Popover, type MenuItem } from './Popover';
-import { QuickAdd, subtaskPreset, type QuickAddPreset } from './QuickAdd';
+import { QuickAdd, type QuickAddPreset } from './QuickAdd';
 import { TaskCard } from './TaskCard';
 import { shareItems, TaskDetail, type DetailTab } from './TaskDetail';
 import { TodoSidebar } from './TodoSidebar';
@@ -261,9 +261,10 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
     if (readOnly || lockedTask(task.id) || (complete && task.completedAt)) return;
     setQuick({ preset: { projectId: task.projectId, sectionId: task.sectionId }, follow: { taskId: task.id, complete } });
   }, [readOnly, lockedTask]);
+  // The dialog in its sub-task form (the sub-task takes its parent's project and section), dated when given (Today's zone).
   const addSubtask = useCallback((task: TodoTask, dueDate?: string) => {
     if (readOnly || lockedTask(task.id) || task.completedAt) return;
-    setQuick({ preset: subtaskPreset(task.id, dueDate), follow: null });
+    setQuick({ preset: { parentId: task.id, dueDate }, follow: null });
   }, [readOnly, lockedTask]);
 
   // The completed list as it shows (the list's own filter), each row chosen by its completion: a repeating task has several.
