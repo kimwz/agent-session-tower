@@ -7,7 +7,7 @@ import type { TodoGitHubBinding, TodoProject, TodoTask } from '../../../shared/t
 import { translate as t } from '../i18n/i18n';
 import { TaskCard, type TaskCardProps } from './TaskCard';
 import { colorOf } from './todo-format';
-import { dayAfterOf, dropPlace, inTodayPanel, OVERVIEW_SHOWN, sectionDropAfter, shownTasks, TODAY_PANEL, TODAY_SUBTASK, todayPanelDrop, type BoardColumn, type BoardGroup, type CardContext, type TodayPanel } from './todo-views';
+import { dayAfterOf, dropPlace, inTodayPanel, OVERVIEW_SHOWN, sectionDropAfter, shownTasks, TODAY_PANEL, TODAY_SUBTASK, todayPanelDrop, type BoardColumn, type BoardGroup, type CardContext, type DoneCard, type TodayPanel } from './todo-views';
 import { GitHubMark } from './GitHubMark';
 
 /**
@@ -19,6 +19,8 @@ import { GitHubMark } from './GitHubMark';
  * goes to another project's section, and a section moves only among its own project's. Beside it, Today (`today`) shows
  * in an area of its own in the same drag area: a card from the overview let go anywhere there is dated today, and any card
  * let go on its "하위 작업 만들기" zone gets a sub-task due today instead (`onSubtask`).
+ *
+ * On both, what was done today stays, struck through, under a column's open cards and its add button (`DoneCard`).
  */
 
 export interface BoardProps {
@@ -41,6 +43,8 @@ export interface BoardProps {
   selectedId: string | null;
   card: Omit<TaskCardProps, 'task' | 'context' | 'selected'>;
   onAdd: (column: BoardColumn) => void;
+  /** A card done today, its check pressed: the task opens again. */
+  onReopen?: (card: DoneCard) => void;
   onDrop: (task: TodoTask, column: BoardColumn, afterId: string | null | undefined) => void;
   /** A card put in order among its own date's tasks in a column of several dates. */
   onDayMove?: (task: TodoTask, afterId: string | null) => void;
@@ -116,6 +120,15 @@ function SortableCard({ task, column, dndId, ...props }: { task: TodoTask; colum
   </div>;
 }
 
+/**
+ * Cards done today: shown and opened, never picked up, chosen by the keyboard, or given files. A column's sit under its
+ * cards and add button, outside the cards' drop area: let go there, a card goes where it would on the column's header.
+ */
+function DoneCards({ cards, board, context }: { cards: readonly DoneCard[] | undefined; board: BoardProps; context: CardContext }) {
+  return cards?.length ? <div className="todo-done-cards">{cards.map(card => <TaskCard key={card.completionId} task={card.task} context={context} {...board.card} onSelect={undefined} onMenu={undefined} onFiles={undefined}
+    readOnly={board.card.readOnly || board.taskLocked?.(card.task)} onReopen={board.onReopen && (() => board.onReopen!(card))} />)}</div> : null;
+}
+
 function Column({ column, board, active, over, children }: { column: BoardColumn; board: BoardProps; active: boolean; over: boolean; children: ReactNode }) {
   const { setNodeRef } = useDroppable({ id: columnDrop(column.id), data: { type: 'column', column } });
   const sortable = useSortable({ id: sectionDrag(column.sectionId ?? column.id), data: { type: 'section', column }, disabled: !board.sections || !column.sectionId });
@@ -136,6 +149,7 @@ function Column({ column, board, active, over, children }: { column: BoardColumn
         : board.onFold && !inTodayPanel(column) && column.tasks.length > OVERVIEW_SHOWN && <button type="button" className="todo-fold-cards" onClick={() => board.onFold?.(column.id)}>{t('접기')}</button>}
       {column.drop && <button type="button" className="todo-add-card" onClick={() => board.onAdd(column)}><Plus size={14} />{t('작업 추가')}</button>}
     </div>
+    <DoneCards cards={column.done} board={board} context={board.context} />
   </section>;
 }
 
@@ -169,13 +183,19 @@ function SubtaskZone() {
   </div>;
 }
 
-/** The Today panel: its own scroll area, all of it a target for cards from the overview; `zone` stands over its header and above it. */
-export function TodayArea({ panel, over, count, zone, children }: { panel: TodayPanel; over: boolean; count: number; zone: boolean; children: ReactNode }) {
+/**
+ * The Today panel: its own scroll area, all of it a target for cards from the overview; `zone` stands over its header and
+ * above it. Under its `header`, with nothing left to do, it says so first; then its columns (`children`), and `after` them
+ * an add button when no column takes one, and what was done.
+ */
+export function TodayArea({ panel, over, count, zone, header, after, children }: { panel: TodayPanel; over: boolean; count: number; zone: boolean; header?: ReactNode; after?: ReactNode; children: ReactNode }) {
   const { setNodeRef } = useDroppable({ id: TODAY_PANEL, data: { type: 'column', column: panel.target } });
   return <div className="todo-today-wrap">
-    <section ref={setNodeRef} className={`todo-board todo-today-panel ${over ? 'drop-target' : ''}`} aria-label={t('오늘')}>
-      {children}
+    <section ref={setNodeRef} className={`todo-board todo-today-panel ${over ? 'drop-target' : ''} ${count === 0 ? 'empty' : ''}`} aria-label={t('오늘')}>
+      {header}
       {count === 0 && <p className="todo-muted todo-today-empty">{t('오늘 할 일을 모두 끝냈습니다.')}</p>}
+      {children}
+      {after}
     </section>
     {zone && <SubtaskZone />}
   </div>;
@@ -293,8 +313,12 @@ export function BoardView(board: BoardProps) {
     </div>}
     {/* Today and the overview side by side, each scrolling on its own. */}
     {groups ? board.today ? <div className="todo-board-split">
-      <TodayArea panel={board.today} over={overToday} count={todayCount} zone={!!activeTask && !!board.onSubtask}>
-        <header className="todo-today-head"><h3>{t('오늘')}</h3><span className="todo-column-note">{board.today.note}</span><span className="todo-column-count">{todayCount || ''}</span></header>
+      <TodayArea panel={board.today} over={overToday} count={todayCount} zone={!!activeTask && !!board.onSubtask}
+        header={<header className="todo-today-head"><h3>{t('오늘')}</h3><span className="todo-column-note">{board.today.note}</span><span className="todo-column-count">{todayCount || ''}</span></header>}
+        after={<>
+          {todayCount === 0 && !board.today.columns.some(column => column.drop) && <button type="button" className="todo-add-card" onClick={() => board.onAdd(board.today!.target)}><Plus size={14} />{t('작업 추가')}</button>}
+          <DoneCards cards={board.today.done} board={board} context={board.today.context} />
+        </>}>
         {board.today.columns.map(column => renderColumn(column, 'today'))}
       </TodayArea>
       {overviewBoard}

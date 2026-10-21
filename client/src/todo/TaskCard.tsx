@@ -141,8 +141,9 @@ export function TaskCard({ task, context, selected, onOpen, onComplete, onComple
     onPointerMove={event => {
       // Only a mouse that moves chooses: cards passing under a still mouse while the arrow keys scroll do not. A chosen
       // task's other card (Today beside the overview) is chosen in its place when the mouse moves onto it.
-      if (event.pointerType !== 'mouse' || (selected && document.activeElement === event.currentTarget)) return;
-      onSelect?.(selectId, event.currentTarget);
+      // A card nothing chooses (one done today on the overview) takes neither the choice nor the keyboard.
+      if (!onSelect || event.pointerType !== 'mouse' || (selected && document.activeElement === event.currentTarget)) return;
+      onSelect(selectId, event.currentTarget);
       // With the keyboard on another card (or a button in one), it follows the mouse, so Enter opens the card that shows
       // chosen. A field or the task's detail keeps the keyboard.
       const active = document.activeElement;

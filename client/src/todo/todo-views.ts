@@ -3,7 +3,7 @@ import { liveProjectIds } from '../../../shared/todo/compose';
 import { addDays } from '../../../shared/todo/dates';
 import { compareDay } from '../../../shared/todo/day-order';
 import type { TodoOp } from '../../../shared/todo/ops';
-import type { TodoPriority, TodoProject, TodoSection, TodoTask } from '../../../shared/todo/types';
+import type { TodoCompletion, TodoPriority, TodoProject, TodoSection, TodoTask } from '../../../shared/todo/types';
 import { translate as t } from '../i18n/i18n';
 import { byOrder, isOpen, type TodoWorld } from './todo-model';
 import { dateLabel, longDate, priorityName } from './todo-format';
@@ -45,6 +45,8 @@ export interface BoardColumn {
   shown?: number;
   /** Its header is not shown: what holds it names it already (Today's only column beside the overview). */
   headless?: boolean;
+  /** Tasks done today, struck through under its open ones and its add button (the overview's columns, `doneToday`). */
+  done?: DoneCard[];
   /** What a task added in this column starts with. */
   preset: { projectId?: string; sectionId?: string | null; dueDate?: string; priority?: TodoPriority };
 }
@@ -92,6 +94,36 @@ export function calendarDone<T extends { task: TodoTask }>(items: readonly T[], 
   if (all) return [...items];
   const live = liveProjects(world), shelved = archivedSectionIds(world);
   return items.filter(({ task }) => live.has(task.projectId) && !(task.sectionId && shelved.has(task.sectionId)));
+}
+
+/**
+ * A task done today, as the overview and Today beside it keep showing it under the open ones: `task` with the time it
+ * was done, the completion that did it, and the date that was done.
+ */
+export interface DoneCard { task: TodoTask; completionId: string; date: string | null }
+
+type DoneItem = { completion: TodoCompletion; task: TodoTask };
+
+/**
+ * What was done in `range` (today), newest first, each task once by its latest completion: this page's own completions
+ * (`mine`, `TodoState.completing`) before the list read for the range (`read`), none being taken back (`undoing`). A
+ * completion that came with its parent's shows as the parent; one whose task is deleted or open again (here, or elsewhere
+ * and read since) does not, but a repeating task stays open and its completion shows for the date that was done; nothing
+ * of an archived project or section does. What the list says of a task (where it is, whether it is deleted) is the
+ * server's fresh answer, and the page keeps completed tasks as last seen: only this page's own completions follow the
+ * page's copy, deleted here included, until the list is read again.
+ */
+export function doneToday(lists: { mine: readonly DoneItem[]; read: readonly DoneItem[]; undoing: readonly string[] }, world: TodoWorld, range: { since: string; until: string }): DoneCard[] {
+  const live = liveProjects(world), shelved = archivedSectionIds(world), undoing = new Set(lists.undoing);
+  const cards = new Map<string, DoneCard>();
+  const mine = new Set(lists.mine);
+  for (const item of [...lists.mine, ...lists.read]) {
+    const { completion, task } = item, known = world.tasks[task.id];
+    if (completion.causeId || undoing.has(completion.id) || cards.has(task.id) || completion.completedAt < range.since || completion.completedAt >= range.until) continue;
+    if (task.deletedAt || (mine.has(item) && known?.deletedAt) || (isOpen(known) && !known!.recurrence) || !live.has(task.projectId) || (task.sectionId && shelved.has(task.sectionId))) continue;
+    cards.set(task.id, { task: { ...task, completedAt: completion.completedAt }, completionId: completion.id, date: completion.occurrenceDate ?? task.dueDate });
+  }
+  return [...cards.values()].sort((a, b) => compare(b.task.completedAt!, a.task.completedAt!));
 }
 
 /** The groupings a kind of list offers, its default first. */
@@ -425,15 +457,21 @@ export interface BoardGroup { project: TodoProject; depth: number; parents: stri
  * empty "섹션 없음" before its sections (a project without sections keeps it, to add to and drop on). A column's id names
  * its project, since every project has its own "섹션 없음".
  */
-export function overviewGroups(display: DisplaySettings, context: ViewContext): BoardGroup[] {
+export function overviewGroups(display: DisplaySettings, context: ViewContext, done: readonly DoneCard[] = []): BoardGroup[] {
   const { world } = context;
+  // A repeating task done today is still open on its own card; a sub-task shows on its parent's.
+  const closed = done.filter(card => !card.task.parentId && !isOpen(world.tasks[card.task.id]));
+  const sections = new Set(world.sections.filter(section => !section.archivedAt).map(section => section.id));
+  const doneIn = (projectId: string, column: BoardColumn) => closed.filter(card => card.task.projectId === projectId
+    && (column.sectionId ? card.task.sectionId === column.sectionId : !card.task.sectionId || !sections.has(card.task.sectionId)));
   type Place = { project: TodoProject; depth: number; parents: string[] };
   const walk = (nodes: ProjectNode[], parents: string[]): Place[] => nodes.flatMap(node => [{ project: node.project, depth: node.depth, parents }, ...walk(node.children, [...parents, node.project.name])]);
   const inbox = world.projects.filter(project => project.inbox).map(project => ({ project, depth: 0, parents: [] }));
   return [...inbox, ...walk(projectTree(world), [])].map(({ project, depth, parents }) => {
     const columns = boardColumns({ kind: 'project', id: project.id }, { ...display, group: 'section' }, context);
     const shaped = shapeSections(columns, world.sections.filter(section => section.projectId === project.id), { collapse: true, showArchived: false }).columns
-      .filter((column, _, all) => column.id !== 'section:none' || column.tasks.length > 0 || all.length === 1);
+      .map(column => { const finished = column.collapsed ? [] : doneIn(project.id, column); return finished.length ? { ...column, done: finished } : column; })
+      .filter((column, _, all) => column.id !== 'section:none' || column.tasks.length > 0 || !!column.done?.length || all.length === 1);
     return { project, depth, parents, count: columns.reduce((sum, column) => sum + column.tasks.length, 0), columns: shaped.map(column => ({ ...column, id: `${project.id}/${column.id}` })) };
   });
 }
@@ -443,17 +481,23 @@ export function overviewGroups(display: DisplaySettings, context: ViewContext): 
  * (`today/…`), and the panel itself as a target that dates whatever comes from the overview today, whichever of its
  * columns or empty space takes it, so the task always lands in Today.
  */
-export interface TodayPanel { columns: BoardColumn[]; target: BoardColumn }
+export interface TodayPanel { columns: BoardColumn[]; target: BoardColumn; done: DoneCard[] }
 
 export const TODAY_PANEL = 'today-panel';
 /** The zone under the Today panel's header: a card let go there gets a sub-task due today (Quick Add opens for it). */
 export const TODAY_SUBTASK = 'today-subtask';
 
-export function todayPanel(display: DisplaySettings, context: ViewContext): TodayPanel {
+export function todayPanel(display: DisplaySettings, context: ViewContext, done: readonly DoneCard[] = []): TodayPanel {
   const columns = boardColumns({ kind: 'today' }, display, context).map(column => ({ ...column, id: `today/${column.id}` }));
   // The panel's own header reads "오늘": a lone Today column under it would say it again (beside overdue it tells them apart).
   if (columns.length === 1 && columns[0].id === 'today/date:today') columns[0] = { ...columns[0], headless: true };
-  return { columns, target: { id: TODAY_PANEL, title: t('오늘'), tasks: [], drop: { kind: 'date', date: context.today }, preset: { dueDate: context.today } } };
+  // What was done of the Today list: of a date up to today, and not still there on a card of its own (a repeating task
+  // due again today).
+  const open = new Set(columns.flatMap(column => column.tasks.map(task => task.id)));
+  return {
+    columns, target: { id: TODAY_PANEL, title: t('오늘'), tasks: [], drop: { kind: 'date', date: context.today }, preset: { dueDate: context.today } },
+    done: done.filter(card => card.date !== null && card.date <= context.today && !open.has(card.task.id)),
+  };
 }
 
 /** Whether `column` is the Today panel or one of its columns. */

@@ -514,3 +514,83 @@ test('a refused start throws and shows nothing', async () => {
   await assert.rejects(client.startAgent('a', 'Again'), /already has one/);
   assert.deepEqual(client.getState().world.agents, {});
 });
+
+test("this page's completions show until a completed list read after the server took them comes, unless taken back or refused", async () => {
+  const transport = new FakeTransport();
+  const { client } = await ready(transport);
+  const completing = () => client.getState().completing.map(item => item.completion.id);
+  const complete = (id: string, completionId: string) => client.apply([{ op: 'task.complete', id, completionId, occurrence: null, today: '2026-10-14' }]);
+  await client.readCompleted('', false, undefined, { since: '2026-10-14T00:00:00.000Z', until: '2026-10-15T00:00:00.000Z' });
+
+  // Shown at once, the task as completed; still there once answered, while the list is read again.
+  let listed: () => void = () => {};
+  transport.completedPages.push(() => new Promise(resolve => { listed = () => resolve({ items: [] }); }));
+  complete('a', 'c1');
+  assert.deepEqual(completing(), ['c1']);
+  assert.ok(client.getState().completing[0].task.completedAt);
+  await settle();
+  assert.equal(transport.requests.length, 1);
+  assert.deepEqual(completing(), ['c1'], 'answered, the list not read since');
+  listed();
+  await settle();
+  assert.deepEqual(completing(), [], 'the list read since has it (or it is gone elsewhere)');
+
+  // Taken back before it is sent: shown as taken back at once, gone once answered.
+  complete('b', 'c2');
+  client.apply([{ op: 'task.uncomplete', id: 'b', completionId: 'c2' }]);
+  assert.deepEqual(client.getState().undoing, ['c2']);
+  await settle(40);
+  assert.deepEqual([completing(), client.getState().undoing], [[], []]);
+
+  // Refused by the server: gone with the change.
+  transport.answer = async () => { throw new ApiError('nope', 400); };
+  complete('a', 'c3');
+  assert.deepEqual(completing(), ['c3']);
+  await settle();
+  assert.deepEqual(completing(), []);
+});
+
+test("with no completed list shown, this page's completions leave once the server has them", async () => {
+  const { client } = await ready();
+  client.apply([{ op: 'task.complete', id: 'a', completionId: 'c1', occurrence: null, today: '2026-10-14' }]);
+  assert.equal(client.getState().completing.length, 1);
+  await settle();
+  assert.equal(client.getState().completing.length, 0);
+});
+
+test("a completion taken back shows again when the server refuses that, and a list read begun before the server took it keeps it", async () => {
+  const transport = new FakeTransport();
+  const { client } = await ready(transport);
+  const range = { since: '2026-10-14T00:00:00.000Z', until: '2026-10-15T00:00:00.000Z' };
+  const completing = () => client.getState().completing.map(item => item.completion.id);
+  // A list read begun before the server has the completion answers without it: the completion stays. (An answer the
+  // page has moved past reads the overview first, and the list only after it, so the earlier read is the latest one.)
+  let early: () => void = () => {};
+  transport.completedPages.push(() => new Promise(resolve => { early = () => resolve({ items: [] }); }));
+  const reading = client.readCompleted('', false, undefined, range);
+  let overviewRead: () => void = () => {};
+  transport.overviewHold = new Promise(resolve => { overviewRead = resolve; });
+  const answer = transport.answer;
+  transport.answer = async () => changes(client.getState().world.revision);
+  client.apply([{ op: 'task.complete', id: 'a', completionId: 'c1', occurrence: null, today: '2026-10-14' }]);
+  await settle();
+  early();
+  await reading;
+  assert.equal(client.getState().completed?.loading, false, 'that read is the one shown');
+  assert.deepEqual(completing(), ['c1'], 'begun before the answer, it cannot have it');
+  transport.overviewHold = undefined;
+  overviewRead();
+  await settle(40);
+  assert.deepEqual(completing(), [], 'the read after it does');
+  transport.answer = answer;
+
+  // Its list read again fails, so only this page has it; taken back and refused, the completion shows again.
+  transport.completedPages.push(() => Promise.reject(new Error('down')));
+  client.apply([{ op: 'task.complete', id: 'b', completionId: 'c2', occurrence: null, today: '2026-10-14' }]);
+  await settle();
+  transport.answer = async () => { throw new ApiError('busy', 503); };
+  client.apply([{ op: 'task.uncomplete', id: 'b', completionId: 'c2' }]);
+  assert.deepEqual([completing(), client.getState().undoing], [['c2'], ['c2']]);
+  await settle();
+  assert.deepEqual([completing(), client.getState().undoing], [['c2'], []]);
+});
