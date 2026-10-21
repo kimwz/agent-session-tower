@@ -115,10 +115,13 @@ function SortableCard({ task, column, dndId, ...props }: { task: TodoTask; colum
   </div>;
 }
 
-/** Cards done today: shown and opened, never picked up, chosen by the keyboard, or given files. */
+/**
+ * Cards done today: shown and opened, never picked up, chosen by the keyboard, given files, or a place to drop on (they
+ * sit outside the column's drop area).
+ */
 function DoneCards({ cards, board, context }: { cards: readonly DoneCard[]; board: BoardProps; context: CardContext }) {
-  return <>{cards.map(card => <TaskCard key={card.key} task={card.task} context={context} {...board.card} onSelect={undefined} onMenu={undefined} onFiles={undefined}
-    readOnly={board.card.readOnly || board.taskLocked?.(card.task)} onReopen={board.onReopen && (() => board.onReopen!(card))} />)}</>;
+  return cards.length > 0 && <div className="todo-done-cards">{cards.map(card => <TaskCard key={card.key} task={card.task} context={context} {...board.card} onSelect={undefined} onMenu={undefined} onFiles={undefined}
+    readOnly={board.card.readOnly || board.taskLocked?.(card.task)} onReopen={board.onReopen && (() => board.onReopen!(card))} />)}</div>;
 }
 
 function Column({ column, board, active, over, children }: { column: BoardColumn; board: BoardProps; active: boolean; over: boolean; children: ReactNode }) {
@@ -140,8 +143,8 @@ function Column({ column, board, active, over, children }: { column: BoardColumn
         ? <button type="button" className="todo-fold-cards" onClick={() => board.onFold?.(column.id)}>{t('더 보기')} <b>{column.tasks.length - column.shown}</b></button>
         : board.onFold && !inTodayPanel(column) && column.tasks.length > OVERVIEW_SHOWN && <button type="button" className="todo-fold-cards" onClick={() => board.onFold?.(column.id)}>{t('접기')}</button>}
       {column.drop && <button type="button" className="todo-add-card" onClick={() => board.onAdd(column)}><Plus size={14} />{t('작업 추가')}</button>}
-      {column.done && <DoneCards cards={column.done} board={board} context={board.context} />}
     </div>
+    {column.done && <DoneCards cards={column.done} board={board} context={board.context} />}
   </section>;
 }
 
@@ -182,7 +185,7 @@ function TodayArea({ panel, board, over, count, header, children }: { panel: Tod
     {count === 0 && <p className="todo-muted todo-today-empty">{t('오늘 할 일을 모두 끝냈습니다.')}</p>}
     {children}
     {count === 0 && !panel.columns.some(column => column.drop) && <button type="button" className="todo-add-card" onClick={() => board.onAdd(panel.target)}><Plus size={14} />{t('작업 추가')}</button>}
-    {panel.done.length > 0 && <div className="todo-today-done"><DoneCards cards={panel.done} board={board} context={panel.context} /></div>}
+    <DoneCards cards={panel.done} board={board} context={panel.context} />
   </section>;
 }
 

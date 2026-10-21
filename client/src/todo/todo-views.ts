@@ -98,30 +98,25 @@ export function calendarDone<T extends { task: TodoTask }>(items: readonly T[], 
 
 /**
  * A task done today, as the overview and Today beside it keep showing it under the open ones: `task` with the time it
- * was done, the completion that did it when the server has said, and the date that was done.
+ * was done, the completion that did it, and the date that was done.
  */
-export interface DoneCard { key: string; task: TodoTask; completionId?: string; date: string | null }
+export interface DoneCard { key: string; task: TodoTask; completionId: string; date: string | null }
 
 /**
- * What was done in `range` (today), newest first, each task once: the completions read for it, and the top-level tasks
- * this page completed since, before that list is read again (so their cards never leave and come back). A completion that
- * came with its parent's shows as the parent, one reopened or deleted here no longer shows, and nothing of an archived
- * project or section does. A repeating task stays open: its completion shows for the date that was done, once read, as
- * does a sub-task's.
+ * What was done in `range` (today), newest first, each task once by its latest completion: `items` are this page's own
+ * completions (`TodoState.completing`) and the list read for the range. A completion that came with its parent's shows as
+ * the parent; one whose task is deleted or open again (here, or elsewhere and read since) does not, but a repeating
+ * task stays open and its completion shows for the date that was done; nothing of an archived project or section does.
+ * Where a task is placed comes from the item, which the server answers fresh: the page keeps completed tasks as last seen.
  */
 export function doneToday(items: readonly { completion: TodoCompletion; task: TodoTask }[], world: TodoWorld, range: { since: string; until: string }): DoneCard[] {
   const live = liveProjects(world), shelved = archivedSectionIds(world);
-  const shows = (task: TodoTask) => !task.deletedAt && live.has(task.projectId) && !(task.sectionId && shelved.has(task.sectionId));
   const cards = new Map<string, DoneCard>();
-  for (const { completion, task: listed } of items) {
-    const task = world.tasks[listed.id] ?? listed;
-    if (completion.causeId || cards.has(task.id) || !shows(task) || (isOpen(task) && !task.recurrence)) continue;
+  for (const { completion, task } of items) {
+    const known = world.tasks[task.id];
+    if (completion.causeId || cards.has(task.id) || completion.completedAt < range.since || completion.completedAt >= range.until) continue;
+    if (task.deletedAt || known?.deletedAt || (isOpen(known) && !known!.recurrence) || !live.has(task.projectId) || (task.sectionId && shelved.has(task.sectionId))) continue;
     cards.set(task.id, { key: completion.id, task: { ...task, completedAt: completion.completedAt }, completionId: completion.id, date: completion.occurrenceDate ?? task.dueDate });
-  }
-  // Only a top-level task: a sub-task completed here may have been completed with its parent, which only the list tells.
-  for (const task of Object.values(world.tasks)) {
-    if (task.parentId || cards.has(task.id) || !task.completedAt || task.completedAt < range.since || task.completedAt >= range.until || !shows(task)) continue;
-    cards.set(task.id, { key: task.id, task, date: task.dueDate });
   }
   return [...cards.values()].sort((a, b) => compare(b.task.completedAt!, a.task.completedAt!));
 }

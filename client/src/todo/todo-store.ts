@@ -87,11 +87,18 @@ export interface TodoState {
   detailId: string | null;
   detailError: string;
   completed: CompletedList | null;
+  /**
+   * The completions this page made, newest first, that a completed list may not have yet: each stays from the moment it
+   * shows until a list read after the server took it has come (listing it or not), or until it is taken back or refused.
+   */
+  completing: TodoCompletedPage['items'];
   toasts: TodoToast[];
   canUndo: boolean;
 }
 
 interface Action { ops: TodoOp[]; undo: TodoOp[] | null; settled?: (ok: boolean) => void; refused?: boolean }
+/** A completion of `completing`, with its change and, once the server has it, the completed-list read number then. */
+interface Completing { item: TodoCompletedPage['items'][number]; action: Action; answered?: number }
 type Undo = { ops: TodoOp[]; action: Action; used?: boolean };
 
 export const BATCH_MS = 300;
@@ -111,11 +118,12 @@ export class TodoClient {
   private detailRead = 0;
   /** Each completed-list load takes a number; an answer to an older one than the latest is dropped. */
   private completedRead = 0;
+  private completing: Completing[] = [];
   private lastUndo: Undo | null = null;
   private toastId = 0;
   private toastTimers = new Set<ReturnType<typeof setTimeout>>();
   private listeners = new Set<() => void>();
-  private state: TodoState = { phase: 'loading', error: '', world: emptyWorld(), detailId: null, detailError: '', completed: null, toasts: [], canUndo: false };
+  private state: TodoState = { phase: 'loading', error: '', world: emptyWorld(), detailId: null, detailError: '', completed: null, completing: [], toasts: [], canUndo: false };
 
   constructor(private readonly transport: TodoTransport, private readonly options: { now?: () => Date; batchMs?: number; toastMs?: number } = {}) {}
 
@@ -133,7 +141,8 @@ export class TodoClient {
     const context = { now: this.now().toISOString(), today: this.today() };
     let world = this.base;
     for (const action of [...(this.inflight ?? []), ...this.queue]) world = applyOps(world, action.ops, context);
-    this.set({ ...patch, world, canUndo: !!this.lastUndo });
+    this.completing = this.completing.filter(entry => !entry.action.refused);
+    this.set({ ...patch, world, completing: this.completing.map(entry => entry.item), canUndo: !!this.lastUndo });
   }
 
   start() { this.wantRead = true; this.pump(); }
@@ -226,7 +235,9 @@ export class TodoClient {
       }
       if (ticket !== this.completedRead || !same(this.state.completed)) return;
       const items = more ? [...this.state.completed.items, ...read] : read;
-      this.set({ completed: { ...scope, items, before: period ? undefined : page.before, loading: false, error: '' } });
+      // What the server took before this read began is in it now, or gone (reopened or deleted elsewhere).
+      this.completing = this.completing.filter(entry => entry.answered === undefined || entry.answered >= ticket);
+      this.set({ completed: { ...scope, items, before: period ? undefined : page.before, loading: false, error: '' }, completing: this.completing.map(entry => entry.item) });
     } catch (error) {
       if (ticket !== this.completedRead || !same(this.state.completed)) return;
       this.set({ completed: { ...this.state.completed, loading: false, error: message(error) } });
@@ -255,7 +266,12 @@ export class TodoClient {
     const action: Action = { ops, undo, settled: options.settled };
     this.queue.push(action);
     this.lastUndo = undo ? { ops: undo, action } : options.undoable === false ? this.lastUndo : null;
+    for (const op of ops) if (op.op === 'task.uncomplete') this.completing = this.completing.filter(entry => entry.item.completion.id !== op.completionId);
     this.publish();
+    const completedAt = this.now().toISOString();
+    const made = ops.flatMap(op => op.op === 'task.complete' && this.state.world.tasks[op.id]
+      ? [{ item: { completion: { id: op.completionId, taskId: op.id, occurrenceDate: op.occurrence, completedAt }, task: this.state.world.tasks[op.id] }, action }] : []);
+    if (made.length) { this.completing = [...made.reverse(), ...this.completing]; this.set({ completing: this.completing.map(entry => entry.item) }); }
     if (this.queue.reduce((count, item) => count + item.ops.length, 0) >= MAX_BATCH_OPS) this.flush();
     else if (!this.timer) this.timer = setTimeout(() => { this.timer = undefined; this.flush(); }, this.options.batchMs ?? BATCH_MS);
     return true;
@@ -325,6 +341,9 @@ export class TodoClient {
     try {
       const changes = await this.transport.apply(request);
       this.inflight = null;
+      // Read again with the list shown (`accept`), or by the next list asked for; with none shown, no list needs them.
+      this.completing = this.completing.filter(entry => !batch.includes(entry.action) || !!this.state.completed);
+      for (const entry of this.completing) if (batch.includes(entry.action)) entry.answered = this.completedRead;
       this.accept(changes, request.ops);
       for (const action of batch) action.settled?.(true);
       return;

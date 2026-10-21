@@ -514,3 +514,45 @@ test('a refused start throws and shows nothing', async () => {
   await assert.rejects(client.startAgent('a', 'Again'), /already has one/);
   assert.deepEqual(client.getState().world.agents, {});
 });
+
+test("this page's completions show until a completed list read after the server took them comes, unless taken back or refused", async () => {
+  const transport = new FakeTransport();
+  const { client } = await ready(transport);
+  const completing = () => client.getState().completing.map(item => item.completion.id);
+  const complete = (id: string, completionId: string) => client.apply([{ op: 'task.complete', id, completionId, occurrence: null, today: '2026-10-14' }]);
+  await client.readCompleted('', false, undefined, { since: '2026-10-14T00:00:00.000Z', until: '2026-10-15T00:00:00.000Z' });
+
+  // Shown at once, the task as completed; still there once answered, while the list is read again.
+  let listed: () => void = () => {};
+  transport.completedPages.push(() => new Promise(resolve => { listed = () => resolve({ items: [] }); }));
+  complete('a', 'c1');
+  assert.deepEqual(completing(), ['c1']);
+  assert.ok(client.getState().completing[0].task.completedAt);
+  await settle();
+  assert.equal(transport.requests.length, 1);
+  assert.deepEqual(completing(), ['c1'], 'answered, the list not read since');
+  listed();
+  await settle();
+  assert.deepEqual(completing(), [], 'the list read since has it (or it is gone elsewhere)');
+
+  // Taken back before it is sent: gone with the change.
+  complete('b', 'c2');
+  client.apply([{ op: 'task.uncomplete', id: 'b', completionId: 'c2' }]);
+  assert.deepEqual(completing(), []);
+  await settle(40);
+
+  // Refused by the server: gone with the change.
+  transport.answer = async () => { throw new ApiError('nope', 400); };
+  complete('a', 'c3');
+  assert.deepEqual(completing(), ['c3']);
+  await settle();
+  assert.deepEqual(completing(), []);
+});
+
+test("with no completed list shown, this page's completions leave once the server has them", async () => {
+  const { client } = await ready();
+  client.apply([{ op: 'task.complete', id: 'a', completionId: 'c1', occurrence: null, today: '2026-10-14' }]);
+  assert.equal(client.getState().completing.length, 1);
+  await settle();
+  assert.equal(client.getState().completing.length, 0);
+});

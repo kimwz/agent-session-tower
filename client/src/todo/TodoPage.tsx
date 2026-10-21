@@ -218,9 +218,9 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
 
   const setDisplay = (value: DisplaySettings) => { setDisplays(previous => ({ ...previous, [key]: value })); saveDisplay(key, value); };
   // The overview: every project with its sections, each column showing its first cards until opened.
-  // Today's completions once those of today have come, and meanwhile those this page made.
+  // This page's completions, and today's once they have come.
   const doneList = overviewDone && state.completed?.projectId === '' && !state.completed.labelId && state.completed.range?.since === overviewDone.since && state.completed.range.until === overviewDone.until ? state.completed.items : null;
-  const done = useMemo(() => overviewDone ? doneToday(doneList ?? [], world, overviewDone) : [], [overviewDone, doneList, world]);
+  const done = useMemo(() => overviewDone ? doneToday([...state.completing, ...(doneList ?? [])], world, overviewDone) : [], [overviewDone, state.completing, doneList, world]);
   const groups = useMemo(() => view.kind !== 'all' ? null : overviewGroups(display, { world, today, start: today, query: '', searchResults: null }, done), [view.kind, display, world, today, done]);
   const overview = useMemo(() => groups && foldGroups(groups, expanded), [groups, expanded]);
   // The overview's board offers Today beside it where there is room for both (not on a phone).
@@ -278,8 +278,8 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   // The calendar's completions, once those of the days it shows have come.
   const shownList = state.completed;
   // The list read for this calendar: its project, label and days, never another list's for a moment while it is read.
-  const calendarList = doneSince && completedScope !== null && shownList?.projectId === completedScope && (shownList.labelId || undefined) === completedLabel
-    && shownList.range?.since === doneSince && shownList.range.until === doneUntil ? shownList : null;
+  const calendarList = calendarDone && completedScope !== null && shownList?.projectId === completedScope && (shownList.labelId || undefined) === completedLabel
+    && shownList.range?.since === doneSince && shownList.range?.until === doneUntil ? shownList : null;
   const doneShown = useMemo(() => calendarList ? calendarDoneItems(calendarList.items, world, locked) : undefined, [calendarList, world, locked]);
   const doneKey = (completionId: string) => `done:${completionId}`;
   const chosenDone = selectedId?.startsWith('done:') ? completedItems.find(item => doneKey(item.completion.id) === selectedId)?.task : undefined;
