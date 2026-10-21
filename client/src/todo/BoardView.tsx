@@ -80,6 +80,9 @@ export const collisionsFor = (overview: boolean): CollisionDetection => args => 
   const inPanel = !!panel && !!pointer && pointer.x >= panel.left && pointer.x <= panel.right && pointer.y >= panel.top && pointer.y <= panel.bottom;
   const ofPanel = (id: string) => id === TODAY_PANEL || id === TODAY_SUBTASK || id.startsWith('task:today:') || id.startsWith('column:today/');
   const within = pointerWithin(args).filter(item => !panel || !pointer || ofPanel(String(item.id)) === inPanel);
+  // The sub-task zone lies over the panel's first cards while a card is dragged: it wins over what it covers.
+  const zone = within.find(item => item.id === TODAY_SUBTASK);
+  if (zone) return [zone];
   const card = within.find(item => String(item.id).startsWith('task:'));
   if (card) return [card];
   const inner = within.filter(item => item.id !== TODAY_PANEL);
@@ -152,21 +155,27 @@ function AddSection({ onAdd }: { onAdd: (name: string) => void }) {
   </div>;
 }
 
-/** The Today panel's sub-task zone: shown at all times, marked while a card is dragged, lit with one over it. */
-function SubtaskZone({ active }: { active: boolean }) {
+/**
+ * The Today panel's sub-task zone, shown only while a card is dragged: laid over the panel's top, outside its scroll area,
+ * so appearing moves nothing under the pointer and it stays in sight however far the panel is scrolled. Lit with a card over it.
+ */
+function SubtaskZone() {
   const { setNodeRef, isOver } = useDroppable({ id: TODAY_SUBTASK, data: { type: 'subtask' } });
-  return <div ref={setNodeRef} className={`todo-subtask-zone ${active ? 'active' : ''} ${active && isOver ? 'drop-target' : ''}`}>
-    <ListPlus size={14} /><b>{t('하위 작업 만들기')}</b><span>{t('놓으면 오늘 할 일로')}</span>
+  return <div ref={setNodeRef} className={`todo-subtask-zone ${isOver ? 'drop-target' : ''}`}>
+    <ListPlus size={22} /><b>{t('하위 작업 만들기')}</b><span>{t('놓으면 오늘 할 일로')}</span>
   </div>;
 }
 
-/** The Today panel: its own scroll area, all of it a target for cards from the overview. */
-function TodayArea({ panel, over, count, children }: { panel: TodayPanel; over: boolean; count: number; children: ReactNode }) {
+/** The Today panel: its own scroll area, all of it a target for cards from the overview; `zone` lies over it. */
+function TodayArea({ panel, over, count, zone, children }: { panel: TodayPanel; over: boolean; count: number; zone: boolean; children: ReactNode }) {
   const { setNodeRef } = useDroppable({ id: TODAY_PANEL, data: { type: 'column', column: panel.target } });
-  return <section ref={setNodeRef} className={`todo-board todo-today-panel ${over ? 'drop-target' : ''}`} aria-label={t('오늘')}>
-    {children}
-    {count === 0 && <p className="todo-muted todo-today-empty">{t('오늘 할 일을 모두 끝냈습니다.')}</p>}
-  </section>;
+  return <div className="todo-today-wrap">
+    <section ref={setNodeRef} className={`todo-board todo-today-panel ${over ? 'drop-target' : ''}`} aria-label={t('오늘')}>
+      {children}
+      {count === 0 && <p className="todo-muted todo-today-empty">{t('오늘 할 일을 모두 끝냈습니다.')}</p>}
+    </section>
+    {zone && <SubtaskZone />}
+  </div>;
 }
 
 export function BoardView(board: BoardProps) {
@@ -281,9 +290,8 @@ export function BoardView(board: BoardProps) {
     </div>}
     {/* Today and the overview side by side, each scrolling on its own. */}
     {groups ? board.today ? <div className="todo-board-split">
-      <TodayArea panel={board.today} over={overToday} count={todayCount}>
+      <TodayArea panel={board.today} over={overToday} count={todayCount} zone={!!activeTask && !!board.onSubtask}>
         <header className="todo-today-head"><h3>{t('오늘')}</h3><span className="todo-column-note">{board.today.note}</span><span className="todo-column-count">{todayCount || ''}</span></header>
-        {board.onSubtask && <SubtaskZone active={!!activeTask} />}
         {board.today.columns.map(column => renderColumn(column, 'today'))}
       </TodayArea>
       {overviewBoard}
