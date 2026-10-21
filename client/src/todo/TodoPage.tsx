@@ -26,7 +26,7 @@ import { useTodoReadState } from './todo-read-state';
 import { doneRange } from './calendar/calendar-layout';
 import { backgroundClose } from './todo-background';
 import { setTodayPanelShown, todayPanelShown } from './todo-prefs';
-import { archivedColumns, calendarDone as calendarDoneItems, foldGroups, overviewGroups, shapeSections, shownTasks, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, todayPanel, manualOrder, moveSelectionAt, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
+import { archivedColumns, calendarDone as calendarDoneItems, doneToday, foldGroups, overviewGroups, shapeSections, shownTasks, taskLocked, boardColumns, calendarTasks, sectionMoveTarget, cardContext, defaultDisplay, dropOps, todayPanel, manualOrder, moveSelectionAt, projectOf, sidebarCounts, viewTitle, type BoardColumn, type DisplaySettings } from './todo-views';
 import { CalendarView } from './calendar/CalendarView';
 import type { TodoLayout } from '../../../shared/todo/types';
 
@@ -205,10 +205,12 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
   // Forgotten when the calendar closes, so it opening again (at today) never asks for the days it showed before.
   useEffect(() => { if (layout !== 'calendar') setCalendarDays(null); }, [layout]);
   const calendarDone = layout === 'calendar' && display.done && view.kind !== 'search' && calendarDays ? doneRange(calendarDays.from, calendarDays.to) : null;
-  // One completed list at a time: the board's completed column, or the calendar's days.
-  const completedScope = (display.completed && completedAvailable && layout === 'board') || calendarDone ? project?.id ?? '' : null;
+  // The overview's board keeps what was done today, struck through under each column's open cards (and Today's).
+  const overviewDone = useMemo(() => view.kind === 'all' && layout === 'board' ? doneRange(today, today) : null, [view.kind, layout, today]);
+  // One completed list at a time: the board's completed column, the calendar's days, or the overview's today.
+  const completedScope = (display.completed && completedAvailable && layout === 'board') || calendarDone || overviewDone ? project?.id ?? '' : null;
   const completedLabel = view.kind === 'label' ? view.id : undefined;
-  const { since: doneSince, until: doneUntil } = calendarDone ?? {};
+  const { since: doneSince, until: doneUntil } = calendarDone ?? overviewDone ?? {};
   useEffect(() => {
     if (completedScope === null) client.hideCompleted();
     else void client.readCompleted(completedScope, false, completedLabel, doneSince && doneUntil ? { since: doneSince, until: doneUntil } : undefined);
@@ -216,13 +218,16 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
 
   const setDisplay = (value: DisplaySettings) => { setDisplays(previous => ({ ...previous, [key]: value })); saveDisplay(key, value); };
   // The overview: every project with its sections, each column showing its first cards until opened.
-  const groups = useMemo(() => view.kind !== 'all' ? null : overviewGroups(display, { world, today, start: today, query: '', searchResults: null }), [view.kind, display, world, today]);
+  // Today's completions once those of today have come, and meanwhile those this page made.
+  const doneList = overviewDone && state.completed?.projectId === '' && !state.completed.labelId && state.completed.range?.since === overviewDone.since && state.completed.range.until === overviewDone.until ? state.completed.items : null;
+  const done = useMemo(() => overviewDone ? doneToday(doneList ?? [], world, overviewDone) : [], [overviewDone, doneList, world]);
+  const groups = useMemo(() => view.kind !== 'all' ? null : overviewGroups(display, { world, today, start: today, query: '', searchResults: null }, done), [view.kind, display, world, today, done]);
   const overview = useMemo(() => groups && foldGroups(groups, expanded), [groups, expanded]);
   // The overview's board offers Today beside it where there is room for both (not on a phone).
   const todayAvailable = view.kind === 'all' && layout === 'board' && !mobile && state.phase === 'ready';
   // As the Today list shows it, by that list's own display.
   const todayDisplay = useMemo(() => displays.today ?? loadDisplay('today', defaultDisplay({ kind: 'today' })), [displays.today]);
-  const todayColumns = useMemo(() => todayAvailable && todayShown ? todayPanel(todayDisplay, { world, today, start: today, query: '', searchResults: null }) : null, [todayAvailable, todayShown, todayDisplay, world, today]);
+  const todayColumns = useMemo(() => todayAvailable && todayShown ? todayPanel(todayDisplay, { world, today, start: today, query: '', searchResults: null }, done) : null, [todayAvailable, todayShown, todayDisplay, world, today, done]);
   const sectionShape = useMemo(() => {
     if (overview) return { columns: overview.flatMap(group => group.columns), archived: 0 };
     const context = { world, today, start, query, searchResults };
@@ -487,6 +492,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
     onGroup={item => goTo(item.inbox ? { kind: 'inbox' } : { kind: 'project', id: item.id })}
     onFold={overview ? id => setExpanded(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; }) : undefined}
     card={card} onAdd={column => openAdd({ ...column.preset })} onDrop={onDrop}
+    onReopen={item => { if (!readOnly && !isLocked(item.task)) void actions.reopen(item.task, item.completionId); }}
     onDayMove={(task, afterId) => { if (!locked && !isLocked(task)) client.apply([{ op: 'task.move', id: task.id, dayAfterId: afterId }]); }} taskLocked={isLocked}
     onSectionMove={(id, afterId) => client.apply([{ op: 'section.move', id, afterId }])}
     onAddSection={name => project && client.apply([{ op: 'section.create', id: newId(), projectId: project.id, name }])}

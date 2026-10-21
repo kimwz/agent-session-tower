@@ -95,6 +95,8 @@
 .todo-add-section > button:hover { opacity:1; color:#e6a16f; background:#151f2c; }
 .todo-add-section input { width:100%; height:34px; padding:0 10px; border:1px solid #3a5476; border-radius:8px; background:#0a111b; color:var(--text); }
 .todo-completed-column .todo-card { opacity:.6; }
+/* Done today on the overview and Today beside it: struck through (.todo-card.done) under the open cards and the add button. */
+.todo-column-cards > .todo-card.done, .todo-today-done .todo-card { opacity:.6; }
 .todo-board.dragging, .todo-board.dragging .todo-group-columns { scroll-snap-type:none !important; }
 /* Today beside the overview: two areas side by side, each scrolling on its own, one drag area (BoardView `today`). */
 .todo-board-split { display:flex; flex:1; min-height:0; }
@@ -113,6 +115,9 @@
 .todo-subtask-zone span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#6d7c92; }
 .todo-subtask-zone.active { border-color:#4a6d9c; background:#111c2a; }
 .todo-subtask-zone.drop-target { border-style:solid; border-color:#6d97d4; background:#1d3250; color:#cfe0fa; }
+/* Nothing left today: the add button shows without a hover, above what was done. */
+.todo-today-panel.empty .todo-add-card { opacity:1; }
+.todo-today-done { display:flex; flex-direction:column; gap:8px; padding:0 2px; }
 .todo-today-toggle { cursor:pointer; }
 .todo-today-toggle input { margin:0; accent-color:var(--blue); }
 /* The board's sideways scrollbars only hint that more columns lie to the side; they show plainly when pointed at. */

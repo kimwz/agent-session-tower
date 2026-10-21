@@ -5,11 +5,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { BoardView, collisionsFor } from '../../../client/src/todo/BoardView.js';
 import { TaskCard } from '../../../client/src/todo/TaskCard.js';
 import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
-import type { TodoTask } from '../../../shared/todo/types.js';
+import type { TodoCompletion, TodoTask } from '../../../shared/todo/types.js';
 import { forgetFoldedForTests, setTodayPanelShown, todayPanelShown } from '../../../client/src/todo/todo-prefs.js';
 import { readShortcut } from '../../../client/src/todo/todo-shortcuts.js';
-import { cardContext, defaultDisplay, dropOps, foldGroups, inTodayPanel, moveSelection, moveSelectionAt, overviewGroups, TODAY_PANEL, TODAY_SUBTASK, todayPanel, todayPanelDrop, type BoardColumn, type ViewContext } from '../../../client/src/todo/todo-views.js';
-import { overview, project, task } from './fixtures.js';
+import { cardContext, defaultDisplay, doneToday, dropOps, foldGroups, inTodayPanel, moveSelection, moveSelectionAt, overviewGroups, TODAY_PANEL, TODAY_SUBTASK, todayPanel, todayPanelDrop, type BoardColumn, type ViewContext } from '../../../client/src/todo/todo-views.js';
+import { overview, project, section, task } from './fixtures.js';
 
 const today = '2026-10-17';
 const world = worldFromOverview(overview([
@@ -217,4 +217,94 @@ test("a mouse's right-click on a card opens its menu at the pointer; a touch, a 
   assert.equal(press(false, { on: 'a' }), false, 'a link keeps its own menu');
   assert.equal(press(true), false, 'read-only');
   assert.equal(menus.length, 1);
+});
+
+test('what was done today stays on the overview and in Today beside it, struck through under the open cards and the add button', () => {
+  const range = { since: '2026-10-17T00:00:00.000Z', until: '2026-10-18T00:00:00.000Z' };
+  const done = (at: string) => ({ completedAt: at });
+  const completion = (id: string, taskId: string, completedAt: string, patch: Partial<TodoCompletion> = {}): TodoCompletion => ({ id, taskId, occurrenceDate: null, completedAt, ...patch });
+  const seen = worldFromOverview(overview([
+    task('open', { projectId: 'tower', sectionId: 'doing', dueDate: today }),
+    task('daily', { projectId: 'tower', dueDate: '2026-10-18', recurrence: { kind: 'daily', interval: 1 } as never }),
+  ], { projects: [project('inbox', { inbox: true, name: 'Inbox' }), project('tower')], sections: [section('doing', 'tower'), section('shelf', 'tower', { archivedAt: '2026-10-01T00:00:00.000Z' })] }));
+  // Read for today: a section's task, a loose one, the repeating task's occurrence, a sub-task done with its parent, one
+  // reopened here before the list is read again, one deleted, one in an archived section, and the same task twice.
+  const tasks = {
+    report: task('report', { projectId: 'tower', sectionId: 'doing', dueDate: today, ...done('2026-10-17T09:00:00.000Z') }),
+    loose: task('loose', { projectId: 'tower', ...done('2026-10-17T08:00:00.000Z') }),
+    child: task('child', { projectId: 'tower', parentId: 'report', dueDate: today, ...done('2026-10-17T09:00:00.000Z') }),
+    reopened: task('reopened', { projectId: 'tower', dueDate: today, ...done('2026-10-17T07:00:00.000Z') }),
+    gone: task('gone', { projectId: 'tower', ...done('2026-10-17T06:00:00.000Z'), deletedAt: '2026-10-17T06:30:00.000Z' }),
+    shelved: task('shelved', { projectId: 'tower', sectionId: 'shelf', ...done('2026-10-17T05:00:00.000Z') }),
+  };
+  seen.tasks.reopened = { ...tasks.reopened, completedAt: null };
+  // Completed on this page a moment ago, before the list is read again; and one done yesterday, which is not today's.
+  seen.tasks.fresh = task('fresh', { projectId: 'inbox', dueDate: '2026-10-16', ...done('2026-10-17T10:00:00.000Z') });
+  seen.tasks.old = task('old', { projectId: 'inbox', ...done('2026-10-16T10:00:00.000Z') });
+  // Sub-tasks show once the list has them, never as their parent's: one the list says came with it, and one completed
+  // here, with its parent or not, the list has not told yet. One the list has, completed on its own, shows.
+  seen.tasks.child = tasks.child;
+  seen.tasks.boss = task('boss', { projectId: 'inbox', ...done('2026-10-17T09:30:00.000Z') });
+  seen.tasks.minion = task('minion', { projectId: 'inbox', parentId: 'boss', dueDate: today, ...done('2026-10-17T09:30:00.000Z') });
+  seen.tasks.alone = task('alone', { projectId: 'inbox', parentId: 'boss', dueDate: today, ...done('2026-10-17T09:20:00.000Z') });
+  seen.tasks.helper = task('helper', { projectId: 'inbox', parentId: 'boss', dueDate: today, ...done('2026-10-17T09:10:00.000Z') });
+  const items = [
+    { completion: completion('c-report', 'report', '2026-10-17T09:00:00.000Z'), task: tasks.report },
+    { completion: completion('c-child', 'child', '2026-10-17T09:00:00.000Z', { causeId: 'c-report' }), task: tasks.child },
+    { completion: completion('c-helper', 'helper', '2026-10-17T09:10:00.000Z'), task: seen.tasks.helper },
+    { completion: completion('c-loose', 'loose', '2026-10-17T08:00:00.000Z'), task: tasks.loose },
+    { completion: completion('c-daily', 'daily', '2026-10-17T07:30:00.000Z', { occurrenceDate: today }), task: seen.tasks.daily },
+    { completion: completion('c-reopened', 'reopened', '2026-10-17T07:00:00.000Z'), task: tasks.reopened },
+    { completion: completion('c-gone', 'gone', '2026-10-17T06:00:00.000Z'), task: tasks.gone },
+    { completion: completion('c-shelved', 'shelved', '2026-10-17T05:00:00.000Z'), task: tasks.shelved },
+    { completion: completion('c-loose-0', 'loose', '2026-10-17T04:00:00.000Z'), task: tasks.loose },
+  ];
+  const cards = doneToday(items, seen, range);
+  assert.deepEqual(cards.map(card => [card.key, card.task.id, card.completionId, card.date, !!card.task.completedAt]), [
+    ['fresh', 'fresh', undefined, '2026-10-16', true],
+    ['boss', 'boss', undefined, null, true],
+    ['c-helper', 'helper', 'c-helper', today, true],
+    ['c-report', 'report', 'c-report', today, true],
+    ['c-loose', 'loose', 'c-loose', null, true],
+    ['c-daily', 'daily', 'c-daily', today, true],
+  ], 'newest first, each task once');
+
+  const at = { ...context, world: seen };
+  const groups = overviewGroups(defaultDisplay({ kind: 'all' }), at, cards);
+  const columns = (id: string) => groups.find(group => group.project.id === id)!.columns.map(column => [column.id, column.tasks.map(item => item.id), (column.done ?? []).map(card => card.task.id)]);
+  assert.deepEqual(columns('tower'), [['tower/section:none', ['daily', 'reopened'], ['loose']], ['tower/section:doing', ['open'], ['report']]], 'the repeating task is open on its own card already');
+  assert.deepEqual(columns('inbox'), [['inbox/section:none', [], ['fresh', 'boss']]], 'sub-tasks show on their parent’s card');
+
+  const panel = todayPanel(defaultDisplay({ kind: 'today' }), at, cards);
+  assert.deepEqual(panel.done.map(card => card.task.id), ['fresh', 'helper', 'report', 'daily'], 'of a date up to today: the overdue one done today, and the repeating task’s occurrence');
+  assert.deepEqual(todayPanel(defaultDisplay({ kind: 'today' }), { ...at, world: { ...seen, tasks: { ...seen.tasks, daily: { ...seen.tasks.daily, dueDate: today } } } }, cards).done.map(card => card.task.id), ['fresh', 'helper', 'report'],
+    'not when the task is on a card of its own there');
+
+  const board = (world: typeof seen, panel: ReturnType<typeof todayPanel>, groups: ReturnType<typeof overviewGroups>) => renderToStaticMarkup(createElement(BoardView, {
+    columns: groups.flatMap(group => group.columns), groups, context: cardContext(world, today, false), manual: true, sections: true, mobile: false, selectedId: null,
+    card: { onOpen() {}, onComplete() {}, onCompleteNext() {} }, onAdd() {}, onDrop() {}, onSectionMove() {}, onAddSection() {}, onSectionMenu() {}, onReopen() {},
+    today: { ...panel, context: cardContext(world, today, true), manual: true, note: 'Oct 17' },
+  }));
+  const html = board(seen, panel, foldGroups(groups, new Set()));
+  const doing = html.slice(html.indexOf('data-column="tower/section:doing"'));
+  assert.match(doing, /data-task="open"[\s\S]*todo-add-card[\s\S]*<div class="todo-card\s+done[^"]*" data-task="report"/, 'open card, add button, then the done one');
+  assert.match(doing, /aria-label="“report” 완료 취소" aria-pressed="true"/, 'its check reopens it');
+  assert.doesNotMatch(doing.slice(0, doing.indexOf('</section>')), /todo-sortable[^>]*>\s*<div class="todo-card\s+done/, 'never picked up');
+
+  // Nothing left today: the message first, then the add button, then what was done.
+  const calm = { ...seen, tasks: Object.fromEntries(Object.entries(seen.tasks).filter(([id]) => !['open', 'daily', 'reopened'].includes(id))) };
+  const calmCards = cards.filter(card => card.task.id !== 'daily');
+  const towerColumns = (list: typeof cards) => overviewGroups(defaultDisplay({ kind: 'all' }), { ...at, world: calm }, list).find(group => group.project.id === 'tower')!.columns.map(column => column.id);
+  assert.deepEqual(towerColumns(calmCards), ['tower/section:none', 'tower/section:doing'], 'a "섹션 없음" with only done cards still shows');
+  assert.deepEqual(towerColumns(calmCards.filter(card => card.task.id !== 'loose')), ['tower/section:doing'], 'one with nothing, open or done, does not');
+  const empty = todayPanel(defaultDisplay({ kind: 'today' }), { ...at, world: calm }, cards);
+  const panelOf = (markup: string) => markup.slice(markup.indexOf('todo-today-panel'), markup.indexOf('todo-overview'));
+  const emptyHtml = panelOf(board(calm, empty, foldGroups(overviewGroups(defaultDisplay({ kind: 'all' }), { ...at, world: calm }, cards), new Set())));
+  assert.match(emptyHtml, /^todo-today-panel\s+empty[\s\S]*오늘 할 일을 모두 끝냈습니다\.[\s\S]*todo-add-card[\s\S]*class="todo-today-done"[\s\S]*data-task="fresh"[\s\S]*data-task="report"/);
+  // Grouped by project, an empty panel has no column to add in: it offers its own button, still above what was done.
+  const byProject = todayPanel({ ...defaultDisplay({ kind: 'today' }), group: 'project' }, { ...at, world: calm }, cards);
+  assert.equal(byProject.columns.length, 0);
+  const projectHtml = panelOf(board(calm, byProject, foldGroups(overviewGroups(defaultDisplay({ kind: 'all' }), { ...at, world: calm }, cards), new Set())));
+  assert.match(projectHtml, /오늘 할 일을 모두 끝냈습니다\.[\s\S]*todo-add-card[\s\S]*class="todo-today-done"/);
+  assert.doesNotMatch(panelOf(board(seen, panel, foldGroups(groups, new Set()))), /todo-today-panel\s+empty|모두 끝냈습니다/, 'with something left, as before');
 });
