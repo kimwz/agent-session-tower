@@ -10,7 +10,7 @@ import type { QuickAddPreset } from '../QuickAdd';
 import { colorOf, dateLabel, longDate, monthDay, weekdayName } from '../todo-format';
 import { pointerOrNearest, useTodoSensors } from '../todo-dnd';
 import type { TodoWorld } from '../todo-model';
-import { cellEntries, DOTS_PER_LINE, dotRows, dotsPerLine, doneDays, resizeCommit, DAY_MINUTES, DEFAULT_DURATION, dayEntries, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, timeOf, visibleRange, yToMinutes, type CalendarEntry, type CalendarMode, type DayEntries, type DoneEntry, type DotSize } from './calendar-layout';
+import { cellEntries, DOTS_PER_LINE, dotRows, dotsPerLine, doneDays, resizeCommit, DAY_MINUTES, DEFAULT_DURATION, dayEntries, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, timeOf, visibleRange, WEEK_DAYS, yToMinutes, type CalendarEntry, type CalendarMode, type DayEntries, type DoneEntry, type DotSize } from './calendar-layout';
 
 /**
  * The calendar layout of a list: a month of days, or a week (three days on a phone) with an all-day row over a time
@@ -202,7 +202,7 @@ function MonthView({ props, days, done, anchor, color, selected, onSelect }: { p
   const selectedDone = done.get(selected) ?? [];
   return <>
     <div className="todo-cal-month" role="grid" aria-label={t('월간')}>
-      <div className="todo-cal-weekdays" role="row">{[1, 2, 3, 4, 5, 6, 0].map(index => <span key={index} role="columnheader">{weekdayName(index)}</span>)}</div>
+      <div className="todo-cal-weekdays" role="row">{WEEK_DAYS.map(index => <span key={index} role="columnheader">{weekdayName(index)}</span>)}</div>
       {weeks.map(week => <div key={week[0]} className="todo-cal-week" role="row">
         {week.map(date => <MonthCell key={date} date={date} month={month} today={props.today} entries={days.get(date)} done={done.get(date) ?? NONE} color={color} props={{ ...props, selected, onSelect }} />)}
       </div>)}

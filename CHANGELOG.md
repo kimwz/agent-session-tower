@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.173.2] - 2026-10-23
+
+- **할 일 캘린더의 한 주가 일요일부터 시작합니다(일 월 화 수 목 금 토).** 월간 보기와 주간 보기의 요일 머리글, 날짜 칸 배치(달의 첫 주가 시작하는 칸), 주간 보기에 보이는 7일(그 주의 일요일~토요일), 날짜 선택기의 달력이 모두 일요일 시작으로 바뀌었습니다. 반복 설정의 요일 버튼과 `요일 기준` 선택 목록도 같은 순서입니다. 휴대폰의 3일 보기와 다가오는 화면은 지금처럼 오늘부터 이어집니다. 날짜 선택기의 `이번 주말`(토요일)과 `다음 주`(다음 월요일), 빠른 추가에서 쓰는 `이번 주 금요일`·`다음 주 월요일` 같은 말의 뜻은 바뀌지 않았습니다.
+
 ## [1.173.1] - 2026-10-23
 
 - **GitHub 이슈 댓글에서 에이전트가 쓴 댓글의 첫 줄이 `🤖 Agent · via Tower` 대신 `🤖 via an agent`가 됩니다.** 제품 이름 없이 에이전트가 쓴 댓글임을 알립니다. 이미 GitHub에 올라간 에이전트 댓글도 다음 동기화 때 새 머리말로 고쳐지고, GitHub에서 고친 댓글이 들어올 때는 예전 머리말도 계속 떼어 냅니다.
