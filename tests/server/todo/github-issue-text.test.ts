@@ -11,6 +11,7 @@ test('Tower\'s lines go below the separator and what someone wrote comes back wi
   const comment = commentBody('Done', { byAgent: true, files: [] });
   assert.equal(comment, `${AGENT_HEADER}\n\nDone`);
   assert.equal(writtenPart(comment), 'Done');
+  assert.equal(writtenPart('**🤖 Agent** · via Tower\n\nEdited on GitHub'), 'Edited on GitHub');
 });
 
 test('labels sort into the most urgent priority, labels Tower can name, and the rest', () => {

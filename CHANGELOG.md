@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.173.1] - 2026-10-23
+
+- **GitHub 이슈 댓글에서 에이전트가 쓴 댓글의 첫 줄이 `🤖 Agent · via Tower` 대신 `🤖 via an agent`가 됩니다.** 제품 이름 없이 에이전트가 쓴 댓글임을 알립니다. 이미 GitHub에 올라간 에이전트 댓글도 다음 동기화 때 새 머리말로 고쳐지고, GitHub에서 고친 댓글이 들어올 때는 예전 머리말도 계속 떼어 냅니다.
+
 ## [1.173.0] - 2026-10-21
 
 - **할 일 카드에서 프로젝트 이름이 제목 바로 위 왼쪽에 보입니다.** 전체보기 왼쪽 오늘 영역과 오늘·다가오는·라벨·검색 보드처럼 여러 프로젝트가 섞인 목록에서, 지금까지 날짜·댓글 같은 정보 줄 끝(넘치면 그 아래 줄 오른쪽)에 붙던 `● 프로젝트`가 카드 맨 위 첫 줄로 옮겨졌습니다. 하위 작업 카드는 같은 줄에 `● 프로젝트 / 상위 작업`으로 이어 보이고, 길면 상위 작업 쪽이 말줄임됩니다. 프로젝트 보드처럼 한 프로젝트만 보는 곳은 지금처럼 상위 작업만 보입니다.

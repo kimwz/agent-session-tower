@@ -8,7 +8,9 @@ import type { TodoPriority } from '../../../shared/todo/types.js';
  */
 
 export const SEPARATOR = '<!-- tower -->';
-export const AGENT_HEADER = '**🤖 Agent** · via Tower';
+export const AGENT_HEADER = '**🤖 via an agent**';
+/** Headers agent comments carried before, still taken off what comes back from GitHub. */
+const OLD_AGENT_HEADERS = ['**🤖 Agent** · via Tower'];
 const AGENT_TODO = '— 🤖 Agent가 Tower에서 만든 할 일';
 const TITLE_MAX = 256;
 
@@ -53,7 +55,8 @@ export function writtenPart(body: string | null | undefined): string {
   let text = (body ?? '').replace(/\r\n/g, '\n');
   const cut = text.indexOf(SEPARATOR);
   if (cut >= 0) text = text.slice(0, cut);
-  if (text.startsWith(AGENT_HEADER)) text = text.slice(AGENT_HEADER.length);
+  const header = [AGENT_HEADER, ...OLD_AGENT_HEADERS].find(known => text.startsWith(known));
+  if (header) text = text.slice(header.length);
   return text.trim();
 }
 
