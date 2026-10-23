@@ -3,6 +3,8 @@ import { isAbsolute, join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { callWebTools, serveToolBridge } from '../mcp/stdio.js';
 import type { SessionMcpServer } from '../runs/session-mcp.js';
+import { slackThreadFromJson } from '../../shared/todo/slack-thread.js';
+import type { TodoSlackThread } from '../../shared/todo/types.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { TODO_TOOLS_PATH, TODO_TOOLS_SERVER, todoToolList } from './agent-tools.js';
 
@@ -12,6 +14,8 @@ import { TODO_TOOLS_PATH, TODO_TOOLS_SERVER, todoToolList } from './agent-tools.
  */
 
 const KEY_FILE = 'todo-tools-key.json';
+/** The Slack thread of the conversation a turn is in, as JSON, for the tasks it adds (agent-tools.ts `add`). */
+export const TODO_SLACK_THREAD_ENV = 'TOWER_TODO_SLACK_THREAD';
 const KEY = /^[a-f\d]{64}$/;
 
 /**
@@ -28,14 +32,24 @@ export async function todoToolsKey(stateDir: string): Promise<string> {
   return key;
 }
 
-/** How a turn starts the tool server: this build's own entry, reading the key from the state directory. */
-export function todoToolServer(stateDir: string, entry: { command: string; args: string[] }): SessionMcpServer {
-  return { command: entry.command, args: [...entry.args, '--todos-mcp', stateDir] };
+/**
+ * How a turn starts the tool server: this build's own entry, reading the key from the state directory. A turn of a Slack
+ * conversation also names its thread.
+ */
+export function todoToolServer(stateDir: string, entry: { command: string; args: string[] }, slackThread?: TodoSlackThread): SessionMcpServer {
+  return { command: entry.command, args: [...entry.args, '--todos-mcp', stateDir], ...(slackThread ? { env: { [TODO_SLACK_THREAD_ENV]: JSON.stringify(slackThread) } } : {}) };
 }
 
-/** The tool server a provider starts. It holds no tools itself: each request goes to the web, found anew after a restart. */
-export async function startTodosMcp(stateDir: string, input: Readable = process.stdin, output: Writable = process.stdout, ports?: () => Promise<number[]>): Promise<void> {
+/**
+ * The tool server a provider starts. It holds no tools itself: each request goes to the web, found anew after a restart,
+ * with the turn's Slack thread when it has one (the web checks it).
+ */
+export async function startTodosMcp(stateDir: string, input: Readable = process.stdin, output: Writable = process.stdout, ports?: () => Promise<number[]>,
+  env: NodeJS.ProcessEnv = process.env): Promise<void> {
   if (!isAbsolute(stateDir)) throw new Error('Invalid Tower state directory.');
+  // A thread that cannot be read only leaves the tasks unlinked.
+  const slackThread = slackThreadFromJson(env[TODO_SLACK_THREAD_ENV]);
+  const origin = slackThread ? { origin: { slackThread } } : {};
   const call = async (body: Record<string, unknown>) => {
     let key: unknown;
     try { key = ((await readPrivateJson(join(stateDir, KEY_FILE), 4096)) as { key?: unknown }).key; }
@@ -46,5 +60,5 @@ export async function startTodosMcp(stateDir: string, input: Readable = process.
   await serveToolBridge({ name: TODO_TOOLS_SERVER,
     // The list is this build's own, so a turn that starts while the web restarts still has the tools.
     listTools: async () => todoToolList(),
-    callTool: (name, args) => call({ method: 'tools/call', name, arguments: args }) }, input, output);
+    callTool: (name, args) => call({ method: 'tools/call', name, arguments: args, ...origin }) }, input, output);
 }

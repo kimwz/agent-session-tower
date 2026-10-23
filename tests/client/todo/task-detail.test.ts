@@ -54,12 +54,19 @@ test('a todo synced with a GitHub issue heads its properties with a link that op
   const url = 'https://github.com/o/r/issues/7';
   const open = show(task('a'), { issues: { a: { repo: 'o/r', number: 7, url, error: null } } });
   assert.deepEqual([...open.matchAll(/class="todo-property (\w+)/g)].map(match => match[1]).slice(0, 2), ['github', 'date'], 'first in the card, read-only too');
-  assert.match(open, /<a class="todo-property-value todo-github-link " href="https:\/\/github.com\/o\/r\/issues\/7" target="_blank" rel="noreferrer"[^>]*><span>o\/r#7<\/span>/);
+  assert.match(open, /<a class="todo-property-value todo-outside-link todo-github-link " href="https:\/\/github.com\/o\/r\/issues\/7" target="_blank" rel="noreferrer"[^>]*><span>o\/r#7<\/span>/);
   // A completed todo is no longer in the overview's issues; its detail still knows the issue.
   assert.match(show(task('b', { completedAt: '2026-10-14T01:00:00.000Z' }), { detail: { repo: 'o/r', number: 8, url } }), /todo-github-link[^>]*><span>o\/r#8</);
   // A sync problem shows red, with the reason in its hover text.
-  assert.match(show(task('c'), { issues: { c: { repo: 'o/r', number: 9, url, error: 'boom' } } }), /class="todo-property-value todo-github-link error"[^>]*title="o\/r#9 — boom"/);
+  assert.match(show(task('c'), { issues: { c: { repo: 'o/r', number: 9, url, error: 'boom' } } }), /class="todo-property-value todo-outside-link todo-github-link error"[^>]*title="o\/r#9 — boom"/);
   assert.doesNotMatch(show(task('d'), {}), /todo-github-link/, 'none without an issue');
+});
+
+test('a todo from a Slack thread heads its properties with a link that opens that thread in a new window', () => {
+  const markup = render(task('a', { slackThread: { teamId: 'TBMLFLL3F', channel: 'C0A88QQ5607', threadTs: '1792746520.260769' } }));
+  assert.deepEqual([...markup.matchAll(/class="todo-property (\w+)/g)].map(match => match[1]).slice(0, 2), ['slack', 'date']);
+  assert.match(markup, /<a class="todo-property-value todo-outside-link" href="https:\/\/slack.com\/archives\/C0A88QQ5607\/p1792746520260769" target="_blank" rel="noreferrer" title="[^"]*#C0A88QQ5607"><span>스레드 열기<\/span>/);
+  assert.doesNotMatch(render(task('b')), /slack.com/, 'none without a thread');
 });
 
 test('a card shows its sub-tasks unless they were folded, a done one struck through', () => {

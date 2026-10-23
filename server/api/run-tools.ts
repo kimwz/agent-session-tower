@@ -50,13 +50,16 @@ export function sessionBrowsers(stateDir: string, runs: Pick<RunManager, 'sessio
  * the master's folder, and in an issue master's folder, also get the master's page tools. Those other turns, whoever started them, get the browsers
  * (see browser/tools.ts) and the Todo tools (todo/agent-tools.ts), a controlling computer's turns too.
  */
-export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry; secrets?: Pick<SecretRuntime, 'initialized' | 'subject'>; browsers?: () => BrowserEnvironment }) {
+export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp' | 'sessionThread'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry; secrets?: Pick<SecretRuntime, 'initialized' | 'subject'>; browsers?: () => BrowserEnvironment }) {
   const lookups = { [SESSION_TOOLS_SERVER]: sessionToolServer(options.stateDir, thisBuild()) };
-  // The owner opened the todos to every agent Tower runs, outside input and controlling computers' turns included.
-  const todos = { [TODO_TOOLS_SERVER]: todoToolServer(options.stateDir, thisBuild()) };
-  /** What every turn but the heartbeat gets, whatever started it: the browsers and the todo tools. */
+  /**
+   * What every turn but the heartbeat gets, whatever started it: the browsers and the todo tools. The owner opened the
+   * todos to every agent Tower runs, outside input and controlling computers' turns included; a Slack conversation's
+   * turns link the tasks they add to its thread.
+   */
   const withBrowsers = (session: Session, tools: RunTools): RunTools => {
     const browsers = sessionBrowsers(options.stateDir, options.runs, session, options.browsers?.());
+    const todos = { [TODO_TOOLS_SERVER]: todoToolServer(options.stateDir, thisBuild(), options.slack?.sessionThread(session.id)) };
     return { ...tools, servers: { ...tools.servers, ...browsers.servers, ...todos }, claudeChrome: browsers.claudeChrome };
   };
   /**

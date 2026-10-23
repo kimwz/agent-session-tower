@@ -1,4 +1,5 @@
 import type { TodoAgent, TodoAgentState, TodoComment, TodoCommentAuthor, TodoCompletion, TodoEvent, TodoEventKind, TodoFile, TodoGitHubBinding, TodoLabel, TodoLayout, TodoLink, TodoPriority, TodoProject, TodoRecurrence, TodoSection, TodoTask } from '../../shared/todo/types.js';
+import { slackThreadFromJson } from '../../shared/todo/slack-thread.js';
 
 /** Each table's row and the value the page sees, converted in one place per table. */
 
@@ -30,6 +31,8 @@ export const taskOf = (row: Row): TodoTask => ({
   durationMin: row.duration_min === null || row.duration_min === undefined ? null : Number(row.duration_min), deadlineDate: maybe(row.deadline_date),
   labelIds: row.labels ? text(row.labels).split(',').sort() : [], sortKey: text(row.sort_key), dayOrder: maybe(row.day_order), completedAt: maybe(row.completed_at), ...stamps(row),
   ...(row.gh_issue ? { github: text(row.gh_issue) } : {}),
+  // One this build cannot read shows as none.
+  ...(row.slack_thread ? { slackThread: slackThreadFromJson(row.slack_thread) } : {}),
 });
 
 /** A task's columns with its live labels, for `SELECT ${TASK_COLUMNS} FROM todo_tasks t …`. */

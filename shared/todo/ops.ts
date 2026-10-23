@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { validDate, validTime } from './dates.js';
+import { SlackThreadSchema } from './slack-thread.js';
 
 /**
  * The changes the Todo page sends. One request carries several operations and applies all of them or none, so an
@@ -47,13 +48,14 @@ const taskFields = {
   durationMin: z.number().int().min(1).max(1440).nullable(),
   deadlineDate: date.nullable(),
   labelIds: z.array(id).max(100),
+  slackThread: SlackThreadSchema.nullable(),
 };
 
 export const TodoOpSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('task.create'), id, projectId: id.optional(), sectionId: id.nullable().optional(), parentId: id.nullable().optional(), afterId,
     content: taskFields.content, description: taskFields.description.optional(), priority: priority.optional(), dueDate: taskFields.dueDate.optional(),
     dueTime: taskFields.dueTime.optional(), recurrence: taskFields.recurrence.optional(), durationMin: taskFields.durationMin.optional(),
-    deadlineDate: taskFields.deadlineDate.optional(), labelIds: taskFields.labelIds.optional() }).strict(),
+    deadlineDate: taskFields.deadlineDate.optional(), labelIds: taskFields.labelIds.optional(), slackThread: taskFields.slackThread.optional() }).strict(),
   z.object({ op: z.literal('task.update'), id, patch: z.object(taskFields).partial().strict().refine(patch => Object.keys(patch).length > 0, 'Nothing to change.') }).strict(),
   /**
    * `dayAfterId` puts the task in order among the tasks of its own date instead (after that task, or first for null;

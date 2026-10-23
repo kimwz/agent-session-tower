@@ -282,14 +282,15 @@ const OPTIMISTIC: { [N in TodoOp['op']]?: (world: TodoWorld, op: TodoOpOf<N>, co
       id: op.id, ...place, content: op.content, description: op.description ?? '', priority: op.priority ?? 4, dueDate: op.dueDate ?? null,
       dueTime: op.dueDate ? op.dueTime ?? null : null, recurrence: op.dueDate ? op.recurrence ?? null : null, durationMin: op.durationMin ?? null,
       deadlineDate: op.deadlineDate ?? null, labelIds: op.labelIds ?? [], sortKey: placeKey(siblingsOf(world, place), op.afterId), dayOrder: null, completedAt: null,
-      createdAt: now, updatedAt: now, deletedAt: null,
+      createdAt: now, updatedAt: now, deletedAt: null, ...(op.slackThread ? { slackThread: op.slackThread } : {}),
     };
     return { ...world, tasks: { ...world.tasks, [task.id]: task } };
   },
   'task.update': (world, op, { now }) => {
     const task = world.tasks[op.id];
     if (!task) return world;
-    const patch: Partial<TodoTask> = { ...op.patch, updatedAt: now };
+    const { slackThread, ...fields } = op.patch;
+    const patch: Partial<TodoTask> = { ...fields, ...(slackThread !== undefined ? { slackThread: slackThread ?? undefined } : {}), updatedAt: now };
     // Clearing the date clears what depends on it, as the server does.
     if (op.patch.dueDate === null) { patch.dueTime = null; patch.recurrence = null; }
     return patchTask(world, op.id, patch);
@@ -416,7 +417,8 @@ export function applyOps(world: TodoWorld, ops: readonly TodoOp[], context: Appl
   return next.detail ? { ...next, detail: syncDetail(next.detail, next.tasks) } : next;
 }
 
-const taskFieldsOf = (task: TodoTask, fields: string[]) => Object.fromEntries(fields.map(field => [field, task[field as keyof TodoTask]]));
+/** What the fields were; one the task did not have (a Slack thread) was `null`, as a patch clears it. */
+const taskFieldsOf = (task: TodoTask, fields: string[]) => Object.fromEntries(fields.map(field => [field, task[field as keyof TodoTask] ?? null]));
 
 /**
  * The operations that put things back as they were before `ops`, in reverse order; null when one of them cannot be

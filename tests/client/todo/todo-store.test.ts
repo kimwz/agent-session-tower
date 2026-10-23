@@ -169,6 +169,8 @@ test('moves place a task where the server will and their inverse puts it back', 
   assert.deepEqual(Object.values(moved.tasks).sort((x, y) => x.sortKey < y.sortKey ? -1 : 1).map(item => item.id), ['c', 'a', 'b']);
   assert.deepEqual(inverseOps(world, [{ op: 'task.move', id: 'c', afterId: null }], () => 'x'), [{ op: 'task.move', id: 'c', projectId: 'inbox', sectionId: null, parentId: null, afterId: 'b' }]);
   assert.deepEqual(inverseOps(world, [{ op: 'task.update', id: 'a', patch: { dueDate: null } }], () => 'x'), [{ op: 'task.update', id: 'a', patch: { dueDate: null, dueTime: null, recurrence: null } }]);
+  // A thread set on a task that had none is undone by clearing it, which a patch can say.
+  assert.deepEqual(inverseOps(world, [{ op: 'task.update', id: 'a', patch: { slackThread: { teamId: 'T0TEAM', channel: 'C0CHANNEL', threadTs: '1.2' } } }], () => 'x'), [{ op: 'task.update', id: 'a', patch: { slackThread: null } }]);
   assert.equal(inverseOps(world, [{ op: 'task.uncomplete', id: 'a', completionId: 'c' }], () => 'x'), null);
 });
 

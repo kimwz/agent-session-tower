@@ -81,7 +81,12 @@ export interface TodoTask extends Stamped {
   completedAt: string | null;
   /** The GitHub issue it is synced with (`owner/name#number`, server/todo/github/): its text may come from outside. */
   github?: string;
+  /** The Slack thread it came from (shared/todo/slack-thread.ts); absent when none. */
+  slackThread?: TodoSlackThread;
 }
+
+/** A Slack thread by its ids: the thread's first message `threadTs` in `channel` of workspace `teamId`. */
+export interface TodoSlackThread { teamId: string; channel: string; threadTs: string }
 
 /** A task's direct sub-tasks that are not deleted, and how many of them are completed. */
 export interface TodoSubtaskCount { done: number; total: number }

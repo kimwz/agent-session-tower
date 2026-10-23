@@ -93,9 +93,9 @@ export function createTask(ctx: TodoContext, op: TodoOpOf<'task.create'>, inbox:
   const { dueTime, recurrence } = schedule(dueDate, op.dueTime ?? null, op.recurrence ?? null);
   const [where, params] = siblings(place.projectId, place.sectionId, place.parentId);
   const key = ctx.place('todo_tasks', where, [...params], op.afterId);
-  ctx.run(`INSERT INTO todo_tasks (id, project_id, section_id, parent_id, content, description, priority, due_date, due_time, recurrence, duration_min, deadline_date, sort_key, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, op.id, place.projectId, place.sectionId, place.parentId, op.content, op.description ?? '', op.priority ?? 4,
-  dueDate, dueTime, recurrence, op.durationMin ?? null, op.deadlineDate ?? null, key, ctx.now, ctx.now);
+  ctx.run(`INSERT INTO todo_tasks (id, project_id, section_id, parent_id, content, description, priority, due_date, due_time, recurrence, duration_min, deadline_date, slack_thread, sort_key, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, op.id, place.projectId, place.sectionId, place.parentId, op.content, op.description ?? '', op.priority ?? 4,
+  dueDate, dueTime, recurrence, op.durationMin ?? null, op.deadlineDate ?? null, op.slackThread ? JSON.stringify(op.slackThread) : null, key, ctx.now, ctx.now);
   if (op.labelIds?.length) setLabels(ctx, op.id, op.labelIds);
   ctx.touched.tasks.add(op.id);
   // Who made it, as the request's sender (TodoStore.apply): GitHub sync marks an agent's todo in its issue.
@@ -119,6 +119,7 @@ export function updateTask(ctx: TodoContext, op: TodoOpOf<'task.update'>): void 
   if (patch.priority !== undefined) columns.priority = patch.priority;
   if (patch.durationMin !== undefined) columns.duration_min = patch.durationMin;
   if (patch.deadlineDate !== undefined) columns.deadline_date = patch.deadlineDate;
+  if (patch.slackThread !== undefined) columns.slack_thread = patch.slackThread ? JSON.stringify(patch.slackThread) : null;
   const names = Object.keys(columns);
   ctx.run(`UPDATE todo_tasks SET ${names.map(name => `${name} = ?`).join(', ')}, updated_at = ? WHERE id = ?`, ...names.map(name => columns[name] as string | number | null), ctx.now, task.id);
   if (patch.labelIds !== undefined) setLabels(ctx, task.id, patch.labelIds);
@@ -178,7 +179,7 @@ export function moveTask(ctx: TodoContext, op: TodoOpOf<'task.move'>): void {
 /**
  * Copies a task and its open sub-tasks in one go, parents first: the copy sits right after the task among its siblings,
  * and each sub-task's copy keeps its order under the copied parent. What it holds is copied (title, description,
- * priority, dates, repeat, duration, deadline, labels); comments, attachments, completions and links are not.
+ * priority, dates, repeat, duration, deadline, labels, Slack thread); comments, attachments, completions and links are not.
  */
 export function duplicateTask(ctx: TodoContext, op: TodoOpOf<'task.duplicate'>): void {
   if (taskRow(ctx, op.copyId)) throw invalid('같은 id의 작업이 이미 있습니다.');
@@ -201,8 +202,8 @@ export function duplicateTask(ctx: TodoContext, op: TodoOpOf<'task.duplicate'>):
   const key = ctx.place('todo_tasks', where, [...params], source.id);
   for (const row of [source, ...below]) {
     const id = copies.get(row.id)!;
-    ctx.run(`INSERT INTO todo_tasks (id, project_id, section_id, parent_id, content, description, priority, due_date, due_time, recurrence, duration_min, deadline_date, sort_key, created_at, updated_at)
-      SELECT ?, project_id, section_id, ?, content, description, priority, due_date, due_time, recurrence, duration_min, deadline_date, ?, ?, ? FROM todo_tasks WHERE id = ?`,
+    ctx.run(`INSERT INTO todo_tasks (id, project_id, section_id, parent_id, content, description, priority, due_date, due_time, recurrence, duration_min, deadline_date, slack_thread, sort_key, created_at, updated_at)
+      SELECT ?, project_id, section_id, ?, content, description, priority, due_date, due_time, recurrence, duration_min, deadline_date, slack_thread, ?, ?, ? FROM todo_tasks WHERE id = ?`,
     id, row === source ? source.parent_id : copies.get(row.parent_id!)!, row === source ? key : row.sort_key, ctx.now, ctx.now, row.id);
     ctx.run(`INSERT INTO todo_task_labels (task_id, label_id) SELECT ?, tl.label_id FROM todo_task_labels tl JOIN todo_labels l ON l.id = tl.label_id AND l.deleted_at IS NULL
       WHERE tl.task_id = ?`, id, row.id);

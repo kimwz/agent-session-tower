@@ -72,6 +72,7 @@ test('the sub-task toggle counts done of all from the server, else the open ones
 test('the activity names the fields a change touched, when the server named them', () => {
   assert.equal(activityText({ kind: 'updated', detail: { fields: ['dueDate', 'priority'] } }), '날짜·우선순위를 고쳤습니다');
   assert.equal(activityText({ kind: 'updated', detail: { fields: ['content'] } }), '제목을 고쳤습니다');
+  assert.equal(activityText({ kind: 'updated', detail: { fields: ['slackThread'] } }), 'Slack 스레드를 고쳤습니다');
   assert.equal(activityText({ kind: 'moved', detail: { projectId: 'p', sectionId: null, parentId: null } }), '옮겼습니다');
   assert.equal(activityText({ kind: 'moved', detail: { day: '2026-10-17' } }), '순서를 바꿨습니다');
   assert.equal(activityText({ kind: 'updated', detail: {} }), '고쳤습니다');
