@@ -38,7 +38,8 @@ export const taskOf = (row: Row): TodoTask => ({
 function slackThreadColumn(value: unknown): { slackThread?: TodoSlackThread } {
   if (typeof value !== 'string') return {};
   let thread: TodoSlackThread | undefined;
-  try { thread = slackThreadOf(JSON.parse(value)); } catch { /* not JSON: none */ }
+  // best-effort: a value that is not JSON is no thread, like any other it cannot read.
+  try { thread = slackThreadOf(JSON.parse(value)); } catch { thread = undefined; }
   return thread ? { slackThread: thread } : {};
 }
 

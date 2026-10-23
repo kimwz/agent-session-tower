@@ -575,7 +575,7 @@ test('only the owner’s own message can approve a Slack send; agent work and co
   const ownerMessages: string[] = [];
   const slack = {
     withOwnerTurnAdmission: <T>(admit: () => Promise<T>) => admit(),
-    sessionMcp: () => undefined,
+    sessionMcp: () => undefined, sessionThread: () => undefined,
     ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return { prompt: message, instructions: '[owner receipt]' }; },
     coordinatorSessionIds: () => [],
   } as unknown as SlackService;
@@ -724,7 +724,7 @@ test('a web Auto Prompt is admitted as the owner’s request but never read as S
   await f.host.close();
   const ownerMessages: string[] = [];
   const submitted: unknown[] = [];
-  const slack = { withOwnerTurnAdmission: <T>(admit: () => Promise<T>) => admit(), sessionMcp: () => undefined, coordinatorSessionIds: () => [], ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return message; } } as unknown as SlackService;
+  const slack = { withOwnerTurnAdmission: <T>(admit: () => Promise<T>) => admit(), sessionMcp: () => undefined, sessionThread: () => undefined, coordinatorSessionIds: () => [], ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return message; } } as unknown as SlackService;
   const { EventEmitter } = await import('node:events');
   const autoPrompts = Object.assign(new EventEmitter(), {
     list: () => [], updateContext: () => {}, pauseAttachmentCleanup: async () => {}, resumeAttachmentCleanup: () => {}, cancel: async () => { throw new Error('unused'); },
@@ -751,7 +751,7 @@ test('Auto Prompt snapshots read coordinator IDs once and use a fresh set on eac
   let calls = 0;
   let coordinator = listed[0]!.id;
   const slack = {
-    automation: { list: () => [] }, sessionMcp: () => undefined,
+    automation: { list: () => [] }, sessionMcp: () => undefined, sessionThread: () => undefined,
     coordinatorSessionIds: () => { calls++; return [coordinator]; },
   } as unknown as SlackService;
   let context!: Parameters<import('../../../server/auto-prompt/manager.js').AutoPromptManager['updateContext']>[0];
@@ -1559,7 +1559,7 @@ test('worker records a verified calling turn without treating its message as own
   await f.host.close();
   const capabilities = new CapabilityRegistry();
   const ownerMessages: string[] = [];
-  const slack = { withOwnerTurnAdmission: <T>(admit: () => Promise<T>) => admit(), sessionMcp: () => undefined, coordinatorSessionIds: () => [],
+  const slack = { withOwnerTurnAdmission: <T>(admit: () => Promise<T>) => admit(), sessionMcp: () => undefined, sessionThread: () => undefined, coordinatorSessionIds: () => [],
     ownerChat: async (_id: string, prompt: string) => { ownerMessages.push(prompt); return { prompt };  } } as unknown as SlackService;
   const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, capabilities, slack });
   t.after(() => host.close());
