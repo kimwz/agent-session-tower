@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { Armchair, CalendarArrowUp, CalendarX, ChevronLeft, ChevronRight, Repeat, Sun, Sunrise } from 'lucide-react';
-import { addDays, addMonths, dateParts, daysInMonth, formatDate, weekday } from '../../../shared/todo/dates';
+import { addDays, addMonths, dateParts, formatDate, weekday } from '../../../shared/todo/dates';
 import { anchoredRecurrence } from '../../../shared/todo/recurrence';
 import type { TodoRecurrence } from '../../../shared/todo/types';
 import { getLanguage, translate as t } from '../i18n/i18n';
+import { monthWeeks, WEEK_DAYS } from './calendar/calendar-layout';
 import { durationLabel, longDate, monthDay, recurrenceLabel, weekdayName } from './todo-format';
 
 /**
@@ -15,6 +16,7 @@ export interface DateValue { dueDate: string | null; dueTime: string | null; dur
 
 const DURATIONS = [15, 30, 45, 60, 90, 120, 180, 240];
 
+/** The one-press dates. This weekend is Saturday (today on a weekend); next week is the next Monday, the work week's start. */
 export function quickDates(today: string): { key: string; label: string; date: string | null; icon: typeof Sun }[] {
   const saturday = [0, 6].includes(weekday(today)) ? today : addDays(today, 6 - weekday(today));
   const monday = addDays(today, ((8 - weekday(today)) % 7) || 7);
@@ -42,13 +44,10 @@ export function repeatPresets(date: string): { key: string; rule: TodoRecurrence
 export function MonthGrid({ month, selected, today, onPick }: { month: string; selected: string | null; today: string; onPick: (date: string) => void }) {
   const { year, month: number } = dateParts(month);
   const first = formatDate(year, number, 1);
-  // Weeks start on Monday.
-  const lead = (weekday(first) + 6) % 7;
-  const cells = Array.from({ length: Math.ceil((lead + daysInMonth(year, number)) / 7) * 7 }, (_, index) => addDays(first, index - lead));
   return <div className="todo-month" role="grid" aria-label={monthDay(first).replace(/ 1일$| 1$/, '')}>
-    <div className="todo-month-week" role="row">{[1, 2, 3, 4, 5, 6, 0].map(day => <span key={day} role="columnheader">{weekdayName(day)}</span>)}</div>
-    {Array.from({ length: cells.length / 7 }, (_, row) => <div key={row} className="todo-month-week" role="row">
-      {cells.slice(row * 7, row * 7 + 7).map(date => <button key={date} type="button" role="gridcell" aria-selected={date === selected} aria-label={longDate(date)}
+    <div className="todo-month-week" role="row">{WEEK_DAYS.map(day => <span key={day} role="columnheader">{weekdayName(day)}</span>)}</div>
+    {monthWeeks(first).map(week => <div key={week[0]} className="todo-month-week" role="row">
+      {week.map(date => <button key={date} type="button" role="gridcell" aria-selected={date === selected} aria-label={longDate(date)}
         className={`${dateParts(date).month !== number ? 'outside' : ''} ${date === today ? 'today' : ''} ${date < today ? 'past' : ''} ${date === selected ? 'selected' : ''}`}
         onClick={() => onPick(date)}>{dateParts(date).day}</button>)}
     </div>)}
@@ -132,7 +131,7 @@ function CustomRepeat({ rule, date, onChange }: { rule: TodoRecurrence; date: st
       </select>
     </div>
     {rule.freq === 'week' && !rule.fromCompletion && <div className="todo-weekday-toggles" role="group" aria-label={t('요일')}>
-      {[1, 2, 3, 4, 5, 6, 0].map(day => <button key={day} type="button" aria-pressed={days.includes(day)} onClick={() => {
+      {WEEK_DAYS.map(day => <button key={day} type="button" aria-pressed={days.includes(day)} onClick={() => {
         const next = days.includes(day) ? days.filter(item => item !== day) : [...days, day];
         if (next.length) set({ weekdays: next.sort((a, b) => a - b) });
       }}>{weekdayName(day)}</button>)}
@@ -146,7 +145,7 @@ function CustomRepeat({ rule, date, onChange }: { rule: TodoRecurrence; date: st
           {ordinals().map(([n, label]) => <option key={n} value={n}>{label}</option>)}
         </select>
         <select aria-label={t('요일')} value={rule.nth.weekday} onChange={event => set({ nth: { ...rule.nth!, weekday: Number(event.target.value) } })}>
-          {[1, 2, 3, 4, 5, 6, 0].map(day => <option key={day} value={day}>{weekdayName(day)}</option>)}
+          {WEEK_DAYS.map(day => <option key={day} value={day}>{weekdayName(day)}</option>)}
         </select>
       </> : <select aria-label={t('날짜')} value={rule.monthDays?.[0] ?? dateParts(date).day} onChange={event => set({ monthDays: [Number(event.target.value)] })}>
         {Array.from({ length: 31 }, (_, index) => index + 1).map(day => <option key={day} value={day}>{t('매월 {0}일', { 0: day })}</option>)}

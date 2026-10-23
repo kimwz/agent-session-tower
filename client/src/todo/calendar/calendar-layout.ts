@@ -4,7 +4,7 @@ import type { TodoCompletion, TodoRecurrence, TodoTask } from '../../../../share
 
 /**
  * The calendar's arithmetic, apart from drawing: which dates a month or week shows, where a time sits in the time grid
- * and back, how overlapping blocks share a day's width, and what each day holds. Weeks start on Monday.
+ * and back, how overlapping blocks share a day's width, and what each day holds.
  */
 
 export type CalendarMode = 'month' | 'week';
@@ -18,21 +18,24 @@ export const DAY_MINUTES = 1440;
 /** A timed task without a duration is drawn as half an hour. */
 export const DEFAULT_DURATION = 30;
 
-export const mondayOf = (date: string) => addDays(date, -((weekday(date) + 6) % 7));
+/** Weeks start on Sunday (일 월 화 수 목 금 토): the first weekday (0 = Sunday) and every weekday in the order a week shows them. */
+export const WEEK_START = 0;
+export const WEEK_DAYS = Array.from({ length: 7 }, (_, index) => (WEEK_START + index) % 7);
+export const weekStartOf = (date: string) => addDays(date, -((weekday(date) - WEEK_START + 7) % 7));
 export const monthStart = (date: string) => { const { year, month } = dateParts(date); return formatDate(year, month, 1); };
 
-/** The weeks a month view shows: whole Monday-to-Sunday weeks covering the month of `date`. */
+/** The weeks a month view shows: whole weeks covering the month of `date`. */
 export function monthWeeks(date: string): string[][] {
   const first = monthStart(date);
   const last = addDays(addMonths(first, 1), -1);
   const weeks: string[][] = [];
-  for (let start = mondayOf(first); start <= last; start = addDays(start, 7)) weeks.push(Array.from({ length: 7 }, (_, index) => addDays(start, index)));
+  for (let start = weekStartOf(first); start <= last; start = addDays(start, 7)) weeks.push(Array.from({ length: 7 }, (_, index) => addDays(start, index)));
   return weeks;
 }
 
-/** The days a time grid shows: the Monday-based week of `date`, or `count` days from it (a phone's three). */
+/** The days a time grid shows: the week of `date`, or `count` days from it (a phone's three). */
 export function gridDays(date: string, count: 7 | 3): string[] {
-  const start = count === 7 ? mondayOf(date) : date;
+  const start = count === 7 ? weekStartOf(date) : date;
   return Array.from({ length: count }, (_, index) => addDays(start, index));
 }
 
