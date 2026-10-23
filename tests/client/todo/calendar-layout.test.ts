@@ -277,4 +277,9 @@ test('the date picker month starts its weeks on Sunday too', () => {
   assert.deepEqual(cells.slice(0, 5), ['27', '28', '29', '30', '1']);
   assert.equal(cells.length, 35);
   assert.equal(cells[34], '31');
+  // May 2026 starts on a Friday and needs six rows: the last holds May 31 and six days of June.
+  const may = renderToStaticMarkup(createElement(MonthGrid, { month: '2026-05-01', selected: '2026-05-31', today: '2026-05-20', onPick() {} }));
+  assert.equal((may.match(/role="gridcell"/g) ?? []).length, 42);
+  assert.match(may, /class="\s*selected"[^>]*>31</);
+  assert.match(may, /class="outside\s*"[^>]*>6</);
 });
