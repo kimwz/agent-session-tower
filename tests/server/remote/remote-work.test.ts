@@ -44,7 +44,7 @@ test('remote work is inserted only into remote work from the same controller', (
 
 test('remote turns get Tower’s tools like the owner’s own, but never a coordinator’s, whatever conversation they reach', () => {
   const session = { id: 'codex:coordinator' } as Session;
-  const slack = { sessionMcp: () => ({ tower_slack: { command: 'x', args: ['--slack-mcp', 'state', '10000000-0000-4000-8000-000000000001'], env: {} } }) } as unknown as Pick<SlackService, 'sessionMcp'>;
+  const slack = { sessionMcp: () => ({ tower_slack: { command: 'x', args: ['--slack-mcp', 'state', '10000000-0000-4000-8000-000000000001'], env: {} } }), sessionThread: () => undefined } as unknown as Pick<SlackService, 'sessionMcp' | 'sessionThread'>;
   const resolve = runToolResolver({ stateDir: '/state', runs: { sessionOrigin: () => ({ kind: 'owner', untrustedInput: false }) }, slack, capabilities: new CapabilityRegistry(() => true), browsers: () => ({ playwright: true, claudeInChrome: false }) });
   const tools = resolve({ id: 'run', sessionId: session.id, origin: remote, prompt: 'x', status: 'queued', createdAt: '', output: '' }, session);
   assert.deepEqual([tools.required, tools.towerTools, Object.keys(tools.servers ?? {}).sort()], [false, 'remote', ['browser', 'browser_light', 'tower_todos']], 'browsers and this computer\'s todo tools, never the coordinator\'s tools');

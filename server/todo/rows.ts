@@ -1,4 +1,5 @@
-import type { TodoAgent, TodoAgentState, TodoComment, TodoCommentAuthor, TodoCompletion, TodoEvent, TodoEventKind, TodoFile, TodoGitHubBinding, TodoLabel, TodoLayout, TodoLink, TodoPriority, TodoProject, TodoRecurrence, TodoSection, TodoTask } from '../../shared/todo/types.js';
+import type { TodoAgent, TodoAgentState, TodoComment, TodoCommentAuthor, TodoCompletion, TodoEvent, TodoEventKind, TodoFile, TodoGitHubBinding, TodoLabel, TodoLayout, TodoLink, TodoPriority, TodoProject, TodoRecurrence, TodoSection, TodoSlackThread, TodoTask } from '../../shared/todo/types.js';
+import { slackThreadOf } from '../../shared/todo/slack-thread.js';
 
 /** Each table's row and the value the page sees, converted in one place per table. */
 
@@ -30,7 +31,16 @@ export const taskOf = (row: Row): TodoTask => ({
   durationMin: row.duration_min === null || row.duration_min === undefined ? null : Number(row.duration_min), deadlineDate: maybe(row.deadline_date),
   labelIds: row.labels ? text(row.labels).split(',').sort() : [], sortKey: text(row.sort_key), dayOrder: maybe(row.day_order), completedAt: maybe(row.completed_at), ...stamps(row),
   ...(row.gh_issue ? { github: text(row.gh_issue) } : {}),
+  ...slackThreadColumn(row.slack_thread),
 });
+
+/** A task's stored Slack thread; one this build cannot read shows as none. */
+function slackThreadColumn(value: unknown): { slackThread?: TodoSlackThread } {
+  if (typeof value !== 'string') return {};
+  let thread: TodoSlackThread | undefined;
+  try { thread = slackThreadOf(JSON.parse(value)); } catch { /* not JSON: none */ }
+  return thread ? { slackThread: thread } : {};
+}
 
 /** A task's columns with its live labels, for `SELECT ${TASK_COLUMNS} FROM todo_tasks t …`. */
 export const TASK_COLUMNS = `t.*, (SELECT group_concat(tl.label_id) FROM todo_task_labels tl JOIN todo_labels l ON l.id = tl.label_id AND l.deleted_at IS NULL WHERE tl.task_id = t.id) AS labels,

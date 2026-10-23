@@ -207,3 +207,19 @@ test('a comment carries screenshots and recordings from this computer, every pat
   assert.deepEqual(partial.failed, [{ path: join(dir, 'after.mp4'), error: 'disk full' }]);
   assert.ok(store.detail(item.id).comments.some(comment => comment.id === partial.commented.id));
 });
+
+test('in a Slack conversation the task an agent adds links to its thread, and only that task: not the one it completes, not elsewhere', async t => {
+  const { store, call } = await fixture(t);
+  const thread = { teamId: 'TBMLFLL3F', channel: 'C0A88QQ5607', threadTs: '1792746520.260769' };
+  const before = call('todos_add', { text: 'Earlier, from the page' }).added;
+  const slack = (name: string, args: Record<string, unknown>) => callTodoTool({ overview: () => store.overview(), detail: id => store.detail(id), completed: input => store.completed(input),
+    search: (query, input) => store.search(query, input), apply: (request, by) => store.apply(request, by) }, name, args, { now, slackThread: thread }) as any;
+  const { added } = slack('todos_add', { text: 'B300 지원 여부 답변 #missing @beta' });
+  assert.equal(added.slack, 'https://slack.com/archives/C0A88QQ5607/p1792746520260769');
+  const { added: next, completed } = slack('todos_complete', { id: before.id, next: { text: 'Then reply @later' } });
+  assert.deepEqual([store.detail(added.id).task.slackThread, store.detail(next.id).task.slackThread, store.detail(completed.id).task.slackThread, completed.slack], [thread, thread, undefined, undefined]);
+  assert.equal(call('todos_add', { text: 'Elsewhere' }).added.slack, undefined);
+  // Linking one made before, by hand.
+  call('todos_apply', { ops: [{ op: 'task.update', id: before.id, patch: { slackThread: thread } }] });
+  assert.equal(call('todos_get', { id: before.id }).task.slack, added.slack);
+});

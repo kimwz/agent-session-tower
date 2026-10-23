@@ -5,7 +5,8 @@ import { completeOp, liveProjectIds, quickAddOps, type QuickAddDraft } from '../
 import { addDays, formatDate } from '../../shared/todo/dates.js';
 import { labelName, MAX_TODO_OPS, TodoOpSchema, TodoRequestSchema, type TodoOp } from '../../shared/todo/ops.js';
 import { parseQuickAdd, type QuickAddResult } from '../../shared/todo/quick-add.js';
-import type { TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoFile, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import { slackThreadOf, slackThreadUrl } from '../../shared/todo/slack-thread.js';
+import type { TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoFile, TodoOverview, TodoSlackThread, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { TowerError } from '../../shared/errors.js';
 import { checkLocalMedia, LOCAL_MEDIA } from './files.js';
 import { commentWriter, OUTSIDE_SHORT, outsideNotice } from './github/outside.js';
@@ -34,7 +35,8 @@ export interface TodoToolStore {
   attachFile?(input: { taskId: string; commentId: string | null; path: string }): Promise<TodoFile>;
 }
 
-interface Context { store: TodoToolStore; today: string; newId: () => string }
+/** `slackThread` is the Slack thread of the conversation the turn is in (todo/agent-mcp.ts), when it is one. */
+interface Context { store: TodoToolStore; today: string; newId: () => string; slackThread?: TodoSlackThread }
 interface Tool<T extends z.ZodType = z.ZodType> { name: string; description: string; input: T; run(args: z.infer<T>, context: Context): unknown }
 const tool = <T extends z.ZodType>(definition: Tool<T>): Tool => definition as unknown as Tool;
 
@@ -102,6 +104,7 @@ function namer(overview: Pick<TodoOverview, 'projects' | 'sections' | 'labels' |
       ...(followers?.length ? { next: followers } : {}),
       // Its title and description may have been written on GitHub by others (server/todo/github/outside.ts).
       ...(task.github ? { github: task.github, outside: OUTSIDE_SHORT } : {}),
+      ...(task.slackThread ? { slack: slackThreadUrl(task.slackThread) } : {}),
     };
   };
 }
@@ -173,13 +176,18 @@ function draftOf(overview: TodoOverview, input: z.infer<typeof AddInput>, today:
   };
 }
 
-/** Adds a task in one request: alone, as a sub-task, or after `after` (completing it first when `complete`). */
+/**
+ * Adds a task in one request: alone, as a sub-task, or after `after` (completing it first when `complete`). A task added
+ * in a Slack conversation is linked to its thread.
+ */
 function add(context: Context, input: z.infer<typeof AddInput>, follow?: { after: TodoTask; complete: boolean }) {
   const overview = context.store.overview();
   const { draft, labelOps } = draftOf(overview, input, context.today, context.newId);
   const { ops, id: created } = quickAddOps(draft, follow ? { taskId: follow.after.id, complete: follow.complete } : null, follow?.after, context.today,
     input.parentId ? { parentId: input.parentId } : {}, context.newId);
-  const changes = apply(context, [...labelOps, ...ops]);
+  const thread = context.slackThread;
+  const linked = thread ? ops.map(op => op.op === 'task.create' && op.id === created ? { ...op, slackThread: thread } : op) : ops;
+  const changes = apply(context, [...labelOps, ...linked]);
   const after = context.store.overview();
   const name = namer(after);
   const made = changes.tasks.find(item => item.id === created);
@@ -277,7 +285,7 @@ const TOOLS: Tool[] = [
   }),
   tool({
     name: 'todos_add',
-    description: 'Adds a task, written as the owner would type it in Quick Add (e.g. "견적 회신 내일 오후 3시 #타워 p1"). With after, it comes after that task as its next step (order only: either can be done first); completeAfter also completes that task in the same request.',
+    description: 'Adds a task, written as the owner would type it in Quick Add (e.g. "견적 회신 내일 오후 3시 #타워 p1"). With after, it comes after that task as its next step (order only: either can be done first); completeAfter also completes that task in the same request. Added in a Slack conversation, the task links to its thread by itself: no need to write channel ids.',
     input: AddInput.extend({ after: id.optional().describe('The task this one comes after.'), completeAfter: z.boolean().optional() }).strict(),
     run: ({ after, completeAfter, ...input }, context) => {
       if (completeAfter && !after) throw new TowerError('invalid', 'completeAfter needs after.');
@@ -397,18 +405,22 @@ export function todoToolList(): unknown[] {
 }
 
 /** Runs one tool; an input that does not fit, or a change the store refuses, is an error with the reason. */
-export function callTodoTool(store: TodoToolStore, name: string, args: unknown, options: { now?: Date; newId?: () => string } = {}): unknown {
+export function callTodoTool(store: TodoToolStore, name: string, args: unknown, options: { now?: Date; newId?: () => string; slackThread?: TodoSlackThread } = {}): unknown {
   const found = TOOLS.find(item => item.name === name);
   if (!found) throw new TowerError('not-found', `Unknown todo tool: ${name}.`);
   const parsed = found.input.safeParse(args ?? {});
   if (!parsed.success) throw new TowerError('invalid', `Invalid input: ${parsed.error.issues.map(issue => `${issue.path.join('.') || 'input'}: ${issue.message}`).join('; ')}`);
-  return found.run(parsed.data, { store: readable(store), today: DAY(options.now ?? new Date()), newId: options.newId ?? randomUUID });
+  return found.run(parsed.data, { store: readable(store), today: DAY(options.now ?? new Date()), newId: options.newId ?? randomUUID, slackThread: options.slackThread });
 }
 
-/** One request of the tool server (agent-mcp.ts), as the web answers it. */
+/**
+ * One request of the tool server (agent-mcp.ts), as the web answers it. `origin.slackThread` is the turn's Slack thread;
+ * one that is not a thread is left out, so a tool still works without the link.
+ */
 export function answerTodoTools(store: TodoToolStore, body: Record<string, unknown>): unknown {
   if (body.method === 'tools/list') return { tools: todoToolList() };
-  if (body.method === 'tools/call') return callTodoTool(store, String(body.name ?? ''), body.arguments);
+  const origin = body.origin as { slackThread?: unknown } | undefined;
+  if (body.method === 'tools/call') return callTodoTool(store, String(body.name ?? ''), body.arguments, { slackThread: slackThreadOf(origin?.slackThread) });
   throw new TowerError('not-found', 'Unknown todo tools request.');
 }
 

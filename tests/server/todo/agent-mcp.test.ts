@@ -8,7 +8,7 @@ import { createServer, type Server } from 'node:http';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { callWebTools } from '../../../server/mcp/stdio.js';
 import { TodoStore } from '../../../server/todo/store.js';
-import { startTodosMcp, todoToolsKey } from '../../../server/todo/agent-mcp.js';
+import { startTodosMcp, TODO_SLACK_THREAD_ENV, todoToolsKey } from '../../../server/todo/agent-mcp.js';
 import { answerTodoTools, TODO_TOOL_NAMES, TODO_TOOLS_PATH } from '../../../server/todo/agent-tools.js';
 import type { Snapshot } from '../../../shared/types.js';
 
@@ -124,4 +124,32 @@ test('a request is never sent twice: an answer lost after sending is uncertain, 
   assert.equal(reached, 1);
   await assert.rejects(call([forbid]), /did not accept the todo tools key/);
   await assert.rejects(call([closed]), /not running/);
+});
+
+test('a Slack conversation\'s tool server links the tasks it adds to its thread; a thread it cannot read leaves them unlinked', async t => {
+  const { dir, store, key } = await fixture(t);
+  const current = await web(t, dir, store, key);
+  const serve = (env: NodeJS.ProcessEnv) => {
+    const input = new PassThrough(), output = new PassThrough();
+    const replies: any[] = [];
+    let buffer = '';
+    output.on('data', chunk => { buffer += chunk.toString(); let end; while ((end = buffer.indexOf('\n')) !== -1) { replies.push(JSON.parse(buffer.slice(0, end))); buffer = buffer.slice(end + 1); } });
+    const serving = startTodosMcp(dir, input, output, async () => [current.port], env);
+    t.after(() => { input.end(); return serving; });
+    let next = 0;
+    return async (text: string) => {
+      const id = ++next;
+      input.write(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'todos_add', arguments: { text } } }) + '\n');
+      for (let wait = 0; wait < 200 && !replies.some(reply => reply.id === id); wait++) await new Promise(resolve => setTimeout(resolve, 10));
+      return JSON.parse(replies.find(reply => reply.id === id).result.content[0].text).added as { id: string; slack?: string };
+    };
+  };
+  const thread = { teamId: 'TBMLFLL3F', channel: 'C0A88QQ5607', threadTs: '1792746520.260769' };
+  const linked = await serve({ [TODO_SLACK_THREAD_ENV]: JSON.stringify(thread) })('Answer the GPU beta');
+  assert.equal(linked.slack, 'https://slack.com/archives/C0A88QQ5607/p1792746520260769', 'the agent sees the link');
+  assert.deepEqual(store.detail(linked.id).task.slackThread, thread);
+  for (const env of [{}, { [TODO_SLACK_THREAD_ENV]: 'not json' }, { [TODO_SLACK_THREAD_ENV]: JSON.stringify({ ...thread, channel: 'javascript:alert(1)' }) }]) {
+    const plain = await serve(env)('Plain task');
+    assert.deepEqual([plain.slack, store.detail(plain.id).task.slackThread], [undefined, undefined]);
+  }
 });

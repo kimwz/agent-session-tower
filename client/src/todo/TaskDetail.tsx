@@ -1,9 +1,10 @@
 import { useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { closestCenter, DndContext, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
-import { ArrowLeft, ArrowRight, ArrowUpFromLine, Bot, CalendarDays, Check, CheckCheck, ChevronDown, Clock3, Copy, CornerDownRight, CornerLeftUp, ExternalLink, Flag, Github, GripVertical, History, Link, Link2, LoaderCircle, MessageSquare, MoreHorizontal, Paperclip, Pencil, Plus, Send, Tag, Trash2, User, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ArrowUpFromLine, Bot, CalendarDays, Check, CheckCheck, ChevronDown, Clock3, Copy, CornerDownRight, CornerLeftUp, ExternalLink, Flag, Github, GripVertical, History, Link, Link2, LoaderCircle, MessageSquare, MoreHorizontal, Paperclip, Pencil, Plus, Send, Slack, Tag, Trash2, User, X } from 'lucide-react';
 import type { TodoAgent, TodoComment, TodoEvent, TodoFile, TodoGitHubIssue, TodoPriority, TodoTask } from '../../../shared/todo/types';
 import { liveProjectIds } from '../../../shared/todo/compose';
+import { slackThreadUrl } from '../../../shared/todo/slack-thread';
 import { relativeTime } from '../common/lib';
 import { PanelResizeHandle, usePanelWidth } from '../common/panel-resize';
 import { getLanguage, translate as t, translateMessage } from '../i18n/i18n';
@@ -146,17 +147,26 @@ function githubIssueOf({ task, world }: DetailContext): TodoGitHubIssue | undefi
 function GitHubProperty(context: DetailContext) {
   const issue = githubIssueOf(context)!;
   const title = issue.error ? `${issue.repo}#${issue.number} — ${translateMessage(issue.error)}` : t('GitHub에서 보기');
-  return <a className={`todo-property-value todo-github-link ${issue.error ? 'error' : ''}`} href={issue.url} target="_blank" rel="noreferrer" title={title}>
+  return <a className={`todo-property-value todo-outside-link todo-github-link ${issue.error ? 'error' : ''}`} href={issue.url} target="_blank" rel="noreferrer" title={title}>
     <span>{issue.repo}#{issue.number}</span><ExternalLink size={12} aria-hidden="true" />
+  </a>;
+}
+
+/** The Slack thread a todo came from, opened where it was asked. */
+function SlackThreadProperty({ task }: DetailContext) {
+  const thread = task.slackThread!;
+  return <a className="todo-property-value todo-outside-link" href={slackThreadUrl(thread)} target="_blank" rel="noreferrer" title={`${t('Slack에서 보기')} · #${thread.channel}`}>
+    <span>{t('스레드 열기')}</span><ExternalLink size={12} aria-hidden="true" />
   </a>;
 }
 
 /**
  * In the order they are used: the date and priority most, then labels and the project; deadline and duration rarely.
- * A synced todo's GitHub issue heads the card, as the way out to where it is discussed.
+ * A synced todo's GitHub issue and a todo's Slack thread head the card, as the ways out to where it is discussed.
  */
 export const DETAIL_PROPERTIES: PropertyRow[] = [
   { key: 'github', label: 'GitHub', icon: <Github size={13} />, render: context => <GitHubProperty {...context} />, shown: context => !!githubIssueOf(context) },
+  { key: 'slack', label: 'Slack', icon: <Slack size={13} />, render: context => <SlackThreadProperty {...context} />, shown: context => !!context.task.slackThread },
   { key: 'date', label: '날짜', icon: <CalendarDays size={13} />, render: context => <DateProperty {...context} /> },
   { key: 'priority', label: '우선순위', render: context => <PriorityProperty {...context} /> },
   { key: 'labels', label: '라벨', icon: <Tag size={13} />, render: context => <LabelsProperty {...context} /> },

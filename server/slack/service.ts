@@ -21,6 +21,7 @@ import { judgeSlackFollowUp } from './follow-up.js';
 import type { DecisionEngine } from '../decisions/engine.js';
 import type { WorkflowRepository } from './storage-repository.js';
 import { TowerError } from '../../shared/errors.js';
+import type { TodoSlackThread } from '../../shared/todo/types.js';
 import { StorageCommandError } from '../storage/contract.js';
 
 type Account = { teamId: string; userId: string; teamName?: string; userName?: string };
@@ -233,11 +234,20 @@ export class SlackService extends EventEmitter {
     const workflows = this.automation.list().filter(item => item.mode === 'conversation');
     return [...new Set(workflows.flatMap(item => item.sessionId ? [item.sessionId] : this.options.runs.list().filter(run => run.autoPromptId === item.id).map(run => run.sessionId)))];
   }
+  /** The Slack conversation a session is: its own, or the one whose Auto Prompt run made it. */
+  private conversationOf(sessionId: string) {
+    return this.automation.list().find(item => item.mode === 'conversation' && (item.sessionId === sessionId || this.options.runs.list().some(run => run.sessionId === sessionId && run.autoPromptId === item.id)));
+  }
   sessionMcp(sessionId: string): SessionMcpServers | undefined {
-    const item = this.automation.list().find(item => item.mode === 'conversation' && (item.sessionId === sessionId || this.options.runs.list().some(run => run.sessionId === sessionId && run.autoPromptId === item.id)));
+    const item = this.conversationOf(sessionId);
     if (!item) return undefined;
     return { tower_slack: { command: process.execPath, args: isSea() ? ['--slack-mcp', this.options.stateDir, item.id]
       : [fileURLToPath(new URL('../index.js', import.meta.url)), '--slack-mcp', this.options.stateDir, item.id] } };
+  }
+  /** The Slack thread a session's conversation is in, for the todos its turns add (todo/agent-mcp.ts). */
+  sessionThread(sessionId: string): TodoSlackThread | undefined {
+    const mention = this.conversationOf(sessionId)?.mention;
+    return mention && { teamId: mention.teamId, channel: mention.channel, threadTs: mention.threadTs };
   }
   tool(workflowId: string, name: string, args: Record<string, unknown>) { return this.automation.tool(workflowId, name, args); }
   /** I must hold this queue through ownerChat AND durable native run admission/enqueue. */

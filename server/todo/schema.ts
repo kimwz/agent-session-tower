@@ -127,6 +127,8 @@ export const TODO_SCHEMA: readonly TodoSchemaStep[] = [
     CREATE INDEX todo_github_comments_task ON todo_github_comments(task_id);
     CREATE TABLE todo_github_files (file_id TEXT NOT NULL, repo TEXT NOT NULL, url TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (file_id, repo)) STRICT;
   ` },
+  // The Slack thread a task came from (TodoTask.slackThread), as JSON; NULL for none.
+  { sql: 'ALTER TABLE todo_tasks ADD COLUMN slack_thread TEXT;' },
 ];
 
 export const TODO_SCHEMA_STEP = TODO_SCHEMA.length;

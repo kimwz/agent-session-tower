@@ -121,6 +121,7 @@ test('dedicated coordinator exposes scoped MCP during creation and follows later
       assert.equal(service.overview().events[0].sessionId, undefined);
       assert.ok(service.sessionMcp(run.sessionId)?.tower_slack.args.includes('--slack-mcp'));
       assert.equal(service.sessionMcp('unrelated'), undefined);
+      assert.deepEqual([service.sessionThread(run.sessionId), service.sessionThread('unrelated')], [{ teamId: 'T1', channel: 'G1', threadTs: '1' }, undefined], 'its thread, for the todos it adds');
       return { run, session: { id: run.sessionId, nativeId: 'test', provider: 'codex', title: 'Slack', cwd: input.cwd, project: 'Slack', status: 'working', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true } };
     },
   }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('unexpected delegation'); } }, refresh: async () => {} }, {

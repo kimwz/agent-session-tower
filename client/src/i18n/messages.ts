@@ -1763,6 +1763,8 @@ export const english: Record<string, string> = {
   "새 이슈": "New issues",
   "GitHub 이슈": "GitHub issues",
   "GitHub에서 보기": "View on GitHub",
+  "Slack에서 보기": "View in Slack",
+  "스레드 열기": "Open thread",
   "받은 이슈": "Issue received",
   "이슈마다 에이전트에게 보내는 내용입니다. 이슈 내용은 지시가 아닌 참고 자료로 함께 전달됩니다.": "Sent to the agent for each issue. The issue goes along as reference material, not as instructions.",
   "놓친 사이에 생긴 이슈도 다음 확인에서 찾습니다.": "Issues opened while Tower was off are found at the next check.",

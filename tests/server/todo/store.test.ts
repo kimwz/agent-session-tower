@@ -585,3 +585,29 @@ test('a restored backup keeps its comments’ authors: none from an older build,
   store.restoreData(TODO_SCHEMA_STEP, backup.tables);
   assert.deepEqual(author(), ['owner']);
 });
+
+test('a task keeps the Slack thread it came from: set, copied, cleared, kept by a backup, and unreadable ones show as none', async t => {
+  const { dir, store, make, apply, task } = await fixture(t);
+  const thread = { teamId: 'TBMLFLL3F', channel: 'C0A88QQ5607', threadTs: '1792746520.260769' };
+  apply({ op: 'task.create', id: 'a', content: 'From Slack', slackThread: thread }, { op: 'task.create', id: 'b', content: 'Linked later' });
+  assert.deepEqual([task('a')!.slackThread, 'slackThread' in task('b')!], [thread, false]);
+  apply({ op: 'task.update', id: 'b', patch: { slackThread: thread } }, { op: 'task.duplicate', id: 'a', copyId: 'copy' });
+  assert.deepEqual([task('b')!.slackThread, store.overview().tasks.filter(item => item.slackThread).length], [thread, 3], 'a copy is the same work, from the same thread');
+  apply({ op: 'task.update', id: 'b', patch: { slackThread: null } });
+  assert.equal(task('b')!.slackThread, undefined);
+  // Only ids: anything that would make another link is refused.
+  for (const slackThread of [{ ...thread, channel: 'https://evil.example' }, { ...thread, threadTs: '1' }, { ...thread, url: 'https://slack.com' }])
+    assert.equal(TodoRequestSchema.safeParse({ requestId: randomUUID(), ops: [{ op: 'task.update', id: 'b', patch: { slackThread } }] }).success, false);
+  const backup = store.backupData()!;
+  apply({ op: 'task.update', id: 'a', patch: { slackThread: null } });
+  store.restoreData(TODO_SCHEMA_STEP, backup.tables);
+  assert.deepEqual(task('a')!.slackThread, thread);
+  store.close();
+  const db = new DatabaseSync(join(dir, 'todos.sqlite'));
+  db.prepare("UPDATE todo_tasks SET slack_thread = 'not json' WHERE id = 'a'").run();
+  db.close();
+  const reopened = make();
+  reopened.start();
+  t.after(() => reopened.close());
+  assert.equal(reopened.overview().tasks.find(item => item.id === 'a')!.slackThread, undefined);
+});

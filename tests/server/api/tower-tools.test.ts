@@ -136,6 +136,7 @@ test('a Slack conversation credential opens only that conversation’s Slack too
   assert.deepEqual(calls, [['workflow-1', 'slack_thread', {}]]);
 });
 
+const THREAD = { teamId: 'T0TEAM', channel: 'C0CHANNEL', threadTs: '1792746520.260769' };
 test('only owner turns in the owner’s own conversations receive Tower tools; every turn here can look up sessions', async t => {
   const f = await fixture(t);
   const origins = new Map<string, SessionOrigin | undefined>([
@@ -144,7 +145,8 @@ test('only owner turns in the owner’s own conversations receive Tower tools; e
   ]);
   const turn = (id: string, origin: Run['origin']): Run => ({ id: randomUUID(), sessionId: id, prompt: '', status: 'queued', createdAt: '', output: '', origin });
   const resolver = runToolResolver({ stateDir: f.stateDir, capabilities: f.capabilities, runs: { sessionOrigin: id => origins.get(id) }, browsers: () => ({ playwright: true, claudeInChrome: false }),
-    slack: { sessionMcp: id => id === 'codex:coordinator' ? { tower_slack: { command: 'node', args: ['index.js', '--slack-mcp', f.stateDir, 'wf-1'] } } : undefined } });
+    slack: { sessionMcp: id => id === 'codex:coordinator' ? { tower_slack: { command: 'node', args: ['index.js', '--slack-mcp', f.stateDir, 'wf-1'] } } : undefined,
+      sessionThread: id => id === 'codex:coordinator' ? THREAD : undefined } });
   const resolve = (origin: Run['origin'], target: Session) => resolver(turn(target.id, origin), target);
   const owner = { kind: 'owner' as const };
   const native = resolve(owner, session('codex:native'));
@@ -172,6 +174,7 @@ test('only owner turns in the owner’s own conversations receive Tower tools; e
   assert.equal(coordinator.required, true);
   assert.deepEqual(lookups(coordinator), ['browser', 'browser_light', 'tower_sessions', 'tower_slack', 'tower_todos']);
   assert.equal(f.capabilities.resolve(coordinator.servers!.tower_slack.env!.TOWER_MCP_CAPABILITY)?.kind, 'slack-workflow');
+  assert.deepEqual(coordinator.servers!.tower_todos.env, { TOWER_TODO_SLACK_THREAD: JSON.stringify(THREAD) }, 'the tasks a Slack conversation adds link to its thread');
   assert.equal(towerTools().some(tool => tool.name === 'triggers_updateSettings'), false);
 });
 
@@ -398,7 +401,7 @@ test('every turn in a session that may use secrets gets its own secret broker ne
   const secrets = { initialized: () => initialized, subject: (target: Session, run: Run | undefined, stage: SecretStage) =>
     secretSubject({ run, session: target, provenance: known.get(target.id)?.provenance, stage, lookup: id => known.get(id), findRun: id => started.get(id) }) };
   const options = { stateDir: f.stateDir, capabilities: f.capabilities, runs: { sessionOrigin: (id: string) => known.get(id)?.provenance }, browsers: () => ({ playwright: true, claudeInChrome: false }),
-    slack: { sessionMcp: (id: string) => id === 'codex:slack' ? { tower_slack: { command: 'node', args: ['index.js', '--slack-mcp', f.stateDir, WORKFLOW] } } : undefined },
+    slack: { sessionMcp: (id: string) => id === 'codex:slack' ? { tower_slack: { command: 'node', args: ['index.js', '--slack-mcp', f.stateDir, WORKFLOW] } } : undefined, sessionThread: () => undefined },
     github: { sessionWorkflow: (id: string) => id === 'codex:github' ? 'github-workflow' : undefined } };
   const resolver = runToolResolver({ ...options, secrets });
   const turn = (target: Session, origin: Run['origin'], delegation?: Run['delegation']): Run => {
