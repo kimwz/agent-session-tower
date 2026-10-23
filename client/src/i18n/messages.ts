@@ -2788,6 +2788,7 @@ export const english: Record<string, string> = {
   "마감 {0}": "Due {0}",
   "마감일": "Deadline",
   "라벨": "Labels",
+  "Slack 스레드": "Slack thread",
   "하위 작업": "Sub-tasks",
   "댓글": "Comments",
   "새 댓글": "New comments",

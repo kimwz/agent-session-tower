@@ -478,7 +478,7 @@ const EVENT_LABELS: Record<TodoEvent['kind'], string> = {
 
 /** What a change touched, by the field names the server records (`detail.fields`). */
 const FIELD_LABELS: Record<string, string> = {
-  content: '제목', description: '설명', priority: '우선순위', dueDate: '날짜', dueTime: '시간', recurrence: '반복', durationMin: '소요 시간', deadlineDate: '마감일', labelIds: '라벨',
+  content: '제목', description: '설명', priority: '우선순위', dueDate: '날짜', dueTime: '시간', recurrence: '반복', durationMin: '소요 시간', deadlineDate: '마감일', labelIds: '라벨', slackThread: 'Slack 스레드',
 };
 
 /** The object particle a Korean word takes: 을 after a final consonant, else 를. */

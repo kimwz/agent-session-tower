@@ -417,8 +417,8 @@ export function applyOps(world: TodoWorld, ops: readonly TodoOp[], context: Appl
   return next.detail ? { ...next, detail: syncDetail(next.detail, next.tasks) } : next;
 }
 
-/** What the fields were; a task without a Slack thread had `null` there, as a patch clears it. */
-const taskFieldsOf = (task: TodoTask, fields: string[]) => Object.fromEntries(fields.map(field => [field, field === 'slackThread' ? task.slackThread ?? null : task[field as keyof TodoTask]]));
+/** What the fields were; one the task did not have (a Slack thread) was `null`, as a patch clears it. */
+const taskFieldsOf = (task: TodoTask, fields: string[]) => Object.fromEntries(fields.map(field => [field, task[field as keyof TodoTask] ?? null]));
 
 /**
  * The operations that put things back as they were before `ops`, in reverse order; null when one of them cannot be

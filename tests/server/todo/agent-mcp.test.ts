@@ -11,6 +11,7 @@ import { TodoStore } from '../../../server/todo/store.js';
 import { startTodosMcp, TODO_SLACK_THREAD_ENV, todoToolsKey } from '../../../server/todo/agent-mcp.js';
 import { answerTodoTools, TODO_TOOL_NAMES, TODO_TOOLS_PATH } from '../../../server/todo/agent-tools.js';
 import type { Snapshot } from '../../../shared/types.js';
+import { until } from '../../helpers/until.js';
 
 /** A web with todos and the agents' todo tools, like server/index.ts composes it. */
 async function web(t: TestContext, dir: string, store: TodoStore, key: string) {
@@ -35,6 +36,22 @@ async function fixture(t: TestContext) {
   store.start();
   t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
   return { dir, store, key: await todoToolsKey(dir) };
+}
+
+/** A tool server as a turn starts it, over stdio; `ask` sends one request and waits for its answer. */
+function serveTodos(t: TestContext, dir: string, ports: () => Promise<number[]>, env?: NodeJS.ProcessEnv) {
+  const input = new PassThrough(), output = new PassThrough();
+  const replies: any[] = [];
+  let buffer = '';
+  output.on('data', chunk => { buffer += chunk.toString(); let end; while ((end = buffer.indexOf('\n')) !== -1) { replies.push(JSON.parse(buffer.slice(0, end))); buffer = buffer.slice(end + 1); } });
+  const serving = startTodosMcp(dir, input, output, ports, env);
+  t.after(() => { input.end(); return serving; });
+  let next = 0;
+  return async (method: string, params: unknown) => {
+    const id = ++next;
+    input.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    return until(() => replies.find(reply => reply.id === id));
+  };
 }
 
 test('the key is made once, kept owner-only, and is the same after a restart', async t => {
@@ -70,20 +87,7 @@ test('the web answers the todo tools only with their key, from this computer, ne
 test('the tool server a turn starts reaches the web, finds it again after a restart on another port, and says when Tower is not running', async t => {
   const { dir, store, key } = await fixture(t);
   let current = await web(t, dir, store, key);
-  const ports = async () => [current.port];
-  const input = new PassThrough(), output = new PassThrough();
-  const replies: any[] = [];
-  let buffer = '';
-  output.on('data', chunk => { buffer += chunk.toString(); let end; while ((end = buffer.indexOf('\n')) !== -1) { replies.push(JSON.parse(buffer.slice(0, end))); buffer = buffer.slice(end + 1); } });
-  const serving = startTodosMcp(dir, input, output, ports);
-  t.after(() => { input.end(); return serving; });
-  let next = 0;
-  const ask = async (method: string, params: unknown) => {
-    const id = ++next;
-    input.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-    for (let wait = 0; wait < 200 && !replies.some(reply => reply.id === id); wait++) await new Promise(resolve => setTimeout(resolve, 10));
-    return replies.find(reply => reply.id === id);
-  };
+  const ask = serveTodos(t, dir, async () => [current.port]);
   const tools = await ask('tools/list', {});
   assert.deepEqual(tools.result.tools.map((tool: { name: string }) => tool.name), TODO_TOOL_NAMES);
   const added = await ask('tools/call', { name: 'todos_add', arguments: { text: 'Water the plants 매일' } });
@@ -130,19 +134,8 @@ test('a Slack conversation\'s tool server links the tasks it adds to its thread;
   const { dir, store, key } = await fixture(t);
   const current = await web(t, dir, store, key);
   const serve = (env: NodeJS.ProcessEnv) => {
-    const input = new PassThrough(), output = new PassThrough();
-    const replies: any[] = [];
-    let buffer = '';
-    output.on('data', chunk => { buffer += chunk.toString(); let end; while ((end = buffer.indexOf('\n')) !== -1) { replies.push(JSON.parse(buffer.slice(0, end))); buffer = buffer.slice(end + 1); } });
-    const serving = startTodosMcp(dir, input, output, async () => [current.port], env);
-    t.after(() => { input.end(); return serving; });
-    let next = 0;
-    return async (text: string) => {
-      const id = ++next;
-      input.write(JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'todos_add', arguments: { text } } }) + '\n');
-      for (let wait = 0; wait < 200 && !replies.some(reply => reply.id === id); wait++) await new Promise(resolve => setTimeout(resolve, 10));
-      return JSON.parse(replies.find(reply => reply.id === id).result.content[0].text).added as { id: string; slack?: string };
-    };
+    const ask = serveTodos(t, dir, async () => [current.port], env);
+    return async (text: string) => JSON.parse((await ask('tools/call', { name: 'todos_add', arguments: { text } })).result.content[0].text).added as { id: string; slack?: string };
   };
   const thread = { teamId: 'TBMLFLL3F', channel: 'C0A88QQ5607', threadTs: '1792746520.260769' };
   const linked = await serve({ [TODO_SLACK_THREAD_ENV]: JSON.stringify(thread) })('Answer the GPU beta');

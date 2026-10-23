@@ -179,7 +179,7 @@ export function moveTask(ctx: TodoContext, op: TodoOpOf<'task.move'>): void {
 /**
  * Copies a task and its open sub-tasks in one go, parents first: the copy sits right after the task among its siblings,
  * and each sub-task's copy keeps its order under the copied parent. What it holds is copied (title, description,
- * priority, dates, repeat, duration, deadline, labels); comments, attachments, completions and links are not.
+ * priority, dates, repeat, duration, deadline, labels, Slack thread); comments, attachments, completions and links are not.
  */
 export function duplicateTask(ctx: TodoContext, op: TodoOpOf<'task.duplicate'>): void {
   if (taskRow(ctx, op.copyId)) throw invalid('같은 id의 작업이 이미 있습니다.');

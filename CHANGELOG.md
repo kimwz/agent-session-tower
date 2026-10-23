@@ -6,7 +6,7 @@ format, and saved browser preferences are the compatibility surface.
 
 ## [1.174.0] - 2026-10-23
 
-- **Slack 스레드에서 생긴 할 일의 상세에 `Slack · 스레드 열기` 링크가 생깁니다.** Slack 대화의 에이전트가 할 일 도구(`todos_add`, `todos_complete`의 다음 작업)로 만든 할 일은 그 대화의 스레드(워크스페이스·채널·스레드 ts)를 저장하고, 상세 속성 맨 위에 보이는 `스레드 열기`를 누르면 새 탭에서 그 스레드의 Slack 퍼머링크(`https://slack.com/archives/<채널>/p<ts>`)가 열립니다. 휴대폰에서는 Slack 앱으로 열리고, 로그인이 필요하면 로그인 뒤 그 스레드로 돌아갑니다. 에이전트가 설명에 채널 id를 적지 않아도 되고, 도구 결과에도 `slack` 링크가 보입니다. 저장되는 것은 id뿐이라 다른 주소로 바뀔 수 없습니다. 이미 있는 할 일은 `todos_apply`의 `task.update`(`patch.slackThread`)로 스레드를 이을 수 있고, 같은 방법으로 `null`을 주면 지웁니다. 복사한 할 일은 같은 스레드를 이어받습니다. 실행 워커가 새 버전으로 넘어간 뒤 시작한 Slack 대화 턴부터 적용됩니다.
+- **Slack 스레드에서 생긴 할 일의 상세에 `Slack · 스레드 열기` 링크가 생깁니다.** Slack 대화의 에이전트가 할 일 도구(`todos_add`, `todos_complete`의 다음 작업)로 만든 할 일은 그 대화의 스레드(워크스페이스·채널·스레드 ts)를 저장하고, 상세 속성 맨 위에 보이는 `스레드 열기`를 누르면 새 탭에서 그 스레드의 Slack 퍼머링크(`https://slack.com/archives/<채널>/p<ts>`)가 열립니다. 휴대폰에서는 Slack 앱으로 열리고, 로그인이 필요하면 로그인 뒤 그 스레드로 돌아갑니다. 에이전트가 설명에 채널 id를 적지 않아도 되고, 도구 결과에도 `slack` 링크가 보입니다. 이미 있는 할 일은 `todos_apply`의 `task.update`(`patch.slackThread`)로 스레드를 이을 수 있고, 같은 방법으로 `null`을 주면 지웁니다. 복사한 할 일은 같은 스레드를 이어받습니다. 실행 워커가 새 버전으로 넘어간 뒤 시작한 Slack 대화 턴부터 적용됩니다.
 
 ## [1.173.1] - 2026-10-23
 

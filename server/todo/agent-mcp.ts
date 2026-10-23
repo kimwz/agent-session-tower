@@ -3,6 +3,7 @@ import { isAbsolute, join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { callWebTools, serveToolBridge } from '../mcp/stdio.js';
 import type { SessionMcpServer } from '../runs/session-mcp.js';
+import { slackThreadFromJson } from '../../shared/todo/slack-thread.js';
 import type { TodoSlackThread } from '../../shared/todo/types.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { TODO_TOOLS_PATH, TODO_TOOLS_SERVER, todoToolList } from './agent-tools.js';
@@ -46,9 +47,8 @@ export function todoToolServer(stateDir: string, entry: { command: string; args:
 export async function startTodosMcp(stateDir: string, input: Readable = process.stdin, output: Writable = process.stdout, ports?: () => Promise<number[]>,
   env: NodeJS.ProcessEnv = process.env): Promise<void> {
   if (!isAbsolute(stateDir)) throw new Error('Invalid Tower state directory.');
-  let slackThread: unknown;
-  // best-effort: a thread that cannot be read only leaves the tasks unlinked.
-  try { slackThread = env[TODO_SLACK_THREAD_ENV] ? JSON.parse(env[TODO_SLACK_THREAD_ENV]) : undefined; } catch { slackThread = undefined; }
+  // A thread that cannot be read only leaves the tasks unlinked.
+  const slackThread = slackThreadFromJson(env[TODO_SLACK_THREAD_ENV]);
   const origin = slackThread ? { origin: { slackThread } } : {};
   const call = async (body: Record<string, unknown>) => {
     let key: unknown;

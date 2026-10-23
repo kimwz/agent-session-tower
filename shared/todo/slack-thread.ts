@@ -22,3 +22,10 @@ export function slackThreadOf(value: unknown): TodoSlackThread | undefined {
   const parsed = SlackThreadSchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;
 }
+
+/** A thread written as JSON (a stored column, the tool server's environment), or undefined when it is not one. */
+export function slackThreadFromJson(text: unknown): TodoSlackThread | undefined {
+  if (typeof text !== 'string' || !text) return undefined;
+  // best-effort: text that is not JSON is no thread, like any other value that is not one.
+  try { return slackThreadOf(JSON.parse(text)); } catch { return undefined; }
+}

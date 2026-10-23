@@ -20,7 +20,7 @@ async function fixture(t: TestContext) {
   let applied = 0;
   const calls = { overview: () => store.overview(), detail: (id: string) => store.detail(id), completed: (input: Parameters<TodoStore['completed']>[0]) => store.completed(input),
     search: (query: string, input: Parameters<TodoStore['search']>[1]) => store.search(query, input), apply: (request: Parameters<TodoStore['apply']>[0], by: Parameters<TodoStore['apply']>[1]) => { applied++; return store.apply(request, by); } };
-  const call = (name: string, args: Record<string, unknown> = {}) => callTodoTool(calls, name, args, { now }) as any;
+  const call = (name: string, args: Record<string, unknown> = {}, options: Parameters<typeof callTodoTool>[3] = {}) => callTodoTool(calls, name, args, { now, ...options }) as any;
   return { store, call, applied: () => applied };
 }
 
@@ -212,8 +212,7 @@ test('in a Slack conversation the task an agent adds links to its thread, and on
   const { store, call } = await fixture(t);
   const thread = { teamId: 'TBMLFLL3F', channel: 'C0A88QQ5607', threadTs: '1792746520.260769' };
   const before = call('todos_add', { text: 'Earlier, from the page' }).added;
-  const slack = (name: string, args: Record<string, unknown>) => callTodoTool({ overview: () => store.overview(), detail: id => store.detail(id), completed: input => store.completed(input),
-    search: (query, input) => store.search(query, input), apply: (request, by) => store.apply(request, by) }, name, args, { now, slackThread: thread }) as any;
+  const slack = (name: string, args: Record<string, unknown>) => call(name, args, { slackThread: thread });
   const { added } = slack('todos_add', { text: 'B300 지원 여부 답변 #missing @beta' });
   assert.equal(added.slack, 'https://slack.com/archives/C0A88QQ5607/p1792746520260769');
   const { added: next, completed } = slack('todos_complete', { id: before.id, next: { text: 'Then reply @later' } });
