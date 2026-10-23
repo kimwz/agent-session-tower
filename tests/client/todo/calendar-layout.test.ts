@@ -1,24 +1,36 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cellEntries, dotRows, dotsPerLine, moreSlots, dayEntries, dayStart, doneDays, doneRange, occurrencesIn, resizeCommit, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, visibleRange, yToMinutes } from '../../../client/src/todo/calendar/calendar-layout.js';
+import { cellEntries, dotRows, dotsPerLine, moreSlots, dayEntries, dayStart, doneDays, doneRange, occurrencesIn, resizeCommit, gridDays, HOUR_HEIGHT, minutesToY, monthWeeks, overflow, placeBlocks, resizeMinutes, shiftAnchor, slotAt, spanOf, visibleRange, WEEK_DAYS, weekStartOf, yToMinutes } from '../../../client/src/todo/calendar/calendar-layout.js';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { CalendarView, doneDotColor, dropPatch, periodTitle } from '../../../client/src/todo/calendar/CalendarView.js';
 import { worldFromOverview } from '../../../client/src/todo/todo-model.js';
 import { overview, project, task } from './fixtures.js';
-import { colorOf } from '../../../client/src/todo/todo-format.js';
+import { colorOf, weekdayName } from '../../../client/src/todo/todo-format.js';
+import { MonthGrid } from '../../../client/src/todo/DatePicker.js';
 
-test('a month shows whole Monday weeks around it', () => {
-  const weeks = monthWeeks('2026-10-17');
-  assert.equal(weeks.length, 5);
-  assert.deepEqual([weeks[0][0], weeks[4][6]], ['2026-09-28', '2026-11-01']);
-  // February 2027 starts on a Monday and fills four weeks exactly.
-  assert.deepEqual(monthWeeks('2027-02-10').map(week => week[0]), ['2027-02-01', '2027-02-08', '2027-02-15', '2027-02-22']);
-  assert.deepEqual(visibleRange('2026-10-17', 'month', 7), { from: '2026-09-28', to: '2026-11-01' });
+test('weeks start on Sunday: 일 월 화 수 목 금 토', () => {
+  assert.deepEqual(WEEK_DAYS, [0, 1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(WEEK_DAYS.map(weekdayName).join(''), '일월화수목금토');
+  assert.equal(weekStartOf('2026-10-11'), '2026-10-11');
+  assert.equal(weekStartOf('2026-10-17'), '2026-10-11');
+  assert.equal(weekStartOf('2026-11-01'), '2026-11-01');
 });
 
-test('a week starts on Monday, a phone grid on the day itself, and paging moves by its size', () => {
-  assert.deepEqual(gridDays('2026-10-17', 7), ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-16', '2026-10-17', '2026-10-18']);
+test('a month shows whole Sunday weeks around it', () => {
+  const weeks = monthWeeks('2026-10-17');
+  assert.equal(weeks.length, 5);
+  assert.deepEqual([weeks[0][0], weeks[4][6]], ['2026-09-27', '2026-10-31']);
+  // February 2026 starts on a Sunday and fills four weeks exactly.
+  assert.deepEqual(monthWeeks('2026-02-10').map(week => week[0]), ['2026-02-01', '2026-02-08', '2026-02-15', '2026-02-22']);
+  // November 2026 starts on a Sunday too, and runs a day into a fifth week.
+  assert.deepEqual(monthWeeks('2026-11-30').map(week => week[0]), ['2026-11-01', '2026-11-08', '2026-11-15', '2026-11-22', '2026-11-29']);
+  assert.deepEqual(visibleRange('2026-10-17', 'month', 7), { from: '2026-09-27', to: '2026-10-31' });
+});
+
+test('a week starts on Sunday, a phone grid on the day itself, and paging moves by its size', () => {
+  assert.deepEqual(gridDays('2026-10-17', 7), ['2026-10-11', '2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-16', '2026-10-17']);
+  assert.deepEqual(gridDays('2026-10-18', 7)[0], '2026-10-18');
   assert.deepEqual(gridDays('2026-10-17', 3), ['2026-10-17', '2026-10-18', '2026-10-19']);
   assert.equal(shiftAnchor('2026-10-17', 'week', 7, 1), '2026-10-24');
   assert.equal(shiftAnchor('2026-10-17', 'week', 3, -1), '2026-10-14');
@@ -117,10 +129,11 @@ test('the calendar draws a month with +n and faded repeats, and a week with bloc
   const base = { tasks, world, today: '2026-10-14', future: true, colorBy: 'priority' as const, mobile: false, readOnly: false, onMode() {}, onOpen() {}, onAdd() {}, onChange() {} };
   const month = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'month' }));
   assert.match(month, /2026년 10월/);
+  assert.deepEqual([...month.matchAll(/role="columnheader">([^<]+)</g)].map(match => match[1]).join(''), '일월화수목금토');
   assert.match(month, />\+2개</);
   assert.equal((month.match(/todo-cal-entry future/g) ?? []).length, 2);
   const week = renderToStaticMarkup(createElement(CalendarView, { ...base, mode: 'week' }));
-  assert.match(week, /10월 12일 – 18일/);
+  assert.match(week, /10월 11일 – 17일/);
   assert.equal(periodTitle('2026-10-29', '2026-10-31'), '10월 29일 – 31일');
   assert.equal(periodTitle('2026-10-30', '2026-11-01'), '10월 30일 – 11월 1일');
   assert.match(week, new RegExp(`class="todo-cal-block task[^"]*" style="[^"]*top:${minutesToY(570)}px;height:${minutesToY(90) - 2}px`));
@@ -254,4 +267,19 @@ test('a completion dot takes its project’s color, and an Inbox task’s is gre
   assert.equal(doneDotColor(world, task('c', { projectId: 'ops' })), colorOf('green'));
   assert.notEqual(colorOf('blue'), colorOf('green'));
   assert.equal(doneDotColor(world, task('d', { projectId: 'gone' })), '#7d8aa0');
+});
+
+test('the date picker month starts its weeks on Sunday too', () => {
+  const markup = renderToStaticMarkup(createElement(MonthGrid, { month: '2026-10-01', selected: null, today: '2026-10-14', onPick() {} }));
+  assert.deepEqual([...markup.matchAll(/role="columnheader">([^<]+)</g)].map(match => match[1]).join(''), '일월화수목금토');
+  const cells = [...markup.matchAll(/aria-label="([^"]+)"[^>]*>(\d+)<\/button>/g)].map(match => match[2]);
+  // October 2026 starts on a Thursday: four days of September lead, and October 31 (a Saturday) closes the last row.
+  assert.deepEqual(cells.slice(0, 5), ['27', '28', '29', '30', '1']);
+  assert.equal(cells.length, 35);
+  assert.equal(cells[34], '31');
+  // May 2026 starts on a Friday and needs six rows: the last holds May 31 and six days of June.
+  const may = renderToStaticMarkup(createElement(MonthGrid, { month: '2026-05-01', selected: '2026-05-31', today: '2026-05-20', onPick() {} }));
+  assert.equal((may.match(/role="gridcell"/g) ?? []).length, 42);
+  assert.match(may, /class="\s*selected"[^>]*>31</);
+  assert.match(may, /class="outside\s*"[^>]*>6</);
 });

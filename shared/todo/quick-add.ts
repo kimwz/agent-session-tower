@@ -72,7 +72,10 @@ const enDays = (text: string) => [...new Set(text.split(/\s*,\s*|\s+and\s+|\s+/)
 
 /** Days after `today` until the next `day` (1–7: today never counts). */
 const daysUntil = (today: string, day: number) => ((day - weekday(today) + 6) % 7) + 1;
-/** Monday-based week: the given weekday in this week (0) or next week (1). */
+/**
+ * Monday-based week: the given weekday in this week (0) or next week (1). Spoken weeks run Monday to Sunday even though
+ * the calendar shows Sunday first, so '이번 주 일요일' said on a Wednesday is the coming Sunday, not the past one.
+ */
 function weekdayOfWeek(today: string, day: number, weeks: number): string {
   const monday = addDays(today, -((weekday(today) + 6) % 7) + 7 * weeks);
   return addDays(monday, (day + 6) % 7);
