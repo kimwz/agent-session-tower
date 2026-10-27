@@ -1,4 +1,4 @@
-import type { SlackMessage } from '../../shared/slack.js';
+import type { SlackFile, SlackMessage } from '../../shared/slack.js';
 export type { SlackMessage } from '../../shared/slack.js';
 
 export interface SlackClientDependencies {
@@ -29,6 +29,36 @@ function attachmentText(attachments: unknown): string {
   }).filter(Boolean).join('\n\n');
 }
 
+/** Files on a message as metadata; a file without an ID (a tombstone or one hidden by plan limits) cannot be read. */
+function messageFiles(files: unknown): SlackFile[] | undefined {
+  if (!Array.isArray(files)) return undefined;
+  const parsed = files.slice(0, 20).flatMap((file): SlackFile[] => {
+    if (!file || typeof file !== 'object' || typeof file.id !== 'string' || !file.id || file.id.length > 200) return [];
+    const name = [file.name, file.title, file.id].find(value => typeof value === 'string' && value.trim()) as string;
+    return [{ id: file.id, name: name.trim().slice(0, 500), mimetype: typeof file.mimetype === 'string' ? file.mimetype.slice(0, 200) : '',
+      size: Number.isSafeInteger(file.size) && file.size >= 0 ? file.size : 0 }];
+  });
+  return parsed.length ? parsed : undefined;
+}
+
+/** Slack serves a file only from its own hosts, so the token goes to no other host, redirects included. */
+const slackHost = (url: URL) => url.protocol === 'https:' && (url.hostname === 'slack.com' || url.hostname.endsWith('.slack.com'));
+
+/** Reads a body up to `max` bytes, chunked bodies included; nothing when it is longer. */
+async function readBounded(response: Response, max: number): Promise<Buffer | undefined> {
+  const reader = response.body?.getReader();
+  if (!reader) return Buffer.alloc(0);
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return Buffer.concat(chunks);
+    size += value.byteLength;
+    if (size > max) { await reader.cancel(); return undefined; }
+    chunks.push(value);
+  }
+}
+
 function messageText(message: Record<string, any>): string {
   const text = typeof message.text === 'string' ? message.text : '';
   const attached = attachmentText(message.attachments);
@@ -36,7 +66,7 @@ function messageText(message: Record<string, any>): string {
   return text.trim() ? `${text}\n\n${attached}` : attached;
 }
 
-const safeErrors = new Set(['invalid_auth', 'not_authed', 'token_revoked', 'account_inactive', 'missing_scope', 'not_in_channel', 'channel_not_found', 'thread_not_found', 'ratelimited', 'is_archived', 'restricted_action', 'invalid_name', 'too_many_reactions', 'message_not_found', 'already_reacted', 'no_reaction']);
+const safeErrors = new Set(['file_not_found', 'file_deleted', 'invalid_auth', 'not_authed', 'token_revoked', 'account_inactive', 'missing_scope', 'not_in_channel', 'channel_not_found', 'thread_not_found', 'ratelimited', 'is_archived', 'restricted_action', 'invalid_name', 'too_many_reactions', 'message_not_found', 'already_reacted', 'no_reaction']);
 
 export class SlackClient {
   private readonly fetcher: typeof fetch;
@@ -68,19 +98,10 @@ export class SlackClient {
       if (!response.ok) throw new SlackApiError('http_error');
       let body: Record<string, any>;
       try {
-        // Bound responses before JSON parsing, including chunked bodies.
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error();
-        const chunks: Uint8Array[] = [];
-        let size = 0;
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          size += value.byteLength;
-          if (size > 2_000_000) { await reader.cancel(); throw new Error(); }
-          chunks.push(value);
-        }
-        body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        // Bound responses before JSON parsing.
+        const content = response.body ? await readBounded(response, 2_000_000) : undefined;
+        if (!content) throw new Error();
+        body = JSON.parse(content.toString('utf8'));
         if (!body || typeof body !== 'object') throw new Error();
       } catch { throw new SlackApiError('invalid_response'); }
       if (!body.ok) throw new SlackApiError(safeErrors.has(body.error) ? body.error : 'request_failed');
@@ -106,7 +127,8 @@ export class SlackClient {
         if (typeof message?.ts !== 'string') throw new SlackApiError('invalid_response');
         const text = messageText(message);
         totalCharacters += text.length;
-        messages.push({ ts: message.ts, text, user: typeof message.user === 'string' ? message.user : typeof message.bot_id === 'string' ? message.bot_id : 'unknown' });
+        const files = messageFiles(message.files);
+        messages.push({ ts: message.ts, text, user: typeof message.user === 'string' ? message.user : typeof message.bot_id === 'string' ? message.bot_id : 'unknown', ...(files ? { files } : {}) });
       }
       if (messages.length > 1000 || totalCharacters > 200_000) throw new SlackApiError('thread_too_large');
       cursor = typeof data.response_metadata?.next_cursor === 'string' ? data.response_metadata.next_cursor.trim() : '';
@@ -118,6 +140,42 @@ export class SlackClient {
       seenCursors.add(cursor);
     }
     throw new SlackApiError('thread_too_large');
+  }
+
+  /** Where a file is downloaded from, read fresh: it needs `files:read`, and a deleted file is reported as such. */
+  async fileInfo(id: string): Promise<{ name: string; mimetype: string; size: number; url?: string; external: boolean }> {
+    const data = await this.call('files.info', { file: id }, true);
+    const file = data.file;
+    if (!file || typeof file !== 'object' || file.id !== id) throw new SlackApiError('invalid_response');
+    const url = [file.url_private_download, file.url_private].find(value => typeof value === 'string' && value);
+    return { name: typeof file.name === 'string' ? file.name : '', mimetype: typeof file.mimetype === 'string' ? file.mimetype : '',
+      size: Number.isSafeInteger(file.size) && file.size >= 0 ? file.size : 0, ...(url ? { url } : {}), external: file.is_external === true };
+  }
+
+  /** A private file's bytes, at most `maxBytes`. Redirects are followed by hand and only to Slack hosts. */
+  async download(url: string, maxBytes: number): Promise<{ content: Buffer; contentType: string }> {
+    let target: URL;
+    try { target = new URL(url); } catch { throw new SlackApiError('outside_slack'); }
+    for (let hop = 0; ; hop++) {
+      if (!slackHost(target)) throw new SlackApiError(hop ? 'redirect_outside_slack' : 'outside_slack');
+      let response: Response;
+      try {
+        response = await this.fetcher(target.toString(), { headers: { Authorization: `Bearer ${this.token}` }, redirect: 'manual', signal: AbortSignal.timeout(60_000) });
+      } catch { throw new SlackApiError('network_error'); }
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('location');
+        await response.body?.cancel();
+        if (!location || hop >= 3) throw new SlackApiError('http_error');
+        try { target = new URL(location, target); } catch { throw new SlackApiError('redirect_outside_slack'); }
+        continue;
+      }
+      if (response.status === 429) { await response.body?.cancel(); throw new SlackApiError('ratelimited'); }
+      if (!response.ok) { await response.body?.cancel(); throw new SlackApiError(response.status === 404 ? 'file_not_found' : 'http_error'); }
+      let content: Buffer | undefined;
+      try { content = await readBounded(response, maxBytes); } catch { throw new SlackApiError('network_error'); }
+      if (!content) throw new SlackApiError('too_large');
+      return { content, contentType: response.headers.get('content-type') ?? '' };
+    }
   }
 
   /** Bounded owner-only search. Never consume adjacent/context messages. */

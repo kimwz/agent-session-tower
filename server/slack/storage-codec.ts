@@ -22,7 +22,9 @@ function validMention(value: unknown): value is SlackMention {
 }
 function validThread(value: unknown): value is SlackMessage[] {
   return Array.isArray(value) && value.length > 0 && value.length <= 1000 && value.every(item => record(item)
-    && typeof item.text === 'string' && item.text.length <= 40_000 && text(item.user, 200) && text(item.ts, 200));
+    && typeof item.text === 'string' && item.text.length <= 40_000 && text(item.user, 200) && text(item.ts, 200)
+    && (item.files === undefined || (Array.isArray(item.files) && item.files.length <= 20 && item.files.every(file => record(file) && text(file.id, 200)
+      && text(file.name, 500) && typeof file.mimetype === 'string' && file.mimetype.length <= 200 && Number.isSafeInteger(file.size) && (file.size as number) >= 0))));
 }
 export function slackRequestId(mention: SlackMention): string {
   const hex = createHash('sha256').update(JSON.stringify([mention.teamId, mention.id])).digest('hex');

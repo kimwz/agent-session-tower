@@ -240,7 +240,7 @@ test('Slack conversations, their delegated work and result resumes all run as Sl
       runs.push(run);
       return { run, session: { id: 'chat', nativeId: 'chat', provider: input.provider, cwd: input.cwd, project: 'Slack', title: 'Slack', status: 'completed', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true } };
     },
-    enqueue: async (_id, _prompt, _options, internal) => { admissions.push(['resume', internal]); return { ...runs[1], id: 'resumed', status: 'queued' }; },
+    enqueue: async (_id, prompt, _options, internal) => { admissions.push(['resume', internal]); resumed.push(prompt); return { ...runs[1], id: 'resumed', status: 'queued' }; },
   }, autoPrompts: { get: id => id === delegatedRequest ? { id, provider: 'codex', prompt: '', routerModel: 'gpt', status: 'completed', createdAt: '', updatedAt: '', runId: 'delegated', sessionId: 'work' } : undefined,
     submit: async (input, internal) => { assert.ok(input.provider); delegatedRequest = input.requestId; admissions.push(['delegate', internal as Admission]); assert.equal(input.sessionMode, 'new');
       return { id: input.requestId, provider: input.provider, prompt: input.prompt, routerModel: 'gpt', status: 'completed', createdAt: '', updatedAt: '', runId: 'delegated', sessionId: 'work' }; } },
@@ -248,6 +248,7 @@ test('Slack conversations, their delegated work and result resumes all run as Sl
     client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [{ user: 'U2', text: 'Review', ts: '1' }], reply: async () => { throw new Error('Must not send'); } }),
   });
   let delegatedRequest = '';
+  const resumed: string[] = [];
   t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
   await service.start(); await service.startRuntimeEffects(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   await service.mutate('rules', { rules: [{ id: 'r', name: 'Review', enabled: true, condition: 'PR', instructions: 'Review', replyInstructions: 'Propose', provider: 'codex' }] });
@@ -258,6 +259,7 @@ test('Slack conversations, their delegated work and result resumes all run as Sl
   runs.find(run => run.id === 'delegated')!.autoPromptId = delegatedRequest;
   await service.automation.tick();
   assert.deepEqual(admissions.map(([step]) => step), ['create', 'delegate', 'resume']);
+  assert.doesNotMatch(resumed[0], /Slack thread|files/, 'a result turn brings no Slack messages, so it says nothing about their files');
   for (const [, internal] of admissions) {
     assert.deepEqual(internal?.origin, { kind: 'slack', workflowId });
     assert.equal(internal?.untrustedInput, true);
