@@ -18,11 +18,14 @@ import { SlackAutomationManager, validateSlackRules } from './automation.js';
 import { SlackApiError, SlackClient } from './client.js';
 import { SlackSocket, type SlackSocketOptions } from './socket.js';
 import { judgeSlackFollowUp } from './follow-up.js';
+import { collectSlackFiles, type SlackFileRef } from './files.js';
 import type { DecisionEngine } from '../decisions/engine.js';
 import type { WorkflowRepository } from './storage-repository.js';
 import { TowerError } from '../../shared/errors.js';
 import type { TodoSlackThread } from '../../shared/todo/types.js';
+import type { SlackWorkflow } from '../../shared/slack.js';
 import { StorageCommandError } from '../storage/contract.js';
+import { MAX_PROMPT } from '../runs/run-records.js';
 
 type Account = { teamId: string; userId: string; teamName?: string; userName?: string };
 type Settings = { enabled: boolean; allowSelfMentions?: boolean; language?: 'ko' | 'en'; workingReaction?: string; appToken?: string; userToken?: string; account?: Account };
@@ -35,7 +38,7 @@ export function validSlackConnection(value: unknown): value is Settings {
   return !!saved && typeof saved === 'object' && !Array.isArray(saved) && !((saved.language !== undefined && saved.language !== 'ko' && saved.language !== 'en') || (saved.allowSelfMentions !== undefined && typeof saved.allowSelfMentions !== 'boolean') || (saved.workingReaction !== undefined && !(typeof saved.workingReaction === 'string' && EMOJI_NAME.test(saved.workingReaction))) || typeof saved.enabled !== 'boolean' || (saved.userToken && typeof saved.userToken !== 'string') || (saved.appToken && typeof saved.appToken !== 'string'));
 }
 interface Dependencies {
-  client?: (token: string) => Pick<SlackClient, 'auth' | 'thread' | 'reply'> & Partial<Pick<SlackClient, 'searchOwnMessages' | 'react'>>;
+  client?: (token: string) => Pick<SlackClient, 'auth' | 'thread' | 'reply'> & Partial<Pick<SlackClient, 'searchOwnMessages' | 'react' | 'fileInfo' | 'download'>>;
   socket?: (options: SlackSocketOptions) => Pick<SlackSocket, 'start' | 'stop'>;
   model?: typeof runAutoPromptModel;
 }
@@ -82,15 +85,17 @@ export class SlackService extends EventEmitter {
       stateDir: options.stateDir, repository: options.repository, effectGate: options.effectGate,
       toneGuide: () => this.tone.instruction(),
       language: () => this.settings.language ?? 'ko',
-      ...(options.runs.create ? { startConversation: async (workflow, prompt, instructions) => {
+      ...(options.runs.create ? { startConversation: async (workflow, request, instructions, files) => {
         const provider = workflow.rules[0]?.provider ?? 'codex';
-        const created = await options.runs.create!({ provider, model: workflow.rules[0]?.model, cwd: join(options.stateDir, 'slack-sessions', workflow.id), prompt,
+        const { prompt, attachments } = await this.withFiles(workflow, request, files);
+        const created = await options.runs.create!({ provider, model: workflow.rules[0]?.model, cwd: join(options.stateDir, 'slack-sessions', workflow.id), prompt, ...(attachments.length ? { attachments } : {}),
           title: `Slack: ${workflow.mention.text.replace(/\s+/g, ' ').slice(0, 100)}`,
           ...(provider === 'codex' ? { codexApprovalsReviewer: 'auto_review' as const } : {}) }, { autoPromptId: workflow.id, origin: slackOrigin(workflow.id), untrustedInput: true, ...(instructions ? { instructions: { text: instructions, required: true } } : {}) });
         return { sessionId: created.session.id, runId: created.run.id };
       } } : {}),
-      ...(options.runs.enqueue ? { resumeConversation: async (workflow, prompt, correlationId, instructions) => {
-        const run = await options.runs.enqueue!(workflow.sessionId!, prompt, { model: workflow.rules[0]?.model }, { autoPromptId: correlationId, origin: slackOrigin(workflow.id), untrustedInput: true, ...(instructions ? { instructions: { text: instructions, required: true } } : {}) });
+      ...(options.runs.enqueue ? { resumeConversation: async (workflow, request, correlationId, instructions, files) => {
+        const { prompt, attachments } = await this.withFiles(workflow, request, files);
+        const run = await options.runs.enqueue!(workflow.sessionId!, prompt, { model: workflow.rules[0]?.model, ...(attachments.length ? { attachments } : {}) }, { autoPromptId: correlationId, origin: slackOrigin(workflow.id), untrustedInput: true, ...(instructions ? { instructions: { text: instructions, required: true } } : {}) });
         return { runId: run.id };
       } } : {}),
       findConversation: id => { const run = options.runs.list().find(run => run.autoPromptId === id); return run ? { sessionId: run.sessionId, runId: run.id } : undefined; },
@@ -354,6 +359,18 @@ export class SlackService extends EventEmitter {
     this.changedAt = new Date().toISOString();
     this.emit('change');
     return this.overview();
+  }
+  /** A turn's prompt with the Slack files of its messages attached, and a note on those that could not be. */
+  private async withFiles(workflow: SlackWorkflow, prompt: string, files: SlackFileRef[] | undefined) {
+    if (!files) return { prompt: `${prompt}\n\nTower could not read the Slack thread, so files on these messages were not checked.`, attachments: [] };
+    if (!files.length) return { prompt, attachments: [] };
+    // Read at each call, so a disconnected account fails the file, not the turn.
+    const teamId = workflow.mention.teamId;
+    const { attachments, note } = await collectSlackFiles({ fileInfo: id => this.client(teamId).fileInfo!(id), download: (url, max) => this.client(teamId).download!(url, max) }, files);
+    // The note never makes the turn too long to admit; whole lines are dropped from its end (the files stay attached).
+    const room = MAX_PROMPT - prompt.length - 2;
+    const fitted = note.length <= room ? note : note.slice(0, Math.max(0, room)).replace(/\n?[^\n]*$/, '');
+    return { prompt: fitted ? `${prompt}\n\n${fitted}` : prompt, attachments };
   }
   /**
    * Replaces or drops the connected account: with events and ticks stopped, Tower's working reactions come off with

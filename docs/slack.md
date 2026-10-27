@@ -8,7 +8,7 @@ This initial integration uses a private Slack app with Socket Mode and a **user 
 
 1. Create an internal Slack app for your workspace at <https://api.slack.com/apps>. Workspace policy may require an administrator to approve it.
 2. Enable **Socket Mode**. Under **Basic Information → App-Level Tokens**, generate an app token with `connections:write` (starts with `xapp-`).
-3. Under **OAuth & Permissions → User Token Scopes**, add `channels:history`, `groups:history`, `im:history`, `mpim:history`, `chat:write`, and `reactions:write` (progress emoji for auto-reply rules). Omit conversation types you do not want to monitor, together with their event subscriptions below.
+3. Under **OAuth & Permissions → User Token Scopes**, add `channels:history`, `groups:history`, `im:history`, `mpim:history`, `chat:write`, `reactions:write` (progress emoji for auto-reply rules), and `files:read` (files posted in a thread; see [Files](#files)). Omit conversation types you do not want to monitor, together with their event subscriptions below.
 4. Under **Event Subscriptions → Subscribe to events on behalf of users**, add `message.channels`, `message.groups`, `message.im`, and `message.mpim` for the enabled scopes. Use user events, not `app_mention`: the target is your personal account.
 5. Install/reinstall the app to your workspace and obtain its **User OAuth Token** (`xoxp-`). Use the same app/workspace for both tokens. Token rotation is not implemented; use an internal app without token rotation for this version.
 6. Open **Settings → Triggers**, choose **Slack mentions**, and enter the two tokens. Save instructions, then explicitly enable monitoring. Connecting alone does not enable it.
@@ -16,6 +16,12 @@ This initial integration uses a private Slack app with Socket Mode and a **user 
 Socket Mode needs outbound HTTPS and WebSocket access to Slack; it does not require a public callback URL. Slack delivers only messages accessible to the app's authorized user and scopes. This version processes newly delivered direct user mentions (`<@USER_ID>`), not historic mentions, edits that introduce a mention, group mentions, or bot-generated messages. Events missed during a prolonged outage are not backfilled.
 
 Your own messages are excluded by default. To test a saved rule, enable **Process my own mentions (for testing)** in Slack automation settings, then send a new message mentioning yourself. This works in accessible private channels too when `groups:history` and `message.groups` are configured. The setting is saved across restarts. Test mentions perform the real configured task and generate reply proposals, so disable this option after testing if you only want other people’s requests. Earlier ignored messages are not replayed. Replies keep explicit `<@USER_ID>` mentions only for people who wrote in that thread, including you; other mentions and broadcasts such as `<!channel>` are escaped. Tower ignores its own posted replies, so a reply that mentions you never starts a new conversation. Bot messages and message edits remain excluded.
+
+## Files
+
+Files posted in a thread reach the conversation as attachments of the Tower message that brings their Slack message, the same way files you attach in Tower chat do: the agent gets a local copy of each (images also inline) and can pass its path on to delegated work. The first message carries the files of the request and of the thread so far, the request's own first; a later message carries those posted since the conversation last heard from the thread, including a file posted on its own just before the message that asks about it. Tower downloads at most 10 files per message, 10 MB each and 20 MB in total; images over 5 MB, external files (such as Google Drive links) and anything Tower cannot download are not attached, and the message names each of them with the reason, so the agent can say it could not read them. `slack_thread` lists files by name only.
+
+Downloading needs the `files:read` user scope; without it the agent is told the scope is missing. Reinstall the app and reconnect the user token after adding it. The token goes only to Slack's own HTTPS hosts: Tower follows a download redirect by itself, and only to another Slack host. File contents and names are untrusted data, like messages.
 
 ## Conversation language
 

@@ -22,14 +22,50 @@ test('Slack thread includes attachment content posted by integrations', async ()
     { ts: '1', text: '', bot_id: 'B', attachments: [{ pretext: 'Pull request opened by <https://github.com/d|d>', title: '#627 chore: upgrade', title_link: 'https://github.com/o/r/pull/627', text: 'body', fields: [{ title: 'Reviewers', value: 'karl' }] }] },
     { ts: '2', bot_id: 'B', attachments: [{ fallback: 'only fallback' }] },
     { ts: '3', text: 'see this', user: 'U', attachments: [{ title: 'Link', text: 'unfurl' }] },
-    { ts: '4', user: 'U', files: [{}] },
+    { ts: '4', user: 'U', files: [{}, { id: 'F1', name: 'deck.pdf', mimetype: 'application/pdf', size: 2048, url_private: 'https://files.slack.com/x' }, { id: 'F2', title: 'Untitled', size: -1 }] },
   ] })) as typeof fetch });
   assert.deepEqual(await client.thread('C', '1'), [
     { ts: '1', user: 'B', text: 'Pull request opened by <https://github.com/d|d>\n<https://github.com/o/r/pull/627|#627 chore: upgrade>\nbody\nReviewers: karl' },
     { ts: '2', user: 'B', text: 'only fallback' },
     { ts: '3', user: 'U', text: 'see this\n\nLink\nunfurl' },
-    { ts: '4', user: 'U', text: '' },
-  ]);
+    { ts: '4', user: 'U', text: '', files: [{ id: 'F1', name: 'deck.pdf', mimetype: 'application/pdf', size: 2048 }, { id: 'F2', name: 'Untitled', mimetype: '', size: 0 }] },
+  ], 'files are kept as metadata only: no download URL is stored or shown to models');
+});
+test('Slack file downloads send the token only to Slack hosts, redirects included', async () => {
+  const seen: Array<{ url: string; auth: string | null; redirect?: string }> = [];
+  const routes: Record<string, () => Response> = {
+    'https://files.slack.com/files-pri/T-F1/deck.pdf': () => new Response('%PDF-1.7', { headers: { 'content-type': 'application/pdf' } }),
+    'https://files.slack.com/hop': () => new Response(null, { status: 302, headers: { location: '/files-pri/T-F1/deck.pdf' } }),
+    'https://files.slack.com/away': () => new Response(null, { status: 302, headers: { location: 'https://evil.example/steal' } }),
+    'https://files.slack.com/plain': () => new Response(null, { status: 302, headers: { location: 'http://files.slack.com/files-pri/T-F1/deck.pdf' } }),
+    'https://files.slack.com/big': () => new Response(new Uint8Array(11)),
+    'https://files.slack.com/gone': () => new Response('', { status: 404 }),
+  };
+  const client = new SlackClient('xoxp-secret', { fetch: (async (url: string, init) => {
+    seen.push({ url, auth: new Headers(init?.headers).get('authorization'), redirect: init?.redirect });
+    return routes[url]?.() ?? new Response('', { status: 500 });
+  }) as typeof fetch });
+  assert.equal((await client.download('https://files.slack.com/files-pri/T-F1/deck.pdf', 100)).content.toString(), '%PDF-1.7');
+  assert.equal((await client.download('https://files.slack.com/hop', 100)).contentType, 'application/pdf');
+  await assert.rejects(client.download('https://files.slack.com/away', 100), /redirect_outside_slack/);
+  await assert.rejects(client.download('https://files.slack.com/plain', 100), /redirect_outside_slack/);
+  await assert.rejects(client.download('https://evil.example/file', 100), /outside_slack/);
+  await assert.rejects(client.download('https://files.slack.com.evil.example/file', 100), /outside_slack/);
+  await assert.rejects(client.download('https://files.slack.com/big', 10), /too_large/);
+  await assert.rejects(client.download('https://files.slack.com/gone', 10), /file_not_found/);
+  assert.ok(seen.every(request => new URL(request.url).hostname.endsWith('.slack.com') && request.redirect === 'manual'), 'no request ever left Slack');
+  assert.ok(seen.every(request => request.auth === 'Bearer xoxp-secret'));
+});
+test('Slack file info reports the scope it needs and where to download from', async () => {
+  const client = new SlackClient('secret', { fetch: (async (_url, init) => {
+    const id = (init!.body as URLSearchParams).get('file');
+    return new Response(JSON.stringify(id === 'F1' ? { ok: true, file: { id: 'F1', name: 'a.png', mimetype: 'image/png', size: 5, url_private: 'https://files.slack.com/a', url_private_download: 'https://files.slack.com/a?dl' } }
+      : id === 'F2' ? { ok: true, file: { id: 'F2', name: 'doc', mimetype: 'application/vnd.google-apps.document', size: 0, is_external: true, url_private: 'https://docs.google.com/x' } }
+      : { ok: false, error: 'missing_scope' }));
+  }) as typeof fetch });
+  assert.deepEqual(await client.fileInfo('F1'), { name: 'a.png', mimetype: 'image/png', size: 5, url: 'https://files.slack.com/a?dl', external: false });
+  assert.equal((await client.fileInfo('F2')).external, true);
+  await assert.rejects(client.fileInfo('F3'), /missing_scope/);
 });
 test('Slack reads retry rate limits; replies never retry and escape mentions', async () => {
   let calls = 0;

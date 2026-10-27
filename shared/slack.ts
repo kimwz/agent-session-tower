@@ -13,7 +13,9 @@ export interface SlackRule {
   /** Owner pre-authorization: delegating with this rule permits one truthful result reply. Slack replies and reactions need no authorization; this binds the report to the task. */
   autoReply?: boolean;
 }
-export interface SlackMessage { user: string; text: string; ts: string }
+/** A file on a Slack message, as metadata only: its bytes are read with the account's token when a turn needs them. */
+export interface SlackFile { id: string; name: string; mimetype: string; size: number }
+export interface SlackMessage { user: string; text: string; ts: string; files?: SlackFile[] }
 export interface SlackMention {
   id: string;
   teamId: string;
