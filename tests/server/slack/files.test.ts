@@ -194,12 +194,22 @@ test('Slack conversations get the files of their thread, and follow-ups those po
   assert.ok(turns[4].prompt.length <= 32_000);
   assert.match(turns[4].prompt, /\[… cut to fit; slack_thread has the whole thread\]\n\nTower could not read the Slack thread, so files on these messages were not checked\.$/, 'the messages give way to the note');
   unreadable = false;
+  // A short turn gives the note the room it has: a hundred and twenty files, far over eight thousand characters, are each named.
+  const crowd = Array.from({ length: 120 }, (_, index) => file(`G${index}`, `${'quarterly-report-'.repeat(3)}${index}.pdf`));
+  thread = [...thread, { user: 'U3', ts: '100.020', text: '<@U1> all of these', files: crowd }];
+  await reply(thread.at(-1)!);
+  await service.automation.tick();
+  assert.equal(turns.length, 6);
+  assert.ok(turns[5].prompt.length <= 32_000);
+  assert.ok(turns[5].prompt.split('Slack files Tower could not attach')[1].length > MAX_FILE_NOTE);
+  for (const { name } of crowd) assert.ok(turns[5].prompt.includes(`  - "${name}" (application/pdf, 8 bytes)`), name);
+  assert.doesNotMatch(turns[5].prompt, /more files cut/);
   // A request already near the prompt limit still starts, with its file attached and as much of the note as fits.
   thread = [{ user: 'U2', ts: '300.001', text: `<@U1> ${'x'.repeat(31_930)}`, files: [file('F3', `${'n'.repeat(200)}.pdf`)] }];
   await socket!.onEvent({ team_id: 'T1', event_id: 'Ev3', event: { type: 'message', channel: 'C2', user: 'U2', ts: '300.001', text: thread[0].text } });
   await service.automation.tick();
-  assert.equal(turns.length, 6);
-  assert.ok(turns[5].prompt.length <= 32_000);
-  assert.deepEqual(turns[5].attachments?.map(item => item.name), ['F3.pdf']);
-  assert.match(turns[5].prompt, /Slack files attached to this message .*\n- "F3\.pdf"/);
+  assert.equal(turns.length, 7);
+  assert.ok(turns[6].prompt.length <= 32_000);
+  assert.deepEqual(turns[6].attachments?.map(item => item.name), ['F3.pdf']);
+  assert.match(turns[6].prompt, /Slack files attached to this message .*\n- "F3\.pdf"/);
 });
