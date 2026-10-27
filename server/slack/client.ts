@@ -35,7 +35,7 @@ function messageFiles(files: unknown): SlackFile[] | undefined {
   const parsed = files.slice(0, 20).flatMap((file): SlackFile[] => {
     if (!file || typeof file !== 'object' || typeof file.id !== 'string' || !file.id || file.id.length > 200) return [];
     const name = [file.name, file.title, file.id].find(value => typeof value === 'string' && value.trim()) as string;
-    return [{ id: file.id, name: name.slice(0, 500), mimetype: typeof file.mimetype === 'string' ? file.mimetype.slice(0, 200) : '',
+    return [{ id: file.id, name: name.trim().slice(0, 500), mimetype: typeof file.mimetype === 'string' ? file.mimetype.slice(0, 200) : '',
       size: Number.isSafeInteger(file.size) && file.size >= 0 ? file.size : 0 }];
   });
   return parsed.length ? parsed : undefined;

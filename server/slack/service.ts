@@ -361,16 +361,16 @@ export class SlackService extends EventEmitter {
     return this.overview();
   }
   /** A turn's prompt with the Slack files of its messages attached, and a note on those that could not be. */
-  private async withFiles(workflow: SlackWorkflow, prompt: string, files: SlackFileRef[] | undefined) {
-    if (files && !files.length) return { prompt, attachments: [] };
+  private async withFiles(workflow: SlackWorkflow, prompt: string, files: SlackFileRef[] | null | undefined) {
+    if (files === undefined || files?.length === 0) return { prompt, attachments: [] };
     // Read at each call, so a disconnected account fails the file, not the turn.
     const teamId = workflow.mention.teamId;
     const { attachments, note } = files ? await collectSlackFiles({ fileInfo: id => this.client(teamId).fileInfo!(id), download: (url, max) => this.client(teamId).download!(url, max) }, files)
       : { attachments: [], note: 'Tower could not read the Slack thread, so files on these messages were not checked.' };
-    // The note never makes the turn too long to admit; whole lines are dropped from its end (the files stay attached).
-    const room = MAX_PROMPT - prompt.length - 2;
-    const fitted = note.length <= room ? note : note.slice(0, Math.max(0, room)).replace(/\n?[^\n]*$/, '');
-    return { prompt: fitted ? `${prompt}\n\n${fitted}` : prompt, attachments };
+    // The note is bounded and always kept; the messages give way when the turn would be too long to admit.
+    const room = MAX_PROMPT - note.length - 2;
+    const cut = '\n[… cut to fit; slack_thread has the whole thread]';
+    return { prompt: `${prompt.length <= room ? prompt : prompt.slice(0, room - cut.length) + cut}\n\n${note}`, attachments };
   }
   /**
    * Replaces or drops the connected account: with events and ticks stopped, Tower's working reactions come off with

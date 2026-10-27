@@ -22,13 +22,13 @@ test('Slack thread includes attachment content posted by integrations', async ()
     { ts: '1', text: '', bot_id: 'B', attachments: [{ pretext: 'Pull request opened by <https://github.com/d|d>', title: '#627 chore: upgrade', title_link: 'https://github.com/o/r/pull/627', text: 'body', fields: [{ title: 'Reviewers', value: 'karl' }] }] },
     { ts: '2', bot_id: 'B', attachments: [{ fallback: 'only fallback' }] },
     { ts: '3', text: 'see this', user: 'U', attachments: [{ title: 'Link', text: 'unfurl' }] },
-    { ts: '4', user: 'U', files: [{}, { id: 'F1', name: 'deck.pdf', mimetype: 'application/pdf', size: 2048, url_private: 'https://files.slack.com/x' }, { id: 'F2', title: 'Untitled', size: -1 }] },
+    { ts: '4', user: 'U', files: [{}, { id: 'F1', name: 'deck.pdf', mimetype: 'application/pdf', size: 2048, url_private: 'https://files.slack.com/x' }, { id: 'F2', title: 'Untitled', size: -1 }, { id: 'F3', name: `${' '.repeat(600)}x.pdf ` }] },
   ] })) as typeof fetch });
   assert.deepEqual(await client.thread('C', '1'), [
     { ts: '1', user: 'B', text: 'Pull request opened by <https://github.com/d|d>\n<https://github.com/o/r/pull/627|#627 chore: upgrade>\nbody\nReviewers: karl' },
     { ts: '2', user: 'B', text: 'only fallback' },
     { ts: '3', user: 'U', text: 'see this\n\nLink\nunfurl' },
-    { ts: '4', user: 'U', text: '', files: [{ id: 'F1', name: 'deck.pdf', mimetype: 'application/pdf', size: 2048 }, { id: 'F2', name: 'Untitled', mimetype: '', size: 0 }] },
+    { ts: '4', user: 'U', text: '', files: [{ id: 'F1', name: 'deck.pdf', mimetype: 'application/pdf', size: 2048 }, { id: 'F2', name: 'Untitled', mimetype: '', size: 0 }, { id: 'F3', name: 'x.pdf', mimetype: '', size: 0 }] },
   ], 'files are kept as metadata only: no download URL is stored or shown to models');
 });
 test('Slack file downloads send the token only to Slack hosts, redirects included', async () => {
