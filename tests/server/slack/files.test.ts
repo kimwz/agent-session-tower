@@ -91,6 +91,7 @@ test('Slack conversations get the files of their thread, and follow-ups those po
   const runs: Run[] = [];
   const turns: Array<{ prompt: string; attachments?: AttachmentInput[] }> = [];
   const file = (id: string, name: string): SlackFile => ({ id, name, mimetype: 'application/pdf', size: 8 });
+  let unreadable = false;
   let thread: SlackMessage[] = [
     { user: 'U3', ts: '100.000', text: 'the draft', files: [file('F0', 'draft.pdf')] },
     { user: 'U2', ts: '100.001', text: '<@U1> review pages 4-6', files: [file('F1', 'plan.pdf')] },
@@ -99,14 +100,15 @@ test('Slack conversations get the files of their thread, and follow-ups those po
     const owner = /U1/.test(JSON.stringify((request.state as { new_message: string }).new_message)) ? 0.92 : 0.05;
     return { audience: { choice: owner >= 0.5 ? 'owner' : 'others', probabilities: { owner, others: 1 - owner }, confidence: 0.9 } } as never;
   } };
-  const { client } = slackFiles(Object.fromEntries(['F0', 'F1', 'F2', 'F3'].map(id => [id, { name: `${id}.pdf`, mimetype: 'application/pdf', content: Buffer.from(`%PDF ${id}`) }])));
+  const { client } = slackFiles({ ...Object.fromEntries(['F0', 'F1', 'F2', 'F3'].map(id => [id, { name: `${id}.pdf`, mimetype: 'application/pdf', content: Buffer.from(`%PDF ${id}`) }])),
+    F9: { name: 'later.pdf', mimetype: 'application/pdf', error: 'missing_scope' } });
   const service: SlackService = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not delegate'); } }, refresh: async () => {},
     followUpEngine: async () => engine,
     runs: { list: () => runs,
       create: (async (request: { prompt: string; attachments?: AttachmentInput[] }) => { const run = { id: 'coordinator-run', sessionId: 'coordinator', prompt: request.prompt, status: 'completed', createdAt: '', output: '' } as Run; runs.push(run); turns.push(request); return { session: { id: run.sessionId }, run }; }) as never,
       enqueue: (async (sessionId: string, prompt: string, options: { attachments?: AttachmentInput[] }, internal: { autoPromptId: string }) => { const run = { id: `turn-${runs.length}`, sessionId, prompt, status: 'completed', createdAt: '', output: '', autoPromptId: internal.autoPromptId } as Run; runs.push(run); turns.push({ prompt, attachments: options.attachments }); return run; }) as never },
   }, {
-    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => structuredClone(thread), reply: async () => { throw new Error('Must not send'); }, ...client }),
+    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => { if (unreadable) throw new Error('thread_not_found'); return structuredClone(thread); }, reply: async () => { throw new Error('Must not send'); }, ...client }),
     socket: options => { socket = options; return { start() {}, stop() {} }; },
     model: async () => { throw new Error('Must not start a provider'); },
   });
@@ -136,18 +138,25 @@ test('Slack conversations get the files of their thread, and follow-ups those po
   assert.equal(turns.length, 3);
   assert.equal(turns[2].attachments, undefined);
   assert.match(turns[2].prompt, /<@U1> and this one\n\[file "later\.pdf"/);
-  assert.match(turns[2].prompt, /Slack files Tower could not attach .*:\n- "later\.pdf" .* from <@U3> \(100\.004\): the file no longer exists in Slack/);
+  assert.match(turns[2].prompt, /Slack files Tower could not attach .*:\n- "later\.pdf" .* from <@U3> \(100\.004\): the Slack token lacks the files:read scope/);
   // A message that reaches Tower late, after later ones were brought, still brings its own file.
   thread = [...thread, { user: 'U3', ts: '100.0025', text: '<@U1> late one', files: [file('F3', 'late.pdf')] }];
   await reply(thread[5]);
   await service.automation.tick();
   assert.equal(turns.length, 4);
   assert.deepEqual(turns[3].attachments?.map(item => item.name), ['F3.pdf']);
-  // A request already near the prompt limit still starts, with its file attached and as much of the note as fits.
-  thread = [{ user: 'U2', ts: '300.001', text: `<@U1> ${'x'.repeat(31_850)}`, files: [file('F3', 'x.pdf')] }];
-  await socket!.onEvent({ team_id: 'T1', event_id: 'Ev3', event: { type: 'message', channel: 'C2', user: 'U2', ts: '300.001', text: thread[0].text } });
+  // Long messages that fill the turn, with a thread that cannot be read: they still arrive, saying files were not checked.
+  unreadable = true;
+  for (let index = 0; index < 5; index++) await reply({ user: 'U3', ts: `100.01${index}`, text: `<@U1> ${'y'.repeat(7_900)}` });
   await service.automation.tick();
   assert.equal(turns.length, 5);
   assert.ok(turns[4].prompt.length <= 32_000);
-  assert.deepEqual(turns[4].attachments?.map(item => item.name), ['F3.pdf']);
+  unreadable = false;
+  // A request already near the prompt limit still starts, with its file attached and as much of the note as fits.
+  thread = [{ user: 'U2', ts: '300.001', text: `<@U1> ${'x'.repeat(31_930)}`, files: [file('F3', `${'n'.repeat(200)}.pdf`)] }];
+  await socket!.onEvent({ team_id: 'T1', event_id: 'Ev3', event: { type: 'message', channel: 'C2', user: 'U2', ts: '300.001', text: thread[0].text } });
+  await service.automation.tick();
+  assert.equal(turns.length, 6);
+  assert.ok(turns[5].prompt.length <= 32_000);
+  assert.deepEqual(turns[5].attachments?.map(item => item.name), ['F3.pdf']);
 });

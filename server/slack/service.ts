@@ -362,11 +362,11 @@ export class SlackService extends EventEmitter {
   }
   /** A turn's prompt with the Slack files of its messages attached, and a note on those that could not be. */
   private async withFiles(workflow: SlackWorkflow, prompt: string, files: SlackFileRef[] | undefined) {
-    if (!files) return { prompt: `${prompt}\n\nTower could not read the Slack thread, so files on these messages were not checked.`, attachments: [] };
-    if (!files.length) return { prompt, attachments: [] };
+    if (files && !files.length) return { prompt, attachments: [] };
     // Read at each call, so a disconnected account fails the file, not the turn.
     const teamId = workflow.mention.teamId;
-    const { attachments, note } = await collectSlackFiles({ fileInfo: id => this.client(teamId).fileInfo!(id), download: (url, max) => this.client(teamId).download!(url, max) }, files);
+    const { attachments, note } = files ? await collectSlackFiles({ fileInfo: id => this.client(teamId).fileInfo!(id), download: (url, max) => this.client(teamId).download!(url, max) }, files)
+      : { attachments: [], note: 'Tower could not read the Slack thread, so files on these messages were not checked.' };
     // The note never makes the turn too long to admit; whole lines are dropped from its end (the files stay attached).
     const room = MAX_PROMPT - prompt.length - 2;
     const fitted = note.length <= room ? note : note.slice(0, Math.max(0, room)).replace(/\n?[^\n]*$/, '');
