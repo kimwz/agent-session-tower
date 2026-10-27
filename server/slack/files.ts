@@ -54,6 +54,9 @@ export async function collectSlackFiles(client: Pick<SlackClient, 'fileInfo' | '
   const unreadable: string[] = [];
   const seen = new Set<string>();
   let total = 0;
+  let tried = 0;
+  // Once the token lacks the scope, no other file can be read either.
+  let scopeMissing = false;
   for (const { file, user, ts } of refs) {
     if (seen.has(file.id)) continue;
     seen.add(file.id);
@@ -62,6 +65,9 @@ export async function collectSlackFiles(client: Pick<SlackClient, 'fileInfo' | '
     let shown: Pick<SlackFile, 'name' | 'mimetype' | 'size'> = file;
     const skip = (reason: string) => { unreadable.push(`- ${describe(shown)} ${from}: ${reason}`); };
     if (attachments.length >= MAX_ATTACHMENTS) { skip(`Tower attaches at most ${MAX_ATTACHMENTS} files to one message`); continue; }
+    if (scopeMissing) { skip(REASONS.missing_scope); continue; }
+    // Slack is asked about a bounded number of files per turn; the rest are named from the thread.
+    if (++tried > 2 * MAX_ATTACHMENTS) { skip(`Tower tries at most ${2 * MAX_ATTACHMENTS} files for one message`); continue; }
     try {
       const info = await client.fileInfo(file.id);
       shown = { name: info.name || file.name, mimetype: info.mimetype || file.mimetype, size: info.size || file.size };
@@ -82,7 +88,10 @@ export async function collectSlackFiles(client: Pick<SlackClient, 'fileInfo' | '
       total += content.length;
       attachments.push({ name, mimeType, data: content.toString('base64') });
       attached.push(`- ${describe({ name, mimetype: mimeType, size: content.length })} ${from}`);
-    } catch (error) { skip(reasonOf(error)); }
+    } catch (error) {
+      scopeMissing = error instanceof SlackApiError && error.code === 'missing_scope';
+      skip(reasonOf(error));
+    }
   }
   // Files that could not be attached come first: the attached ones are also listed with their paths.
   const lines = [

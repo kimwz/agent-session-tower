@@ -49,7 +49,7 @@ test('Slack files reach a turn within the run attachment limits and every left-o
     SLASH: { name: '../../etc/passwd\u0000', mimetype: 'text/plain', content: Buffer.from('x') },
     PARAM: { name: 'notes.md', mimetype: 'text/markdown; charset=utf-8', content: Buffer.from('# hi') },
   });
-  const { attachments, note } = await collectSlackFiles(client, ['PDF', 'SHOT', 'FAKE', 'HUGE', 'BIGIMG', 'SCOPE', 'LINK', 'LOGIN', 'SLASH', 'PARAM', 'PDF', 'GONE'].map(id => ref(id)));
+  const { attachments, note } = await collectSlackFiles(client, ['PDF', 'SHOT', 'FAKE', 'HUGE', 'BIGIMG', 'LINK', 'LOGIN', 'SLASH', 'PARAM', 'PDF', 'GONE', 'SCOPE'].map(id => ref(id)));
   assert.deepEqual(attachments.map(({ name, mimeType }) => [name, mimeType]), [
     ['deck.pdf', 'application/pdf'], ['shot.png', 'image/png'], ['fake.png', 'application/octet-stream'], ['.._.._etc_passwd_', 'text/plain'], ['notes.md', 'application/octet-stream'],
   ], 'the bytes decide images; names are made safe; a file shared twice is attached once');
@@ -82,6 +82,20 @@ test('Slack files stop at ten per turn and twenty megabytes in total', async () 
   for (let index = 0; index < 25; index++) crowded[`M${index}`] = { name: `m${index}.txt`, mimetype: 'text/plain', content: Buffer.from('x') };
   const listed = await collectSlackFiles(slackFiles(crowded).client, Object.keys(crowded).map(id => ref(id)));
   for (let index = 10; index < 25; index++) assert.match(listed.note, new RegExp(`- "M${index}" \\(application/pdf, 10 bytes\\) from <@U2> \\(1\\.1\\): Tower attaches at most 10 files`), 'every file left out is named with its type');
+  // Slack is asked about at most twenty files a turn, and nothing more once the scope is missing; every file is still named.
+  const failing: Record<string, Stored> = {};
+  for (let index = 0; index < 25; index++) failing[`B${index}`] = { name: `b${index}.png`, mimetype: 'image/png', content: Buffer.concat([PNG, Buffer.alloc(5_000_001)]) };
+  const asked = slackFiles(failing);
+  const tries = await collectSlackFiles(asked.client, Object.keys(failing).map(id => ref(id)));
+  assert.equal(asked.downloads.length, 20);
+  assert.equal(tries.note.match(/images over 5 MB/g)?.length, 20);
+  assert.equal(tries.note.match(/Tower tries at most 20 files/g)?.length, 5);
+  let infos = 0;
+  const noScope = await collectSlackFiles({ fileInfo: async () => { infos++; throw new SlackApiError('missing_scope'); }, download: async () => { throw new Error('Must not download'); } }, ['S1', 'S2', 'S3'].map(id => ref(id)));
+  assert.equal(infos, 1);
+  assert.equal(noScope.note.match(/files:read scope/g)?.length, 3);
+  const noLink = await collectSlackFiles({ fileInfo: async () => ({ name: 'hidden.pdf', mimetype: 'application/pdf', size: 1, external: false }), download: async () => { throw new Error('Must not download'); } }, [ref('H')]);
+  assert.match(noLink.note, /"hidden\.pdf" .*: Slack gave no download link/);
   // A note over its bound keeps what could not be attached first and says how much it cut.
   const many: Record<string, Stored> = {};
   for (let index = 0; index < 200; index++) many[`N${index}`] = { name: `${'n'.repeat(300)}${index}.txt`, mimetype: 'text/plain', content: Buffer.from('x') };
