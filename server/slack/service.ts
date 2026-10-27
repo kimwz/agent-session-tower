@@ -18,7 +18,7 @@ import { SlackAutomationManager, validateSlackRules } from './automation.js';
 import { SlackApiError, SlackClient } from './client.js';
 import { SlackSocket, type SlackSocketOptions } from './socket.js';
 import { judgeSlackFollowUp } from './follow-up.js';
-import { collectSlackFiles, type SlackFileRef } from './files.js';
+import { collectSlackFiles, MAX_FILE_NOTE, type SlackFileRef } from './files.js';
 import type { DecisionEngine } from '../decisions/engine.js';
 import type { WorkflowRepository } from './storage-repository.js';
 import { TowerError } from '../../shared/errors.js';
@@ -365,7 +365,8 @@ export class SlackService extends EventEmitter {
     if (files === undefined || files?.length === 0) return { prompt, attachments: [] };
     // Read at each call, so a disconnected account fails the file, not the turn.
     const teamId = workflow.mention.teamId;
-    const { attachments, note } = files ? await collectSlackFiles({ fileInfo: id => this.client(teamId).fileInfo!(id), download: (url, max) => this.client(teamId).download!(url, max) }, files)
+    // The note may use whatever room the turn has left, and at least MAX_FILE_NOTE.
+    const { attachments, note } = files ? await collectSlackFiles({ fileInfo: id => this.client(teamId).fileInfo!(id), download: (url, max) => this.client(teamId).download!(url, max) }, files, Math.max(MAX_FILE_NOTE, MAX_PROMPT - prompt.length - 2))
       : { attachments: [], note: 'Tower could not read the Slack thread, so files on these messages were not checked.' };
     // The note is bounded and always kept; the messages give way when the turn would be too long to admit.
     const room = MAX_PROMPT - note.length - 2;
