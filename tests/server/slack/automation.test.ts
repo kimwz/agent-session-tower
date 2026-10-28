@@ -18,7 +18,7 @@ async function fixture(t: TestContext, expectedCapacityFlushFailure = false) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-slack-'));
   let job: AutoPromptJob | undefined;
   let run: Run = { id: 'run', sessionId: 'session', prompt: '', status: 'running', createdAt: '', output: 'Review finished with no findings.' };
-  let sends = 0, agentSends = 0, submissions = 0, fetches = 0;
+  let sends = 0, submissions = 0, fetches = 0;
   const submitted: AutoPromptRequest[] = [];
   const storage = await externalStorageFixture(t, directory, true, 'normal', false);
   const options: SlackAutomationOptions & { repository: typeof storage.workflows } = {
@@ -29,7 +29,7 @@ async function fixture(t: TestContext, expectedCapacityFlushFailure = false) {
     getAutoPrompt: () => job,
     getRun: () => run,
     composeReply: async input => { assert.equal(input.output, run.output); return { text: '확인 했습니다.' }; },
-    sendReply: async (_mention, _text, _mentionable, byAgent) => { sends++; agentSends += Number(byAgent); return { ts: '2.0' }; },
+    sendReply: async () => { sends++; return { ts: '2.0' }; },
   };
   const manager = new SlackAutomationManager(options); await manager.start(); await manager.startRuntimeEffects(); await manager.setRules([rule]);
   t.after(async () => {
@@ -40,7 +40,7 @@ async function fixture(t: TestContext, expectedCapacityFlushFailure = false) {
     await storage.storage.close();
     await rm(directory, { recursive: true, force: true });
   });
-  return { manager, options, directory, submitted, counts: () => ({ sends, submissions, fetches }), agentSends: () => agentSends, finish: (status: Run['status'] = 'completed') => { run = { ...run, status }; } };
+  return { manager, options, directory, submitted, counts: () => ({ sends, submissions, fetches }), finish: (status: Run['status'] = 'completed') => { run = { ...run, status }; } };
 }
 test('Slack Codex work always requests Auto approval review while Claude retains its permission flow', async t => {
   for (const provider of ['codex', 'claude'] as const) {
@@ -166,7 +166,6 @@ test('conversation creates one native session, skips legacy matching and leaves 
   await assert.rejects(f.manager.tool(id, 'approveReply', { requestKey: 'reply-1', text: 'Done' }), /Unknown/);
   await Promise.all([f.manager.approveReply(id, 'reply-1', 'Done'), f.manager.approveReply(id, 'reply-1', 'Done')]);
   assert.equal(f.counts().sends, 1);
-  assert.equal(f.agentSends(), 1, 'an approved proposal is still the agent\'s writing');
   await assert.rejects(f.manager.tool(id, 'slack_reply', { requestKey: 'reply-1', text: 'Other' }), /different text/);
 });
 test('conversation tools scope task reads and deduplicate delegation with Auto review', async t => {
@@ -329,7 +328,7 @@ test('persisted legacy composing work produces only an approval proposal after r
   const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects(); await restarted.tick();
   const item = restarted.list()[0]; assert.equal(f.counts().sends, 0); assert.equal(item.replies![0].status, 'proposed');
   await restarted.approveReply(item.id, item.replies![0].requestKey, item.replies![0].text);
-  assert.equal(f.counts().sends, 1); assert.equal(f.agentSends(), 1, 'a model-drafted proposal is the agent\'s writing');
+  assert.equal(f.counts().sends, 1);
 });
 
 test('approval fails closed before network when its durable send claim cannot be written', async t => {
@@ -500,7 +499,7 @@ test('pasted proposal wording that looks like an approval only selects it', asyn
   assert.equal(f.counts().sends, 1);
   chatText(await f.manager.ownerChat('owner-chat', '승인'));
   assert.equal(f.manager.list()[0].reply, '1번 보내주세요');
-  assert.equal(f.counts().sends, 2); assert.equal(f.agentSends(), 2, 'proposals the owner approves in chat are the agent\'s writing');
+  assert.equal(f.counts().sends, 2);
 });
 
 async function conditionalFixture(t: TestContext) {
@@ -528,7 +527,6 @@ test('conditional owner authorization survives restart and sends exact text only
   await restarted.tick(); assert.equal(f.counts().sends, 0);
   await Promise.all([restarted.tool(f.id, 'tower_task_complete', args), restarted.tool(f.id, 'tower_task_complete', args)]);
   assert.equal(f.counts().sends, 1); assert.equal(restarted.list()[0].reply, '배포됐습니다');
-  assert.equal(f.agentSends(), 0, 'the owner\'s own wording is sent as theirs');
   assert.equal(restarted.list()[0].ownerConditionalReply?.status, 'sent');
 });
 test('conditional reply requires owner permission and never sends failed uncertain cancelled or mismatched tasks', async t => {
@@ -618,7 +616,6 @@ test('composed owner consent during work survives restart and sends once without
   const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.startRuntimeEffects();
   await Promise.all([restarted.tool(f.id, 'tower_task_complete', args), restarted.tool(f.id, 'tower_task_complete', args)]);
   assert.equal(f.counts().sends, 1); assert.equal(restarted.list()[0].reply, args.text);
-  assert.equal(f.agentSends(), 1, 'a report the owner asked for is still the agent\'s writing (#215)');
 });
 
 test('polite immediate and edited-wording chat permissions allow an agent composed send without proposals', async t => {
@@ -629,7 +626,7 @@ test('polite immediate and edited-wording chat permissions allow an agent compos
     assert.match(chatText(await f.manager.ownerChat('owner-chat', message)), /authorization saved/);
     await f.manager.tool(id, 'slack_send', { text: '수정 내용을 반영했습니다.', requestKey: 'report' });
     await f.manager.tool(id, 'slack_send', { text: '수정 내용을 반영했습니다.', requestKey: 'report' });
-    assert.equal(f.counts().sends, 1, message); assert.equal(f.agentSends(), 1, message);
+    assert.equal(f.counts().sends, 1, message);
   }));
 });
 
@@ -644,7 +641,7 @@ test('Slack replies need no owner authorization: one post per requestKey, marked
   await f.manager.tool(id, 'slack_send', { text: '확인했습니다.', requestKey: 'ack' });
   const retry = await f.manager.tool(id, 'slack_send', { text: '확인했습니다.', requestKey: 'ack' }) as { status: string; note?: string };
   assert.equal(retry.status, 'sent'); assert.match(retry.note!, /nothing new was posted/);
-  assert.equal(f.counts().sends, 1); assert.equal(f.agentSends(), 1);
+  assert.equal(f.counts().sends, 1);
   await assert.rejects(f.manager.tool(id, 'slack_send', { text: 'Different text', requestKey: 'ack' }), /different text/);
   await f.manager.tool(id, 'slack_send', { text: '확인했습니다.', requestKey: 'ack-2' });
   assert.equal(f.counts().sends, 2, 'the same words under a new key are a new reply');
@@ -675,7 +672,7 @@ test('an immediate owner permission is used by the next reply; a retry of a call
   assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'pending');
   f.options.sendReply = send;
   await f.manager.tool(id, 'slack_send', { text: '반영했습니다.', requestKey: 'b' });
-  assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'sent'); assert.equal(f.agentSends(), 1, 'the owner asked for it, an agent wrote it');
+  assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'sent');
   await f.manager.tool(id, 'slack_send', { text: '반영했습니다.', requestKey: 'b' });
   // A new permission in between does not make a retry of the same call a new reply.
   assert.match(chatText(await f.manager.ownerChat('owner-chat', '이 문구로 슬랙에 보내주세요')), /authorization saved/);
@@ -872,9 +869,9 @@ test('owner completion permission can report a durable submission failure withou
 test('autoReply rule delegation grants one truthful report and participant mentions without owner approval; reactions need no grant', async t => {
   const f = await fixture(t);
   await f.manager.setRules([{ ...rule, autoReply: true }]);
-  const reactions: string[] = []; const mentionables: string[][] = []; const automatic: boolean[] = [];
+  const reactions: string[] = []; const mentionables: string[][] = [];
   f.options.react = async (target, name, action) => { assert.equal(target.ts, mention.ts); reactions.push(`${action}:${name}`); };
-  f.options.sendReply = async (_mention, _text, mentionable, auto) => { mentionables.push(mentionable); automatic.push(auto); return { ts: '2.0' }; };
+  f.options.sendReply = async (_mention, _text, mentionable) => { mentionables.push(mentionable); return { ts: '2.0' }; };
   f.options.startConversation = async (_workflow, _prompt, instructions) => { assert.match(instructions!, /autoReply true/); return { sessionId: 'owner-chat', runId: 'coordinator' }; };
   await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
   // The first thing a rule asks for, before any delegation.
@@ -894,7 +891,6 @@ test('autoReply rule delegation grants one truthful report and participant menti
   await Promise.all([restarted.tool(id, 'tower_task_complete', args), restarted.tool(id, 'tower_task_complete', args)]);
   assert.equal(mentionables.length, 1);
   assert.deepEqual(mentionables[0], ['U2']);
-  assert.deepEqual(automatic, [true]);
   await restarted.tool(id, 'slack_react', { name: 'hourglass_flowing_sand', action: 'remove' });
   await restarted.tool(id, 'slack_react', { name: 'white_check_mark', action: 'add' });
   assert.deepEqual(reactions, ['add:hourglass_flowing_sand', 'remove:hourglass_flowing_sand', 'add:white_check_mark']);

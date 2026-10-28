@@ -138,9 +138,9 @@ export class SlackService extends EventEmitter {
         const request = thread.find(item => item.ts === mention.ts) ?? { user: mention.user, text: mention.text, ts: mention.ts };
         return (await judgeSlackFollowUp(engine, { owner, request, thread, message }, AbortSignal.timeout(FOLLOW_UP_JUDGMENT_MS), () => this.effectsGate())).addressed;
       },
-      // A reply an agent wrote says so, even when the owner asked for or approved it; only the owner's own words do not.
-      sendReply: (mention, text, mentionable, byAgent) => this.client(mention.teamId).reply(mention.channel, mention.threadTs, text, mentionable,
-        byAgent ? `Sent by ${this.settings.account?.userName ? `${this.settings.account.userName}'s` : 'an'} agent` : undefined),
+      // An agent posts every reply, even one the owner asked for, approved or worded, so every reply says so.
+      sendReply: (mention, text, mentionable) => this.client(mention.teamId).reply(mention.channel, mention.threadTs, text, mentionable,
+        `Sent by ${this.settings.account?.userName ? `${this.settings.account.userName}'s` : 'an'} agent`),
       react: async (mention, name, action, ts) => {
         const client = this.client(mention.teamId);
         if (!client.react) throw new Error('Slack reactions are unavailable.');
