@@ -96,7 +96,7 @@ exec "$real" "$@"
 `;
 }
 
-/** The program name Tower's own command goes by; in a turn's PATH only through towerShim. */
+/** The program name Tower's own command goes by; a turn finds towerShim under it first. */
 export const TOWER_COMMAND = 'agent-session-tower';
 
 /**
@@ -109,7 +109,8 @@ export function towerShim(build: { command: string; args: readonly string[] }, s
   // A loader named by its package (`--import tsx` from a checkout) would be looked for in the turn's own folder.
   const args = build.args.map((arg, index) => build.args[index - 1] === '--import' && /^[a-z@]/i.test(arg) && !/^[a-z]+:/i.test(arg) ? import.meta.resolve(arg) : arg);
   return `#!/bin/sh
-# Agent Session Tower: the model roles for the turns this Tower runs (agent-session-tower models list|get|args <role>).
+# Agent Session Tower: the model roles for the turns this Tower runs (agent-session-tower models list|get|args <role>);
+# any other command runs the agent-session-tower installed on the PATH.
 if [ "\${1:-}" = models ]; then
   shift
   exec ${[build.command, ...args].map(quote).join(' ')} models "$@" --state-dir ${quote(stateDir)}
