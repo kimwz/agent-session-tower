@@ -930,6 +930,15 @@ test('Claude may call the todo tools without asking wherever the turn has them, 
   assert.ok(!launchOf(f, without).args.some(arg => arg.startsWith('--allowedTools')));
 });
 
+test('a master turn hands work out without asking; the same servers elsewhere get no such allowance', async t => {
+  const servers = { tower: { command: '/fixture/node', args: ['--tower-mcp'] }, tower_master: { command: '/fixture/node', args: ['--master-mcp'] }, tower_todos: { command: '/fixture/node', args: ['--todos-mcp'] } };
+  const allowed = (args: string[]) => args.find(arg => arg.startsWith('--allowedTools='))?.slice('--allowedTools='.length).split(',');
+  const master = await fakeClaude(t, { master: true, resolveRunTools: () => ({ servers, required: false }) });
+  assert.deepEqual(allowed(master.spawned[0]!), ['mcp__tower_todos', 'mcp__tower_master__session_start', 'mcp__tower_master__session_message', 'mcp__tower__autoPrompt_submit']);
+  const other = await fakeClaude(t, { resolveRunTools: () => ({ servers, required: false }) });
+  assert.deepEqual(allowed(other.spawned[0]!), ['mcp__tower_todos']);
+});
+
 test('Claude gets the owner\'s Chrome only when it is the turn\'s strong browser, and is told not to use it otherwise', async t => {
   const settings = [true, false, undefined];
   const chrome = new Map<string, boolean | undefined>();

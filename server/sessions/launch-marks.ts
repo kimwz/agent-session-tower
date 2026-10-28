@@ -96,14 +96,50 @@ exec "$real" "$@"
 `;
 }
 
-/** Writes the shims where Tower's turns find them first; rewritten only when their text changed. Returns their folder. */
-export async function installLaunchShims(stateDir: string): Promise<string> {
+/** The program name Tower's own command goes by; a turn finds towerShim under it first. */
+export const TOWER_COMMAND = 'agent-session-tower';
+
+/**
+ * `agent-session-tower models …` in the turns Tower runs, which the guidance and the owner's skills name (#217): this
+ * build, on this Tower's state folder. Any other command goes to an `agent-session-tower` installed on the PATH, as
+ * before the shim (a registered `agent-session-tower mcp`, say); without one, it is refused.
+ */
+export function towerShim(build: { command: string; args: readonly string[] }, stateDir: string): string {
+  const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+  // A loader named by its package (`--import tsx` from a checkout) would be looked for in the turn's own folder.
+  const args = build.args.map((arg, index) => build.args[index - 1] === '--import' && /^[a-z@]/i.test(arg) && !/^[a-z]+:/i.test(arg) ? import.meta.resolve(arg) : arg);
+  return `#!/bin/sh
+# Agent Session Tower: the model roles for the turns this Tower runs (agent-session-tower models list|get|args <role>);
+# any other command runs the agent-session-tower installed on the PATH.
+if [ "\${1:-}" = models ]; then
+  shift
+  exec ${[build.command, ...args].map(quote).join(' ')} models "$@" --state-dir ${quote(stateDir)}
+fi
+old_ifs=$IFS; IFS=:
+for dir in $PATH; do
+  [ -n "$dir" ] || continue
+  resolved=$(CDPATH= cd -- "$dir" 2>/dev/null && pwd -P) || continue
+  case "$resolved" in */runtime/launch-shims) continue ;; esac
+  if [ -x "$dir/${TOWER_COMMAND}" ] && [ ! -d "$dir/${TOWER_COMMAND}" ]; then IFS=$old_ifs; exec "$dir/${TOWER_COMMAND}" "$@"; fi
+done
+IFS=$old_ifs
+echo "${TOWER_COMMAND}: only '${TOWER_COMMAND} models …' is available in turns Tower runs, and no ${TOWER_COMMAND} is installed on the PATH." >&2
+exit 2
+`;
+}
+
+/**
+ * Writes the shims where Tower's turns find them first; rewritten only when their text changed. Returns their folder.
+ * With `tower`, the build that answers `agent-session-tower models` (see towerShim).
+ */
+export async function installLaunchShims(stateDir: string, tower?: { command: string; args: readonly string[] }): Promise<string> {
   const dir = launchShimsDir(stateDir);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await mkdir(launchMarksDir(stateDir), { recursive: true, mode: 0o700 });
   await chmod(launchMarksDir(stateDir), 0o700);
-  for (const name of ['claude', 'codex'] as const) {
-    const path = join(dir, name), text = launchShim(name);
+  const shims: [string, string][] = [['claude', launchShim('claude')], ['codex', launchShim('codex')], ...(tower ? [[TOWER_COMMAND, towerShim(tower, stateDir)] as [string, string]] : [])];
+  for (const [name, text] of shims) {
+    const path = join(dir, name);
     if (await readFile(path, 'utf8').catch(() => '') === text) continue;
     const temporary = `${path}.${process.pid}.tmp`;
     await writeFile(temporary, text, { mode: 0o755 });

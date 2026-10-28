@@ -150,6 +150,11 @@ export class PermissionReviewer {
           reason: `${result.reason} (${limit ?? 'Codex는 대화 한정 규칙을 지원하지 않습니다.'})`,
           suggestion: `Ask permissions_run for the exact command needed for this task, with every argument; no lasting rule is required.` };
       }
+      // An MCP tool rule cannot be narrowed by its arguments, and permissions_run runs only shell commands: an agent sent
+      // back could not follow either, so the owner decides (#217).
+      if (result.verdict === 'narrow' && request.rule.kind === 'claude' && request.rule.value.trim().startsWith('mcp__')) {
+        result = { ...result, verdict: 'owner', reason: `${result.reason} (MCP 도구 규칙은 인자로 좁힐 수 없고 permissions_run은 셸 명령만 실행해 에이전트가 따를 수 없으므로 소유자에게 넘깁니다${result.suggestion ? `. 제안: ${result.suggestion}` : ''})` };
+      }
       // Sending the agent back only works when it hears about it; otherwise the owner decides.
       if (result.verdict === 'narrow' && (!settings.resume || !this.options.reachable(request))) {
         result = { ...result, verdict: 'owner', reason: `${result.reason} (더 좁게 요청하라고 전할 수 없어 소유자에게 넘깁니다${result.suggestion ? `. 제안: ${result.suggestion}` : ''})` };

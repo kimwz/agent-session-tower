@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { installLaunchShims, launchMarksDir, matchLaunchMarks, readLaunchMarks, type LaunchMark } from '../../../server/sessions/launch-marks.js';
+import { installLaunchShims, launchMarksDir, towerShim, matchLaunchMarks, readLaunchMarks, type LaunchMark } from '../../../server/sessions/launch-marks.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import type { ProcessSnapshot } from '../../../server/sessions/processes.js';
 
@@ -204,4 +204,39 @@ test('a program started through a small shell script (a version manager) still f
   const result = f.run('claude', ['-p', 'outer'], { CLAUDE_CODE_SESSION_ID: LAUNCHER }, `${f.dir}:${real}:/usr/bin:/bin`);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /inner ran/);
+});
+
+test('a turn can ask agent-session-tower for its model roles, of this build and this state; the rest goes to an installed one', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-command-shim-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // Stands in for this build's entry: says what it was given.
+  const entry = join(root, "it's the build.sh");
+  await writeFile(entry, '#!/bin/sh\nfor arg in "$@"; do echo "[$arg]"; done\n');
+  const state = join(root, 'my state');
+  const dir = await installLaunchShims(state, { command: '/bin/sh', args: [entry] });
+  // Only fixture folders on the PATH: an agent-session-tower installed on this computer is never run by the test.
+  const shim = (path: string, args: string[]) => spawnSync(join(dir, 'agent-session-tower'), args, { env: { PATH: path }, encoding: 'utf8', timeout: 10_000 });
+  const run = (...args: string[]) => shim(dir, args);
+  const models = run('models', 'args', 'reviewer.codex');
+  assert.equal(models.status, 0);
+  assert.deepEqual(models.stdout.trim().split('\n'), ['[models]', '[args]', '[reviewer.codex]', '[--state-dir]', `[${state}]`]);
+  for (const args of [['service', 'uninstall'], ['run'], []]) {
+    const refused = run(...args);
+    assert.equal(refused.status, 2, args.join(' '));
+    assert.equal(refused.stdout, '');
+    assert.match(refused.stderr, /only 'agent-session-tower models …'.*no agent-session-tower is installed/);
+  }
+  // An installed agent-session-tower (a registered `agent-session-tower mcp`) still answers everything but models.
+  const global = join(root, 'global bin');
+  await mkdir(global);
+  await writeFile(join(global, 'agent-session-tower'), '#!/bin/sh\nfor arg in "$@"; do echo "<$arg>"; done\nexit 7\n');
+  await chmod(join(global, 'agent-session-tower'), 0o755);
+  const withInstall = (...args: string[]) => shim(`${dir}:${global}`, args);
+  const installed = withInstall('mcp', '--state-dir', "/s p/it's");
+  assert.deepEqual([installed.status, installed.stdout], [7, `<mcp>\n<--state-dir>\n<${"/s p/it's"}>\n`], 'its arguments and exit status, as given');
+  assert.equal(withInstall('models', 'list').stdout.split('\n')[0], '[models]', 'models stays this Tower\'s');
+  assert.deepEqual((await readdir(dir)).sort(), ['agent-session-tower', 'claude', 'codex']);
+  // A checkout's `--import tsx` is Tower's own loader, wherever the turn runs.
+  const dev = towerShim({ command: process.execPath, args: ['--import', 'tsx', '--import', 'file:///x/loader.mjs', '/x/index.ts'] }, state);
+  assert.match(dev, /'--import' 'file:\/\/\/[^']*\/node_modules\/tsx\/[^']*' '--import' 'file:\/\/\/x\/loader\.mjs' '\/x\/index\.ts' models/);
 });

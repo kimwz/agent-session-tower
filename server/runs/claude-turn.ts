@@ -16,7 +16,7 @@ import { ReplyLog } from './replies.js';
 import { errorMessage, MAX_PROMPT, RunError } from './run-records.js';
 import { UUID } from './saved-state.js';
 import { awaitToolServers, privateMcpConfig } from './session-mcp.js';
-import { checkClaudeSubscription, MASTER_TOOL_TIMEOUT_SECONDS } from './subscription.js';
+import { checkClaudeSubscription, MASTER_APPROVED_TOOLS, MASTER_TOOL_TIMEOUT_SECONDS } from './subscription.js';
 import { turnEnv } from './turn-env.js';
 import type { OwnedProcess, Prepared, TurnHost } from './turn-host.js';
 import { WakeupTracker } from './wakeup.js';
@@ -58,8 +58,11 @@ export async function prepareClaudeTurn(host: TurnHost, run: Run, session: Sessi
   // triggers, Slack and GitHub watches and public agents that start work here, and chose what that work may do.
   const settings = host.options.claudeSettings?.(session.cwd, session.id);
   if (settings) args.push('--settings', settings);
-  // The owner opened the todos to every agent (2026-10-17): their tools are allowed wherever the turn has them.
-  if (mcpServers?.[TODO_TOOLS_SERVER]) args.push(`--allowedTools=mcp__${TODO_TOOLS_SERVER}`);
+  // The owner opened the todos to every agent (2026-10-17): their tools are allowed wherever the turn has them. A master's
+  // turn hands work out without review too (see MASTER_APPROVED_TOOLS).
+  const allowed = [...(mcpServers?.[TODO_TOOLS_SERVER] ? [`mcp__${TODO_TOOLS_SERVER}`] : []),
+    ...(host.masterSession(session) ? Object.entries(MASTER_APPROVED_TOOLS).flatMap(([server, names]) => mcpServers?.[server] ? names.map(name => `mcp__${server}__${name}`) : []) : [])];
+  if (allowed.length) args.push(`--allowedTools=${allowed.join(',')}`);
   for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
   const prompt = attachmentPrompt(run.prompt, attachments);
   const input = {

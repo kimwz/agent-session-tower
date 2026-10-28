@@ -4,6 +4,7 @@ import { NODE_ID, TOWER_TOOLS, TowerTools, truncate, type TowerToolsOptions } fr
 import { apiTarget } from '../tower-tools/api-target.js';
 import { masterWorkerModel, parseModelSettings } from '../../shared/models.js';
 import { TowerError } from '../../shared/errors.js';
+import { SESSION_MESSAGE_TOOL, SESSION_START_TOOL } from '../runs/subscription.js';
 
 /** How long a screen command waits for the page to say it was done. */
 const ACK_MS = 5_000;
@@ -13,6 +14,17 @@ const PRESENCE_MS = 2 * 60_000;
 /** The tools the master session gets from Tower, besides its own and Tower's MCP operations: the Tower tools and the owner's screen. */
 export const MASTER_TOOLS = [
   ...TOWER_TOOLS.filter(tool => tool.name !== 'terminal_read'),
+  { name: SESSION_START_TOOL, description: 'Hand work to a new session in a project folder: POST /api/sessions. Omit provider/model/effort unless the owner chose them; Tower applies master.worker.',
+    inputSchema: { type: 'object', properties: {
+      cwd: { type: 'string', description: 'The project folder (absolute path).' }, prompt: { type: 'string' }, title: { type: 'string' },
+      provider: { type: 'string', enum: ['claude', 'codex'] }, model: { type: 'string' }, effort: { type: 'string' },
+      node: { type: 'string', description: '32-hex id of a joined computer, or omit for this computer.' },
+    }, required: ['cwd', 'prompt'], additionalProperties: false } },
+  { name: SESSION_MESSAGE_TOOL, description: 'Hand work to an existing session (queued if it is working): POST /api/sessions/{id}/messages.',
+    inputSchema: { type: 'object', properties: {
+      sessionId: { type: 'string' }, prompt: { type: 'string' }, model: { type: 'string' }, effort: { type: 'string' },
+      node: { type: 'string', description: '32-hex id of the joined computer the session is on, or omit for this computer.' },
+    }, required: ['sessionId', 'prompt'], additionalProperties: false } },
   { name: 'ui', description: 'Do something on the owner\'s screen, in the tab showing you, with the page\'s own controls. The result says whether the page did it.',
     inputSchema: { type: 'object', properties: {
       action: { type: 'string', enum: ['openSession', 'close', 'openPanel', 'filter', 'setPreference'], description: 'openSession: show a conversation. close: close the open conversation. openPanel: open one of the page\'s panels. filter: set the sidebar filters. setPreference: language or chat text size.' },
@@ -93,6 +105,13 @@ export class MasterTools extends TowerTools {
 
   /** `headers` go with the call's changes on this computer: an issue master's turn sends its reporting credential. */
   override async call(name: string, args: Record<string, unknown>, headers?: Record<string, string>): Promise<unknown> {
+    // The delegation tools are their tower_api call, so they are followed, reported and given master.worker the same way.
+    if (name === SESSION_START_TOOL || name === SESSION_MESSAGE_TOOL) {
+      const delegation = delegationCall(name, args);
+      if ('error' in delegation) return delegation;
+      name = 'tower_api';
+      args = delegation;
+    }
     if (name === 'tower_api' && args.method === 'POST') {
       try {
         const target = apiTarget(String(args.method), String(args.path), typeof args.node === 'string' ? args.node : undefined);
@@ -120,6 +139,19 @@ export class MasterTools extends TowerTools {
 
   present(tabId: string): void { this.screen.present(tabId); }
   ack(id: string, result: MasterDirectiveResult, note?: string): boolean { return this.screen.ack(id, result, note); }
+}
+
+/** The tower_api call a delegation tool stands for, with only the fields its route takes. */
+function delegationCall(name: string, args: Record<string, unknown>): Record<string, unknown> | { error: string } {
+  const pick = (fields: readonly string[]) => Object.fromEntries(fields.flatMap(field => args[field] === undefined ? [] : [[field, args[field]]]));
+  const node = typeof args.node === 'string' && args.node ? { node: args.node } : {};
+  if (typeof args.prompt !== 'string' || !args.prompt.trim()) return { error: 'prompt가 필요합니다.' };
+  if (name === SESSION_START_TOOL) {
+    if (typeof args.cwd !== 'string' || !args.cwd) return { error: 'cwd가 필요합니다.' };
+    return { method: 'POST', path: '/api/sessions', body: pick(['provider', 'cwd', 'prompt', 'title', 'model', 'effort']), ...node };
+  }
+  if (typeof args.sessionId !== 'string' || !args.sessionId) return { error: 'sessionId가 필요합니다.' };
+  return { method: 'POST', path: `/api/sessions/${encodeURIComponent(args.sessionId)}/messages`, body: pick(['prompt', 'model', 'effort']), ...node };
 }
 
 /** A screen command from the model's arguments, checked field by field. */
