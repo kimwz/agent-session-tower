@@ -16,12 +16,11 @@ import { ReplyLog } from './replies.js';
 import { errorMessage, MAX_PROMPT, RunError } from './run-records.js';
 import { UUID } from './saved-state.js';
 import { awaitToolServers, privateMcpConfig } from './session-mcp.js';
-import { checkClaudeSubscription, MASTER_TOOL_TIMEOUT_SECONDS } from './subscription.js';
+import { checkClaudeSubscription, MASTER_APPROVED_TOOLS, MASTER_TOOL_TIMEOUT_SECONDS } from './subscription.js';
 import { turnEnv } from './turn-env.js';
 import type { OwnedProcess, Prepared, TurnHost } from './turn-host.js';
 import { WakeupTracker } from './wakeup.js';
 import { TODO_TOOLS_SERVER } from '../todo/agent-tools.js';
-import { MASTER_APPROVED_TOOLS } from '../master/delegation.js';
 
 const BACKGROUND_FOLLOW_UP_MS = 60_000;
 const BACKGROUND_WAIT_MAX_MS = 2 * 60 * 60 * 1000;

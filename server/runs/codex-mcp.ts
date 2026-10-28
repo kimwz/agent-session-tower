@@ -1,7 +1,6 @@
 import type { SessionMcpServer, SessionMcpServers } from './session-mcp.js';
-import { MASTER_TOOL_TIMEOUT_SECONDS } from './subscription.js';
+import { MASTER_APPROVED_TOOLS, MASTER_TOOL_TIMEOUT_SECONDS } from './subscription.js';
 import { TODO_TOOL_NAMES, TODO_TOOLS_SERVER } from '../todo/agent-tools.js';
-import { MASTER_APPROVED_TOOLS } from '../master/delegation.js';
 
 /** A tool server as Codex's `mcp_servers` config takes it, with the settings Tower adds for its own servers. */
 export interface CodexMcpServer extends SessionMcpServer {

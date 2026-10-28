@@ -20,11 +20,11 @@ const SECRET = 'b'.repeat(64);
 
 /** A web that answers like Tower's and notes what it was asked. */
 async function fakeWeb(t: test.TestContext, remoteSettings?: unknown) {
-  const seen: Array<{ method: string; path: string; token?: string; caller?: string; body?: unknown }> = [];
+  const seen: Array<{ method: string; path: string; headers: Record<string, string | string[] | undefined>; token?: string; caller?: string; body?: unknown }> = [];
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
-    seen.push({ method: req.method!, path: req.url!, token: req.headers['x-agent-monitor-token'] as string, caller: req.headers['x-tower-master'] as string, ...(chunks.length ? { body: JSON.parse(Buffer.concat(chunks).toString('utf8')) } : {}) });
+    seen.push({ method: req.method!, path: req.url!, headers: req.headers, token: req.headers['x-agent-monitor-token'] as string, caller: req.headers['x-tower-master'] as string, ...(chunks.length ? { body: JSON.parse(Buffer.concat(chunks).toString('utf8')) } : {}) });
     if (req.url?.endsWith('/v1/models.settings') && remoteSettings) { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ result: { settings: remoteSettings } })); return; }
     if (req.method === 'POST' && req.url === '/api/sessions') { res.writeHead(202, { 'Content-Type': 'application/json' }).end(JSON.stringify({ session: { id: 'claude:new' }, run: { id: 'run-new', sessionId: 'claude:new' } })); return; }
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, path: req.url }));
@@ -164,4 +164,11 @@ test('the delegation tools are exactly their tower_api calls: followed and given
   assert.match(String((await tools.call('session_start', { prompt: 'x' }) as { error: string }).error), /cwd/);
   assert.match(String((await tools.call('session_message', { sessionId: '../x', prompt: 'x' }) as { error: string }).error), /올바르지|인코딩/);
   assert.equal(web.seen.filter(item => item.method === 'POST').length, 2, 'refused calls send nothing');
+  // An issue master's reporting header goes with its local call; a joined computer gets the node's path and no header.
+  await tools.call('session_message', { sessionId: 'codex:x', prompt: 'go' }, { 'X-Tower-Caller-Run': 'issue-run' });
+  assert.equal(web.seen.at(-1)!.headers['x-tower-caller-run'], 'issue-run');
+  await tools.call('session_message', { sessionId: 'codex:x', prompt: 'go', node: 'c'.repeat(32) }, { 'X-Tower-Caller-Run': 'issue-run' });
+  assert.equal(web.seen.at(-1)!.path, `/api/nodes/${'c'.repeat(32)}/sessions/codex%3Ax/messages`);
+  assert.equal(web.seen.at(-1)!.headers['x-tower-caller-run'], undefined);
+  assert.deepEqual(started.slice(-2).map(item => item.local), ['/api/sessions/codex:x/messages', '/api/sessions/codex:x/messages']);
 });

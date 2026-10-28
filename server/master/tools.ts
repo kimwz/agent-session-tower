@@ -4,7 +4,7 @@ import { NODE_ID, TOWER_TOOLS, TowerTools, truncate, type TowerToolsOptions } fr
 import { apiTarget } from '../tower-tools/api-target.js';
 import { masterWorkerModel, parseModelSettings } from '../../shared/models.js';
 import { TowerError } from '../../shared/errors.js';
-import { SESSION_MESSAGE_TOOL, SESSION_START_TOOL } from './delegation.js';
+import { SESSION_MESSAGE_TOOL, SESSION_START_TOOL } from '../runs/subscription.js';
 
 /** How long a screen command waits for the page to say it was done. */
 const ACK_MS = 5_000;

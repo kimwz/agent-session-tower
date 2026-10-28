@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { installLaunchShims, launchMarksDir, matchLaunchMarks, readLaunchMarks, type LaunchMark } from '../../../server/sessions/launch-marks.js';
+import { installLaunchShims, launchMarksDir, towerShim, matchLaunchMarks, readLaunchMarks, type LaunchMark } from '../../../server/sessions/launch-marks.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import type { ProcessSnapshot } from '../../../server/sessions/processes.js';
 
@@ -225,4 +225,7 @@ test('a turn can ask agent-session-tower for its model roles, of this build and 
     assert.match(refused.stderr, /only 'agent-session-tower models …'/);
   }
   assert.deepEqual((await readdir(dir)).sort(), ['agent-session-tower', 'claude', 'codex']);
+  // A checkout's `--import tsx` is Tower's own loader, wherever the turn runs.
+  const dev = towerShim({ command: process.execPath, args: ['--import', 'tsx', '--import', 'file:///x/loader.mjs', '/x/index.ts'] }, state);
+  assert.match(dev, /'--import' 'file:\/\/\/[^']*\/node_modules\/tsx\/[^']*' '--import' 'file:\/\/\/x\/loader\.mjs' '\/x\/index\.ts' models/);
 });

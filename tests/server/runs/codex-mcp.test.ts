@@ -5,8 +5,7 @@ import { towerTools } from '../../../server/api/mcp.js';
 import { SESSION_TOOL_OPERATIONS, SESSION_TOOLS_SERVER } from '../../../server/api/session-tools.js';
 import { CODEX_APPROVED_TOWER_TOOLS, codexMcpServers } from '../../../server/runs/codex-mcp.js';
 import { SECRET_TOOLS } from '../../../server/secrets/runtime.js';
-import { MASTER_TOOL_TIMEOUT_SECONDS } from '../../../server/runs/subscription.js';
-import { MASTER_APPROVED_TOOLS } from '../../../server/master/delegation.js';
+import { MASTER_APPROVED_TOOLS, MASTER_TOOL_TIMEOUT_SECONDS } from '../../../server/runs/subscription.js';
 import { MASTER_TOOLS } from '../../../server/master/tools.js';
 import { HEARTBEAT_TOOLS } from '../../../server/master/heartbeat-tools.js';
 
