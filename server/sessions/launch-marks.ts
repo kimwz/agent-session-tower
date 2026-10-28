@@ -101,7 +101,8 @@ export const TOWER_COMMAND = 'agent-session-tower';
 
 /**
  * `agent-session-tower models …` in the turns Tower runs, which the guidance and the owner's skills name (#217): this
- * build, on this Tower's state folder. Only `models` is offered; a turn never starts, updates or installs Tower this way.
+ * build, on this Tower's state folder. Any other command goes to an `agent-session-tower` installed on the PATH, as
+ * before the shim (a registered `agent-session-tower mcp`, say); without one, it is refused.
  */
 export function towerShim(build: { command: string; args: readonly string[] }, stateDir: string): string {
   const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
@@ -113,7 +114,15 @@ if [ "\${1:-}" = models ]; then
   shift
   exec ${[build.command, ...args].map(quote).join(' ')} models "$@" --state-dir ${quote(stateDir)}
 fi
-echo "${TOWER_COMMAND}: only '${TOWER_COMMAND} models …' is available in turns Tower runs; use Tower's tools for the rest." >&2
+old_ifs=$IFS; IFS=:
+for dir in $PATH; do
+  [ -n "$dir" ] || continue
+  resolved=$(CDPATH= cd -- "$dir" 2>/dev/null && pwd -P) || continue
+  case "$resolved" in */runtime/launch-shims) continue ;; esac
+  if [ -x "$dir/${TOWER_COMMAND}" ] && [ ! -d "$dir/${TOWER_COMMAND}" ]; then IFS=$old_ifs; exec "$dir/${TOWER_COMMAND}" "$@"; fi
+done
+IFS=$old_ifs
+echo "${TOWER_COMMAND}: only '${TOWER_COMMAND} models …' is available in turns Tower runs, and no ${TOWER_COMMAND} is installed on the PATH." >&2
 exit 2
 `;
 }

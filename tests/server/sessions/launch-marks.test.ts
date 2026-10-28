@@ -206,7 +206,7 @@ test('a program started through a small shell script (a version manager) still f
   assert.match(result.stdout, /inner ran/);
 });
 
-test('a turn can ask agent-session-tower for its model roles, of this build and this state, and for nothing else', async t => {
+test('a turn can ask agent-session-tower for its model roles, of this build and this state; the rest goes to an installed one', async t => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-command-shim-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   // Stands in for this build's entry: says what it was given.
@@ -222,8 +222,16 @@ test('a turn can ask agent-session-tower for its model roles, of this build and 
     const refused = run(...args);
     assert.equal(refused.status, 2, args.join(' '));
     assert.equal(refused.stdout, '');
-    assert.match(refused.stderr, /only 'agent-session-tower models …'/);
+    assert.match(refused.stderr, /only 'agent-session-tower models …'.*no agent-session-tower is installed/);
   }
+  // An installed agent-session-tower (a registered `agent-session-tower mcp`) still answers everything but models.
+  const global = join(root, 'global bin');
+  await mkdir(global);
+  await writeFile(join(global, 'agent-session-tower'), '#!/bin/sh\necho "installed $*"\n');
+  await chmod(join(global, 'agent-session-tower'), 0o755);
+  const withInstall = (...args: string[]) => spawnSync(join(dir, 'agent-session-tower'), args, { env: { PATH: `${dir}:${global}:/usr/bin:/bin` }, encoding: 'utf8' });
+  assert.deepEqual([withInstall('mcp', '--state-dir', '/s').status, withInstall('mcp', '--state-dir', '/s').stdout], [0, 'installed mcp --state-dir /s\n']);
+  assert.equal(withInstall('models', 'list').stdout.split('\n')[0], '[models]', 'models stays this Tower\'s');
   assert.deepEqual((await readdir(dir)).sort(), ['agent-session-tower', 'claude', 'codex']);
   // A checkout's `--import tsx` is Tower's own loader, wherever the turn runs.
   const dev = towerShim({ command: process.execPath, args: ['--import', 'tsx', '--import', 'file:///x/loader.mjs', '/x/index.ts'] }, state);

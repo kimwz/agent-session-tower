@@ -8,7 +8,7 @@ format, and saved browser preferences are the compatibility surface.
 
 - **마스터가 일을 맡길 때 Claude Code의 자동 승인 검사에 막히지 않습니다** (#217). 마스터와 이슈 마스터가 "prod에 배포해 주세요" 같은 작업을 다른 세션에 보내면, Claude Code auto 모드 분류기가 보내는 글을 보고 "Production Deploy"로 막아 마스터가 "Tower 도구가 없다"고 보고하곤 했습니다. 마스터에게 위임 전용 도구 `session_start`(새 세션)와 `session_message`(기존 세션에 메시지)가 생기고, 마스터 턴에서는 이 둘과 `autoPrompt_submit`을 묻지 않고 부릅니다(Claude는 허용 도구로, Codex는 승인 생략으로). 일을 맡기는 것 자체는 아무것도 바꾸지 않고, 받은 세션의 턴이 실제로 하는 일(배포 명령 등)은 그 세션의 권한 검사를 그대로 거칩니다. 이 도구들은 `tower_api`의 같은 경로를 그대로 부르므로 결과 보고, `master.worker` 모델, 연결된 컴퓨터(`node`)도 같습니다. 나머지 `tower_api` 호출은 지금처럼 검사를 받습니다. 마스터 안내문도 위임에 이 도구들을 쓰라고 바뀝니다.
 - **권한 검토기가 MCP 도구 규칙에 따를 수 없는 "더 좁게" 요청을 돌려보내지 않습니다.** `mcp__서버__도구` 규칙은 인자로 좁힐 수 없고 `permissions_run`은 셸 명령만 실행하는데도, 검토기가 "정확한 셸 명령을 permissions_run으로 요청하라"고 돌려보내 에이전트가 멈추곤 했습니다. 검토기에게 이 사실을 알려 승인(이 대화 한정 포함)하거나 소유자에게 넘기게 하고, 그래도 MCP 도구 규칙에 "더 좁게"로 답하면 Tower가 소유자에게 넘깁니다(제안 문구는 이유에 남습니다).
-- **Tower가 실행하는 턴에서 `agent-session-tower models list|get|args <역할>` 명령이 동작합니다.** 안내문과 스킬이 이 명령을 알려 주지만 에이전트의 PATH에 없었습니다. 이제 턴의 PATH 맨 앞 shim 폴더에 이 Tower 빌드와 상태 폴더를 가리키는 `agent-session-tower`가 있고, `models` 하위 명령만 받습니다(Tower 시작·업데이트·서비스 설치 같은 다른 명령은 거절합니다).
+- **Tower가 실행하는 턴에서 `agent-session-tower models list|get|args <역할>` 명령이 동작합니다.** 안내문과 스킬이 이 명령을 알려 주지만 에이전트의 PATH에 없었습니다. 이제 턴의 PATH 맨 앞 shim 폴더에 이 Tower 빌드와 상태 폴더를 가리키는 `agent-session-tower`가 있고, `models`는 이 Tower가 답하고, 다른 하위 명령은 PATH에 설치된 `agent-session-tower`(전역 설치와 거기에 등록한 `agent-session-tower mcp` 등)로 그대로 넘깁니다. 설치본이 없으면 다른 명령은 거절합니다.
 - 실행 워커가 새 버전으로 넘어간 뒤 시작하는 턴부터 적용됩니다.
 
 ## [1.176.0] - 2026-10-28
