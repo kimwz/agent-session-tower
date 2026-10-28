@@ -536,3 +536,27 @@ test('overlapping slow failures remain visible even while later polls are pendin
   polls[3].resolve(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(service.overview().error, undefined);
 });
+
+test('a reply an agent wrote carries "Sent by <name>\'s agent"; the owner\'s own words carry nothing', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-service-'));
+  const storage = await externalStorageFixture(t, stateDir);
+  let userName: string | undefined = 'karl';
+  const notes: (string | undefined)[] = [];
+  const service: SlackService = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} }, {
+    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1', userName }), thread: async () => [], reply: async (_channel, _thread, _text, _mentionable, note) => { notes.push(note); return { ts: '2.0' }; } }),
+    socket: () => ({ start: () => {}, stop: () => {} }),
+    model: async () => { throw new Error('Must not start a provider'); },
+  });
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  await service.start(); await service.startRuntimeEffects();
+  await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  // Every path of the automation reaches Slack through this one option (tests/server/slack/automation.test.ts covers who wrote each).
+  const { sendReply } = (service.automation as unknown as { options: { sendReply(mention: object, text: string, mentionable: string[], byAgent: boolean): Promise<{ ts: string }> } }).options;
+  const mention = { id: 'e', teamId: 'T1', channel: 'C1', user: 'U2', ts: '1.1', threadTs: '1.0', text: '<@U1> deploy' };
+  await sendReply(mention, '배포를 마쳤습니다.', ['U2'], true);
+  await sendReply(mention, '배포됐습니다', ['U2'], false);
+  userName = undefined;
+  await service.mutate('disconnect', {}); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await sendReply(mention, '배포를 마쳤습니다.', ['U2'], true);
+  assert.deepEqual(notes, ["Sent by karl's agent", undefined, 'Sent by an agent']);
+});

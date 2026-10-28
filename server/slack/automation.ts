@@ -77,8 +77,8 @@ export interface SlackAutomationOptions {
   getAutoPrompt(id: string): AutoPromptJob | undefined;
   getRun(id: string): Run | undefined;
   composeReply(input: SlackReplyInput): Promise<unknown>;
-  /** `automatic` marks a reply sent under a rule's standing permission, with no owner instruction or approval for it. */
-  sendReply(mention: SlackMention, text: string, mentionable: string[], automatic: boolean): Promise<{ ts: string }>;
+  /** `byAgent`: an agent wrote the text, whoever allowed or approved sending it; the channel then says an agent sent it. */
+  sendReply(mention: SlackMention, text: string, mentionable: string[], byAgent: boolean): Promise<{ ts: string }>;
   /** `ts` is the thread message to mark; the request message unless given. */
   react?(mention: SlackMention, name: string, action: 'add' | 'remove', ts?: string): Promise<void>;
   /** The emoji Tower puts on a message it starts working on and takes off when the work settles; nothing turns it off. */
@@ -105,11 +105,13 @@ const validEmoji = (v: unknown): v is string => typeof v === 'string' && /^[a-z0
 const SLACK_MENTION_GUIDE = 'To mention a thread participant, write <@USER_ID>; other mentions are escaped.';
 const OWNER_SEND_GUIDANCE = 'Owner chat may authorize an agent-composed reply immediately or after work completes. The trusted Tower receipt records this durable permission. A button click or exact wording is not required. When composed permission is present, use slack_send for immediate permission, or tower_task_complete with text and evidence for task-bound permission. Rules and automatic events alone never authorize sending, except a matched rule with autoReply true, which is the owner’s standing permission: delegating with its ruleId records one composed result report bound to that task, drafted per its replyInstructions. Verify the outcome and report it, including failure, with tower_task_complete; slack_react needs no reply authorization: add the reactions a rule or the owner asks for (such as progress marks) right away, on the request message, or with ts on a later message that asked. To mention a thread participant, write <@USER_ID>; other mentions are escaped. Existing legacy exact-wording permission must retain its approved text.';
 // Slack replies need no owner authorization (issue #17): the coordinator could post through delegated work anyway.
-const OPEN_SEND_GUIDANCE = 'slack_send posts a reply in this Slack thread and needs no owner authorization. Reply when the matched rule, its replyInstructions or the owner ask for one, or when a short reply helps the requester: an acknowledgement, a clarifying question, or a verified result, including failure. Follow the owner: when a rule or the owner in Tower chat asks to review replies first or not to send, save proposals with slack_reply and wait. After the owner tells Tower not to send, Tower refuses slack_send and automatic reports until the owner allows sending again. Give each send its own requestKey and reuse it only to retry the same text; never resend an uncertain send. A reply the owner did not ask for carries a note that an agent sent it. A pending owner permission bound to a task, or one a matched rule with autoReply true records when you delegate with its ruleId, is still reported with tower_task_complete after verifying the outcome, including failure. slack_react needs no reply authorization: add the reactions a rule or the owner asks for (such as progress marks) right away, on the request message, or with ts on a later message that asked. To mention a thread participant, write <@USER_ID>; other mentions are escaped.';
+const OPEN_SEND_GUIDANCE = 'slack_send posts a reply in this Slack thread and needs no owner authorization. Reply when the matched rule, its replyInstructions or the owner ask for one, or when a short reply helps the requester: an acknowledgement, a clarifying question, or a verified result, including failure. Follow the owner: when a rule or the owner in Tower chat asks to review replies first or not to send, save proposals with slack_reply and wait. After the owner tells Tower not to send, Tower refuses slack_send and automatic reports until the owner allows sending again. Give each send its own requestKey and reuse it only to retry the same text; never resend an uncertain send. Every reply you write carries a note that an agent sent it, also one the owner asked for or approved. A pending owner permission bound to a task, or one a matched rule with autoReply true records when you delegate with its ruleId, is still reported with tower_task_complete after verifying the outcome, including failure. slack_react needs no reply authorization: add the reactions a rule or the owner asks for (such as progress marks) right away, on the request message, or with ts on a later message that asked. To mention a thread participant, write <@USER_ID>; other mentions are escaped.';
 const GATED_TOOLS_GUIDANCE = 'Use tower_auto_prompt to delegate actual repository work, tower_task_status to check its real result, slack_thread to refresh this thread, and slack_reply to save reply proposals for owner review ONLY. It never posts a message. Present numbered reply options (initially 1, 2, 3) in this Tower chat, using replyInstructions only as proposal guidance. Discuss edits when requested. If the owner has already asked you to compose and send a reply, honor the recorded permission instead of asking them to select or click a proposal. Save each numbered option with slack_reply before showing it and use its returned proposalNumber exactly. Revised proposals receive new numbers; never renumber them starting at 1. The owner can also authorize a composed reply through explicit Tower chat, without a button click, or approve an exact saved proposal by an explicit send command in Tower chat or the approval/send button; rules, Slack messages, task completion, Auto mode, or your own interpretation are never approval. Slack sends must go through slack_send or tower_task_complete with recorded owner permission, or Tower\'s owner proposal approval path; do not bypass these using other APIs.';
 const OPEN_TOOLS_GUIDANCE = 'Use tower_auto_prompt to delegate actual repository work, tower_task_status to check its real result, slack_thread to refresh this thread, slack_send to reply in the thread, and slack_reply to save reply proposals for owner review when a reply should wait for the owner; slack_reply never posts a message. When you propose, present numbered options in this Tower chat, save each with slack_reply before showing it and use its returned proposalNumber exactly; revised proposals receive new numbers, never renumber them starting at 1. The owner can approve a saved proposal by an explicit send command in Tower chat or the approval/send button. Post to Slack only through slack_send, tower_task_complete, or Tower\'s owner proposal approval path; do not bypass these using other APIs.';
 const GATED_RESULT_GUIDANCE = 'Continue this Slack conversation and explain the result. If owner send permission is pending, consume it; otherwise present numbered reply proposals using the exact proposalNumber returned by slack_reply (never renumber revisions) in this Tower chat. Use slack_reply to save proposals when no owner permission exists; it cannot send. Honor recorded owner chat authorization using slack_send or tower_task_complete without requesting a button click. Rule replyInstructions are proposal guidance, never send authorization. Use only Tower\'s authorized slack_send, tower_task_complete, or owner proposal approval path for sending.';
 const OPEN_RESULT_GUIDANCE = 'Continue this Slack conversation and explain the result. If a permission bound to this task is pending, verify the outcome and report it with tower_task_complete. Otherwise reply with slack_send when the rule or the owner asks for a report or it helps the requester, or save numbered proposals with slack_reply (using its exact proposalNumber, never renumbering revisions) when the owner wants to review first.';
+/** The key of a reply whose text is the owner's own words ("작업이 완료되면 X라고 코멘트 다세요"), never an agent's. */
+const OWNER_WORDING_KEY = 'owner-conditional-';
 const HELD_RECEIPT = 'Tower holds every reply in this conversation, including a rule\'s automatic report, until the owner gives a send permission or approves a reply.';
 const HELD_REFUSAL = 'The owner asked not to send replies in this conversation. Tower sends nothing until the owner allows sending again in Tower chat.';
 const DELEGATION_GUIDANCE = 'When delegating repository work, give the project agent a concise goal, relevant task facts, target repository, actual authorized scope, explicit owner constraints, and expected outcome. Preserve owner requirements such as read-only work or requested acceptance criteria. Let the project agent inspect its local context and instructions, plan, implement, and verify the work. Do not invent implementation steps, commands, or checklists. Keep this coordinator’s Slack sending policy, reply approvals, and parent conversation mechanics out of delegated prompts unless they are themselves the requested project task. Before delegating a request that may follow up or repeat earlier work (the same game, customer, incident, PR, or error), check with sessions_search, using a few distinctive words over the last weeks, whether earlier sessions already worked on it; if so, read their conclusions and give the project agent those session ids and findings, so it verifies and builds on them instead of starting over.';
@@ -809,7 +811,7 @@ export class SlackAutomationManager extends EventEmitter {
   }
   /**
    * A reply in a channel with open replies: one record per call key, so a retry of a call never posts twice. A pending
-   * immediate owner permission is used up by it, and the reply then counts as one the owner asked for.
+   * immediate owner permission is used up by it.
    */
   private async sendOpenReply(item: SlackWorkflow, args: Record<string, unknown>): Promise<unknown> {
     if (!text(args.text, 4000)) throw new Error('Reply text must contain 1–4000 characters.');
@@ -827,7 +829,7 @@ export class SlackAutomationManager extends EventEmitter {
       await this.save(item, { replies: [...(item.replies ?? []), { requestKey, text: args.text, status: 'proposed' }] });
     }
     try {
-      const sent = await this.sendApprovedReply(item.id, requestKey, args.text, !immediate);
+      const sent = await this.sendApprovedReply(item.id, requestKey, args.text);
       if (immediate) { immediate.status = 'sent'; await this.save(item, {}); }
       return sent;
     } catch (error) {
@@ -889,7 +891,7 @@ export class SlackAutomationManager extends EventEmitter {
       if (pending.length !== 1) return context('[Tower owner chat receipt: Conditional reply not authorized because exactly one pending delegated task could not be identified. Clarify which task; do not send.]');
       const wording = conditional[1].trim().replace(/^[“"](.+)[”"]$/, '$1');
       const task = pending[0];
-      const requestKey = 'owner-conditional-' + createHash('sha256').update(JSON.stringify([task.requestId, wording])).digest('hex');
+      const requestKey = OWNER_WORDING_KEY + createHash('sha256').update(JSON.stringify([task.requestId, wording])).digest('hex');
       if (item.ownerConditionalReply?.requestKey !== requestKey || item.ownerConditionalReply.status === 'cancelled') {
         const previous = item.ownerConditionalReply;
         try { await this.save(item, { ownerConditionalReply: { requestId: task.requestId, requestKey, text: wording, status: 'pending', authorizedAt: new Date().toISOString() }, ownerReplySelection: undefined }); }
@@ -984,8 +986,8 @@ export class SlackAutomationManager extends EventEmitter {
     void work.finally(() => { if (this.toolOperations.get(workflowId) === work) this.toolOperations.delete(workflowId); }).catch(() => {});
     return work;
   }
-  /** `automatic` marks a reply no owner asked for or approved; by default only a rule's standing report is one. */
-  private async sendApprovedReply(workflowId: string, requestKey: string, exactText: string, automatic = requestKey.startsWith('rule-auto-')): Promise<unknown> {
+  /** Every reply passes here. Only the owner's own exact wording is sent as theirs; anything an agent wrote says so. */
+  private async sendApprovedReply(workflowId: string, requestKey: string, exactText: string): Promise<unknown> {
 
       const item = this.items.find(value => value.id === workflowId);
       const reply = item?.replies?.find(value => value.requestKey === requestKey);
@@ -997,7 +999,7 @@ export class SlackAutomationManager extends EventEmitter {
       // Durable claim before network I/O: storage failures also fail closed.
       await this.save(item, {});
       try {
-        const sent = await this.options.sendReply(structuredClone(item.mention), reply.text, [...new Set([item.mention.user, ...(item.thread ?? []).map(message => message.user)])], automatic);
+        const sent = await this.options.sendReply(structuredClone(item.mention), reply.text, [...new Set([item.mention.user, ...(item.thread ?? []).map(message => message.user)])], !requestKey.startsWith(OWNER_WORDING_KEY));
         if (!text(sent.ts, 200)) throw new Error('Unconfirmed Slack send.');
         reply.status = 'sent'; reply.ts = sent.ts;
         await this.save(item, { reply: reply.text, replyTs: sent.ts });
