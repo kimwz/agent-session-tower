@@ -8,5 +8,5 @@ import { readModelSettings } from './settings.js';
 export async function modelRoleNotes(stateDir: string): Promise<string | undefined> {
   const lines = customRoleLines(await readModelSettings(stateDir));
   if (!lines.length) return undefined;
-  return ['Model roles the owner set for skills (role = provider / model / reasoning effort). When a skill names one of these roles for a model, use this model. For codex exec or claude -p, the models_get tool or `agent-session-tower models args <role>` gives the flags.', ...lines].join('\n');
+  return ['Model roles the owner set for skills (role = provider / model / reasoning effort). When a skill names one of these roles for a model, use this model. For codex exec or claude -p, the models_get tool or `agent-session-tower models args <role>` (on this turn\'s PATH) gives the flags.', ...lines].join('\n');
 }

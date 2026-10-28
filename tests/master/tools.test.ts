@@ -83,7 +83,7 @@ test('the master session\'s tool server lists the tools and relays each call to 
     return until(() => lines.find(line => line.id === id));
   };
   const list = await ask(1, 'tools/list');
-  assert.deepEqual(list.result.tools.map((tool: { name: string }) => tool.name), ['tower_api', 'tower_query', 'session_read', 'ui', 'terminal_read']);
+  assert.deepEqual(list.result.tools.map((tool: { name: string }) => tool.name), ['tower_api', 'tower_query', 'session_read', 'session_start', 'session_message', 'ui', 'terminal_read']);
   // No host runs: the call says so, and none is started.
   const absent = await ask(2, 'tools/call', { name: 'tower_api', arguments: { method: 'GET', path: '/api/snapshot' } });
   assert.equal(absent.result.isError, true);
@@ -145,4 +145,23 @@ test('master Auto Prompt variants get the selector but existing messages get no 
   }
   await tools.call('tower_api', { method: 'POST', path: '/api/sessions/codex:existing/messages', body: { prompt: 'continue' } });
   assert.deepEqual(web.seen.at(-1)!.body, { prompt: 'continue' });
+});
+
+test('the delegation tools are exactly their tower_api calls: followed and given master.worker like it', async t => {
+  const web = await fakeWeb(t);
+  const tower = new TowerClient(1_000); tower.setCredentials({ port: web.port, token: TOKEN, callerSecret: SECRET });
+  const started: Array<{ local: string; body: unknown }> = [];
+  const tools = new MasterTools({ tower, delegated: () => ({ name: 'delegated', columns: [], rows: [] }), started: async (target, body) => { started.push({ local: target.local, body }); }, broadcast: () => {} });
+  const created = await tools.call('session_start', { cwd: '/work', prompt: 'fix it', title: '고치기', stray: 'dropped' }) as { state: string; body: { run: { id: string } } };
+  assert.equal(created.state, 'succeeded');
+  assert.equal(created.body.run.id, 'run-new');
+  assert.deepEqual(web.seen.at(-1)!.body, { cwd: '/work', prompt: 'fix it', title: '고치기', modelRole: 'master.worker' });
+  const sent = await tools.call('session_message', { sessionId: 'claude:abc', prompt: 'prod에 배포해 주세요' }) as { state: string };
+  assert.equal(sent.state, 'succeeded');
+  assert.deepEqual([web.seen.at(-1)!.method, web.seen.at(-1)!.path, web.seen.at(-1)!.body], ['POST', '/api/sessions/claude%3Aabc/messages', { prompt: 'prod에 배포해 주세요' }]);
+  assert.deepEqual(started.map(item => item.local), ['/api/sessions', '/api/sessions/claude:abc/messages'], 'both are followed for their reports');
+  assert.match(String((await tools.call('session_message', { sessionId: 'claude:abc' }) as { error: string }).error), /prompt/);
+  assert.match(String((await tools.call('session_start', { prompt: 'x' }) as { error: string }).error), /cwd/);
+  assert.match(String((await tools.call('session_message', { sessionId: '../x', prompt: 'x' }) as { error: string }).error), /올바르지|인코딩/);
+  assert.equal(web.seen.filter(item => item.method === 'POST').length, 2, 'refused calls send nothing');
 });

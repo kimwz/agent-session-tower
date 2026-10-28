@@ -608,6 +608,22 @@ test('the owner’s words reach the reviewer whole, and a review whose end could
   assert.equal(f.service.overview().requests.find(item => item.id === request.id)!.review!.verdict, 'owner');
 });
 
+test('an MCP tool rule is never sent back for narrowing the agent cannot follow; the reviewer is told so', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  let system = '';
+  const reviewer = new PermissionReviewer({ service: f.service, sources: sources(f, []), reachable: () => true, notify: async () => {},
+    model: async request => { system = request.systemPrompt ?? ''; return { verdict: 'narrow', rule: null, suggestion: 'Ask permissions_run for the exact shell command.', reason: '더 좁게' }; } });
+  const { request } = await f.service.request({ kind: 'claude', value: 'mcp__tower_master__tower_api', scope: 'conversation', reason: 'delegate the deploy' }, agent('claude:one'));
+  reviewer.wake();
+  await reviewer.flush();
+  const item = f.service.overview().requests.find(entry => entry.id === request.id)!;
+  assert.deepEqual([item.status, item.review!.verdict], ['pending', 'owner']);
+  assert.match(item.review!.reason!, /MCP 도구 규칙은 인자로 좁힐 수 없고/);
+  assert.match(item.review!.reason!, /permissions_run for the exact shell command/);
+  assert.match(system, /Claude Code cannot narrow it by its arguments, and permissions_run only runs shell commands/);
+});
+
 test('a narrower-rule answer the agent could not be sent goes back to the owner', async t => {
   const f = await fixture(t);
   await f.service.saveAutoReview(ON);

@@ -205,3 +205,24 @@ test('a program started through a small shell script (a version manager) still f
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /inner ran/);
 });
+
+test('a turn can ask agent-session-tower for its model roles, of this build and this state, and for nothing else', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-command-shim-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // Stands in for this build's entry: says what it was given.
+  const entry = join(root, "it's the build.sh");
+  await writeFile(entry, '#!/bin/sh\nfor arg in "$@"; do echo "[$arg]"; done\n');
+  const state = join(root, 'my state');
+  const dir = await installLaunchShims(state, { command: '/bin/sh', args: [entry] });
+  const run = (...args: string[]) => spawnSync(join(dir, 'agent-session-tower'), args, { env: { PATH: '/usr/bin:/bin' }, encoding: 'utf8' });
+  const models = run('models', 'args', 'reviewer.codex');
+  assert.equal(models.status, 0);
+  assert.deepEqual(models.stdout.trim().split('\n'), ['[models]', '[args]', '[reviewer.codex]', '[--state-dir]', `[${state}]`]);
+  for (const args of [['service', 'uninstall'], ['run'], []]) {
+    const refused = run(...args);
+    assert.equal(refused.status, 2, args.join(' '));
+    assert.equal(refused.stdout, '');
+    assert.match(refused.stderr, /only 'agent-session-tower models …'/);
+  }
+  assert.deepEqual((await readdir(dir)).sort(), ['agent-session-tower', 'claude', 'codex']);
+});

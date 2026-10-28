@@ -1,6 +1,7 @@
 import type { SessionMcpServer, SessionMcpServers } from './session-mcp.js';
 import { MASTER_TOOL_TIMEOUT_SECONDS } from './subscription.js';
 import { TODO_TOOL_NAMES, TODO_TOOLS_SERVER } from '../todo/agent-tools.js';
+import { MASTER_APPROVED_TOOLS } from '../master/delegation.js';
 
 /** A tool server as Codex's `mcp_servers` config takes it, with the settings Tower adds for its own servers. */
 export interface CodexMcpServer extends SessionMcpServer {
@@ -26,16 +27,18 @@ export const CODEX_APPROVED_TOWER_TOOLS: Readonly<Record<string, readonly string
 /**
  * The servers a Codex turn is given. Codex reads per-tool approval only beside a server's definition, so it is added
  * here rather than in the user's Codex config, where it would name a server that has no command outside Tower. The
- * master's own tools may take longer than Codex's default minute (see MASTER_TOOL_TIMEOUT_SECONDS).
+ * master's own tools may take longer than Codex's default minute (see MASTER_TOOL_TIMEOUT_SECONDS), and a master's turn hands
+ * work out without review (MASTER_APPROVED_TOOLS).
  */
 export function codexMcpServers(servers: SessionMcpServers | undefined, master: boolean): CodexMcpServers | undefined {
   if (!servers) return undefined;
   return Object.fromEntries(Object.entries(servers).map(([name, server]): [string, CodexMcpServer] => {
-    const approved = Object.hasOwn(CODEX_APPROVED_TOWER_TOOLS, name) ? CODEX_APPROVED_TOWER_TOOLS[name] : undefined;
+    const approved = [...(Object.hasOwn(CODEX_APPROVED_TOWER_TOOLS, name) ? CODEX_APPROVED_TOWER_TOOLS[name]! : []),
+      ...(master && Object.hasOwn(MASTER_APPROVED_TOOLS, name) ? MASTER_APPROVED_TOOLS[name]! : [])];
     return [name, {
       ...server,
       ...(master && name === 'tower_master' ? { tool_timeout_sec: MASTER_TOOL_TIMEOUT_SECONDS } : {}),
-      ...(approved ? { tools: Object.fromEntries(approved.map(tool => [tool, { approval_mode: 'approve' as const }])) } : {}),
+      ...(approved.length ? { tools: Object.fromEntries(approved.map(tool => [tool, { approval_mode: 'approve' as const }])) } : {}),
     }];
   }));
 }

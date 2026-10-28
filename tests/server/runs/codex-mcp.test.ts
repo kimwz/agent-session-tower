@@ -6,6 +6,9 @@ import { SESSION_TOOL_OPERATIONS, SESSION_TOOLS_SERVER } from '../../../server/a
 import { CODEX_APPROVED_TOWER_TOOLS, codexMcpServers } from '../../../server/runs/codex-mcp.js';
 import { SECRET_TOOLS } from '../../../server/secrets/runtime.js';
 import { MASTER_TOOL_TIMEOUT_SECONDS } from '../../../server/runs/subscription.js';
+import { MASTER_APPROVED_TOOLS } from '../../../server/master/delegation.js';
+import { MASTER_TOOLS } from '../../../server/master/tools.js';
+import { HEARTBEAT_TOOLS } from '../../../server/master/heartbeat-tools.js';
 
 const server = (name: string) => ({ command: '/fixture/node', args: [name], env: { TOWER_MCP_CAPABILITY: 'a'.repeat(64) } });
 const approved = (...tools: string[]) => Object.fromEntries(tools.map(tool => [tool, { approval_mode: 'approve' }]));
@@ -24,9 +27,26 @@ test('Codex calls Tower lookups, permission requests and secret listings without
 });
 
 test('only the master\'s own tools get the longer timeout, and a turn without tools gets no servers', () => {
-  assert.deepEqual(codexMcpServers({ tower_master: server('master') }, true), { tower_master: { ...server('master'), tool_timeout_sec: MASTER_TOOL_TIMEOUT_SECONDS } });
+  assert.deepEqual(codexMcpServers({ tower_master: server('master') }, true), { tower_master: { ...server('master'), tool_timeout_sec: MASTER_TOOL_TIMEOUT_SECONDS, tools: approved('session_start', 'session_message') } });
   assert.deepEqual(codexMcpServers({ tower_master: server('master') }, false), { tower_master: server('master') });
   assert.equal(codexMcpServers(undefined, true), undefined);
+});
+
+test('a master\'s Codex turn hands work out without review; the same servers elsewhere keep it', () => {
+  const servers = { tower: server('tower'), tower_master: server('master') };
+  const lookups = CODEX_APPROVED_TOWER_TOOLS.tower!;
+  const master = codexMcpServers(servers, true)!;
+  assert.deepEqual(master.tower_master!.tools, approved('session_start', 'session_message'));
+  assert.deepEqual(master.tower!.tools, approved(...lookups, 'autoPrompt_submit'));
+  const other = codexMcpServers(servers, false)!;
+  assert.equal(other.tower_master!.tools, undefined);
+  assert.deepEqual(other.tower!.tools, approved(...lookups));
+});
+
+test('every tool a master turn calls without review is one its server offers', () => {
+  const offered: Record<string, string[]> = { tower: towerTools().map(tool => tool.name), tower_master: MASTER_TOOLS.map(tool => tool.name) };
+  for (const [server, tools] of Object.entries(MASTER_APPROVED_TOOLS)) for (const tool of tools) assert.ok(offered[server]?.includes(tool), `${server} offers ${tool}`);
+  assert.ok(!HEARTBEAT_TOOLS.some(tool => MASTER_APPROVED_TOOLS.tower_master!.includes(tool.name)), 'the heartbeat keeps its own two tools');
 });
 
 test('every tool Codex calls without review is one its server offers, so a renamed tool cannot fall out silently', () => {

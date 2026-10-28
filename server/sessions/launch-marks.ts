@@ -96,14 +96,38 @@ exec "$real" "$@"
 `;
 }
 
-/** Writes the shims where Tower's turns find them first; rewritten only when their text changed. Returns their folder. */
-export async function installLaunchShims(stateDir: string): Promise<string> {
+/** The program name Tower's own command goes by; in a turn's PATH only through towerShim. */
+export const TOWER_COMMAND = 'agent-session-tower';
+
+/**
+ * `agent-session-tower models …` in the turns Tower runs, which the guidance and the owner's skills name (#217): this
+ * build, on this Tower's state folder. Only `models` is offered; a turn never starts, updates or installs Tower this way.
+ */
+export function towerShim(build: { command: string; args: readonly string[] }, stateDir: string): string {
+  const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+  return `#!/bin/sh
+# Agent Session Tower: the model roles for the turns this Tower runs (agent-session-tower models list|get|args <role>).
+if [ "\${1:-}" = models ]; then
+  shift
+  exec ${[build.command, ...build.args].map(quote).join(' ')} models "$@" --state-dir ${quote(stateDir)}
+fi
+echo "${TOWER_COMMAND}: only '${TOWER_COMMAND} models …' is available in turns Tower runs; use Tower's tools for the rest." >&2
+exit 2
+`;
+}
+
+/**
+ * Writes the shims where Tower's turns find them first; rewritten only when their text changed. Returns their folder.
+ * With `tower`, the build that answers `agent-session-tower models` (see towerShim).
+ */
+export async function installLaunchShims(stateDir: string, tower?: { command: string; args: readonly string[] }): Promise<string> {
   const dir = launchShimsDir(stateDir);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await mkdir(launchMarksDir(stateDir), { recursive: true, mode: 0o700 });
   await chmod(launchMarksDir(stateDir), 0o700);
-  for (const name of ['claude', 'codex'] as const) {
-    const path = join(dir, name), text = launchShim(name);
+  const shims: [string, string][] = [['claude', launchShim('claude')], ['codex', launchShim('codex')], ...(tower ? [[TOWER_COMMAND, towerShim(tower, stateDir)] as [string, string]] : [])];
+  for (const [name, text] of shims) {
+    const path = join(dir, name);
     if (await readFile(path, 'utf8').catch(() => '') === text) continue;
     const temporary = `${path}.${process.pid}.tmp`;
     await writeFile(temporary, text, { mode: 0o755 });

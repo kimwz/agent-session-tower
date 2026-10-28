@@ -1161,7 +1161,7 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
     publishCold();
     storageStatus.sessionsAvailable = true;
     await startupGate();
-    const shims = await installLaunchShims(stateDir).catch(error => { console.error(`Launch shims were not installed: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
+    const shims = await installLaunchShims(stateDir, thisBuild()).catch(error => { console.error(`Launch shims were not installed: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
     if (shims) runOptions.launchMarks = { shims, marks: launchMarksDir(stateDir) };
 
     // Before any turn can start: a CLI still being replaced by an installer from before is held first.
