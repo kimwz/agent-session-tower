@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.176.0] - 2026-10-28
+
+- **Tower가 Slack에 올리는 답장에는 언제나 `Sent by <Slack 이름>'s agent` 줄이 붙습니다** (#215). 지금까지는 규칙의 자동 결과 보고와 에이전트가 스스로 보낸 답장에만 붙고, Tower 채팅에서 "끝나면 알려주세요", "배포까지 하고 알려주세요", "슬랙에 보내주세요"라고 맡긴 보고나 승인한 제안에는 빠져 소유자가 직접 쓴 글처럼 보였습니다. 이제 `slack_send`, `tower_task_complete` 보고, 채팅이나 버튼으로 승인한 제안, "작업이 완료되면 X라고 코멘트 다세요"로 정한 문구까지 Tower가 보내는 답장 모두에 붙습니다. 소유자가 Slack에 직접 쓴 글은 Tower를 거치지 않으므로 그대로입니다. 실행 워커가 새 버전으로 넘어간 뒤 보내는 답장부터 적용됩니다.
+
 ## [1.175.0] - 2026-10-27
 
 - **Slack 스레드에 올라온 파일을 Slack 대화의 에이전트가 직접 열어 봅니다.** 지금까지는 "4,5,6 페이지 리뷰 부탁드립니다"처럼 파일과 함께 온 요청에서 에이전트가 메시지 글만 받고 파일은 받지 못했습니다. 이제 Tower가 사용자 토큰으로 파일을 내려받아, Tower 채팅에서 첨부한 파일과 같은 방식으로 그 턴에 첨부합니다(로컬 경로, 이미지는 화면으로도). 대화의 첫 메시지에는 요청과 그때까지 스레드에 있던 파일이(요청 메시지의 파일 먼저), 후속 메시지에는 대화가 마지막으로 스레드를 받은 뒤 올라온 파일이 붙습니다. 파일만 올린 메시지 바로 뒤에 "확인 부탁드립니다"가 오는 경우도 포함됩니다. 한 메시지에 최대 10개, 파일당 10 MB, 합계 20 MB까지이고, 5 MB가 넘는 이미지, Google Drive 같은 외부 파일, 내려받지 못한 파일은 이름·형식·이유와 함께 "첨부하지 못함"으로 에이전트에게 알립니다. 파일 내용과 이름은 신뢰하지 않는 데이터로 다루고, 토큰은 Slack의 HTTPS 호스트로만 보냅니다(리다이렉트도 Slack 호스트로만 따라갑니다). Slack 앱의 User Token Scopes에 `files:read`가 필요하며, 없으면 에이전트가 권한이 없다는 안내를 받습니다. 실행 워커가 새 버전으로 넘어간 뒤 시작하는 Slack 대화 턴부터 적용됩니다.
