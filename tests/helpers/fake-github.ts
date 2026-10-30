@@ -10,13 +10,17 @@ import { GitHubError } from '../../server/triggers/github.js';
 
 export interface FakeIssue {
   id: number; number: number; title: string; body: string; state: 'open' | 'closed'; state_reason: string | null;
-  labels: string[]; updated_at: string; parent?: number; html_url: string;
+  labels: string[]; updated_at: string; parent?: number; html_url: string; pull_request?: { url: string };
 }
 export interface FakeComment { id: number; issue: number; body: string; login: string; created_at: string; updated_at: string; html_url: string }
 interface Repo { issues: FakeIssue[]; comments: FakeComment[]; labels: Set<string> }
 
 export class FakeGitHub implements TodoGitHub {
   account = 'kimwz';
+  /** Repositories the account may read but not write. */
+  readonly readOnly = new Set<string>();
+  /** Issues moved to another repository, as GitHub answers them from where they were: `repo#number` → where they are. */
+  readonly moved = new Map<string, { repo: string; number: number }>();
   readonly repos = new Map<string, Repo>();
   /** Every call as `METHOD path` (query left out), in order. */
   readonly calls: string[] = [];
@@ -50,6 +54,16 @@ export class FakeGitHub implements TodoGitHub {
   issue(repo: string, number: number): FakeIssue { return this.issueOf(this.repo(repo), number); }
   issuesOf(repo: string): FakeIssue[] { return this.repo(repo).issues; }
   commentsOf(repo: string, number: number): FakeComment[] { return this.repo(repo).comments.filter(comment => comment.issue === number); }
+
+  /** Someone opens an issue (or a pull request) on GitHub. */
+  open(repo: string, fields: Partial<Pick<FakeIssue, 'title' | 'body' | 'labels' | 'state'>> & { pull?: boolean } = {}): FakeIssue {
+    const issues = this.repo(repo).issues, number = issues.length + 1;
+    const issue: FakeIssue = { id: ++this.ids, number, title: fields.title ?? `Issue ${number}`, body: fields.body ?? '', state: fields.state ?? 'open',
+      state_reason: fields.state === 'closed' ? 'completed' : null, labels: fields.labels ?? [], updated_at: this.tick(),
+      html_url: `https://github.com/${repo}/${fields.pull ? 'pull' : 'issues'}/${number}`, ...(fields.pull ? { pull_request: { url: `https://api.github.com/repos/${repo}/pulls/${number}` } } : {}) };
+    issues.push(issue);
+    return issue;
+  }
 
   /** Someone changes an issue on GitHub. */
   edit(repo: string, number: number, patch: Partial<Pick<FakeIssue, 'title' | 'body' | 'state' | 'labels'>>): void {
@@ -85,7 +99,7 @@ export class FakeGitHub implements TodoGitHub {
     let found: RegExpExecArray | null;
     if ((found = /^\/repos\/([^/]+\/[^/]+)$/.exec(route)) && method === 'GET') {
       this.repo(found[1]);
-      return { full_name: found[1], private: true, permissions: { push: true } } as T;
+      return { full_name: found[1], private: true, permissions: { push: !this.readOnly.has(found[1]) } } as T;
     }
     if ((found = /^\/repos\/([^/]+\/[^/]+)\/labels$/.exec(route)) && method === 'POST') {
       const repo = this.repo(found[1]), name = String(input.name).toLowerCase();
@@ -120,6 +134,10 @@ export class FakeGitHub implements TodoGitHub {
       comment.updated_at = this.tick();
       return this.commentView(comment, found[1]) as T;
     }
+    if ((found = /^\/repos\/([^/]+\/[^/]+)\/issues\/(\d+)\/comments$/.exec(route)) && method === 'GET') {
+      const page = Number(params.get('page') ?? 1), size = Number(params.get('per_page') ?? 30), number = Number(found[2]);
+      return this.commentsOf(found[1], number).slice((page - 1) * size, page * size).map(comment => this.commentView(comment, found![1])) as T;
+    }
     if ((found = /^\/repos\/([^/]+\/[^/]+)\/issues\/(\d+)\/comments$/.exec(route)) && method === 'POST') {
       const comment = this.comment(found[1], Number(found[2]), this.account, String(input.body));
       return this.commentView(comment, found[1]) as T;
@@ -132,6 +150,8 @@ export class FakeGitHub implements TodoGitHub {
       return {} as T;
     }
     if ((found = /^\/repos\/([^/]+\/[^/]+)\/issues\/(\d+)$/.exec(route))) {
+      const moved = this.moved.get(`${found[1]}#${found[2]}`);
+      if (moved && method === 'GET') return this.view(this.issue(moved.repo, moved.number)) as T;
       const issue = this.issueOf(this.repo(found[1]), Number(found[2]));
       if (method === 'GET') return this.view(issue) as T;
       const wasState = issue.state;

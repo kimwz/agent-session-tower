@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { pipeline } from 'node:stream/promises';
 import { TowerError } from '../../shared/errors.js';
 import { TodoRequestSchema, type TodoRequest } from '../../shared/todo/ops.js';
-import type { TodoAgent, TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoGitHubBinding, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import type { TodoAgent, TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoGitHubBinding, TodoGitHubImport, TodoOverview, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import type { TodoFiles } from '../todo/files.js';
 import { readJson, UUID } from './requests.js';
 import { byteRange } from './sinks.js';
@@ -27,17 +27,22 @@ export interface TodoBackend {
   chatPresets?(): string[] | null;
   /** Saves the owner's list (`null` goes back to the defaults); refuses an invalid one whole. */
   setChatPresets?(presets: unknown): string[] | null;
-  /** GitHub links of projects and sections (server/todo/github/sync.ts); only the owner's page reaches them. */
+  /**
+   * GitHub links of projects and sections (server/todo/github/sync.ts); only the owner's page reaches them, except
+   * `importIssue`, which adds a todo as the ops route does.
+   */
   github?: {
     check(repo: string): Promise<{ login: string; repo: string; private: boolean; canPush: boolean }>;
     link(input: { kind: 'project' | 'section'; id: string; repo: string }): Promise<TodoGitHubBinding>;
     unlink(id: string): void;
+    importIssue(request: TodoRequest, taskId: string): Promise<TodoGitHubImport>;
   };
   /** Attachments; absent where they cannot be kept. */
   files?: Pick<TodoFiles, 'startUpload' | 'uploadOffset' | 'appendUpload' | 'completeUpload' | 'cancelUpload' | 'openFile'>;
 }
 
 export const TODO_OPS_PATH = '/api/todos/ops';
+export const TODO_IMPORT_PATH = '/api/todos/github/import';
 export const CHAT_PRESETS_PATH = '/api/todos/chat-presets';
 /** A request of 100 operations with long descriptions fits; nothing the page sends comes near it otherwise. */
 const MAX_TODO_BODY = 4 * 1024 * 1024;
@@ -142,6 +147,15 @@ export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: 
     json(res, 202, { agent: await todos.startAgent(agent[1], text) });
     return true;
   }
+  if (req.method === 'POST' && path === TODO_IMPORT_PATH) {
+    // Adding a todo whose title is an issue's address: open to whoever may add todos, as the ops route is.
+    const body = await readJson(req, MAX_TODO_BODY);
+    const parsed = TodoRequestSchema.safeParse(body.request);
+    if (!parsed.success || typeof body.taskId !== 'string' || !ID.test(body.taskId) || Object.keys(body).some(key => key !== 'request' && key !== 'taskId')) throw new TowerError('invalid', '가져오기 요청 형식이 올바르지 않습니다.');
+    if (!todos.github) { json(res, 503, { error: 'GitHub 동기화를 사용할 수 없습니다.' }); return true; }
+    json(res, 200, await upstream(todos.github.importIssue(parsed.data, body.taskId)));
+    return true;
+  }
   if (path.startsWith('/api/todos/github/')) return githubRoute(req, res, path, todos, json, owner);
   if (path === '/api/todos/uploads' || UPLOAD.test(path) || FILE.test(path)) return todoFileRoute(req, res, url, path, todos, json);
   if (req.method === 'POST' && path === TODO_OPS_PATH) {
@@ -157,6 +171,9 @@ export async function todoRoute(req: IncomingMessage, res: ServerResponse, url: 
   return true;
 }
 
+/** GitHub's own refusals are told as they came, as an upstream problem. */
+const upstream = <T>(work: Promise<T>) => work.catch(error => { throw error instanceof TowerError ? error : new TowerError('upstream', error instanceof Error ? error.message : String(error)); });
+
 /** Linking projects and sections to GitHub repositories: the owner's page only, never an agent. */
 async function githubRoute(req: IncomingMessage, res: ServerResponse, path: string, todos: TodoBackend,
   json: (res: ServerResponse, status: number, body: unknown) => void, owner: boolean): Promise<boolean> {
@@ -164,8 +181,6 @@ async function githubRoute(req: IncomingMessage, res: ServerResponse, path: stri
   const github = todos.github;
   if (!github) { req.resume(); json(res, 503, { error: 'GitHub 동기화를 사용할 수 없습니다.' }); return true; }
   const repoOf = (body: Record<string, unknown>) => typeof body.repo === 'string' ? body.repo.trim() : '';
-  // GitHub's own refusals are told as they came, as an upstream problem.
-  const upstream = <T>(work: Promise<T>) => work.catch(error => { throw error instanceof TowerError ? error : new TowerError('upstream', error instanceof Error ? error.message : String(error)); });
   if (req.method === 'POST' && path === '/api/todos/github/check') {
     const body = await readJson(req, 4 * 1024);
     json(res, 200, await upstream(github.check(repoOf(body))));

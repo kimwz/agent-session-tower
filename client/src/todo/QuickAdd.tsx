@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowRight, CalendarDays, Flag, Hash, Paperclip, Tag, X } from 'lucide-react';
+import { ArrowRight, CalendarDays, Flag, Github, Hash, Paperclip, Tag, X } from 'lucide-react';
 import { liveProjectIds } from '../../../shared/todo/compose';
+import { githubIssueAddress } from '../../../shared/todo/github-issue';
 import type { TodoOp } from '../../../shared/todo/ops';
 import { parseQuickAdd, type QuickAddKind, type QuickAddToken } from '../../../shared/todo/quick-add';
 import type { TodoPriority, TodoRecurrence } from '../../../shared/todo/types';
-import { translate as t } from '../i18n/i18n';
+import { translate as t, translateMessage } from '../i18n/i18n';
 import { DatePicker, type DateValue } from './DatePicker';
 import { Menu, Popover, usePopover, type MenuItem } from './Popover';
 import { LabelPicker } from './TaskDetail';
@@ -21,7 +22,8 @@ import { projectTree } from './todo-views';
  * back into plain text; the chips set the same properties by hand (replacing the words). Opened to add the task that
  * comes after another, it adds the link too, and completes that task first for "complete and add the next" — all in
  * one request, and nothing at all when cancelled. Files picked, pasted or dropped on it go to the new task's description
- * once the server has the task.
+ * once the server has the task. A title that is only a GitHub issue's address brings that issue in instead (its title,
+ * body and comments, synced with it), once the server has read it.
  */
 
 export interface QuickAddPreset { projectId?: string; sectionId?: string | null; dueDate?: string; dueTime?: string; durationMin?: number; priority?: TodoPriority; labelIds?: string[]; parentId?: string }
@@ -94,6 +96,7 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
   const labelIds = [...new Set([...parsed.labelIds, ...(manual.labelIds ?? preset.labelIds ?? [])])];
   const deadline = manual.deadline !== undefined ? manual.deadline : parsed.deadlineDate ?? null;
   const content = parsed.content;
+  const issue = githubIssueAddress(content);
 
   const dropTokens = (kinds: QuickAddKind[]) => setText(value => without(value, parsed.tokens.filter(token => kinds.includes(token.kind))));
   const submit = async () => {
@@ -104,6 +107,7 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
       durationMin: date.durationMin ?? undefined, recurrence: (date.recurrence ?? undefined) as TodoRecurrence | undefined, deadlineDate: deadline ?? undefined,
     } };
     const { ops, id } = preset.parentId ? createTaskOps(draft, { parentId: preset.parentId }) : quickAddOps(draft, follow, before, today);
+    if (issue) { await bringIn(ops, id); return; }
     if (files.length) {
       busy.current = true; setSaving(true);
       const saved = await saveWithFiles(client, attach, ops, id, files);
@@ -112,6 +116,26 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
     } else if (!client.apply(ops)) return;
     if (follow?.complete && before) client.toast(t('“{0}” 완료, 다음 작업 추가', { 0: before.content }), 'info', client.undoActions());
     onAdded(id);
+    onClose();
+  };
+
+  /** The server reads the issue first: the dialog holds still until it answers, and stays as it is when it refuses. */
+  const bringIn = async (ops: TodoOp[], id: string) => {
+    busy.current = true; setSaving(true);
+    const result = await client.githubImport(ops, id).catch((error: unknown) => {
+      client.toast(t('GitHub 이슈를 가져오지 못했습니다: {0}', { 0: error instanceof Error ? translateMessage(error.message) : String(error) }), 'error');
+      return undefined;
+    });
+    busy.current = false; setSaving(false);
+    if (!result) { requestAnimationFrame(() => input.current?.focus()); return; }
+    const task = client.getState().world.tasks[result.taskId];
+    if (result.existing) client.toast(task ? t('이 이슈와 연결된 할 일이 이미 있습니다: {0}', { 0: task.content }) : t('이 이슈는 완료했거나 삭제한 할 일과 연결되어 있습니다.'));
+    else {
+      if (files.length) attach(result.taskId, files);
+      const place = task && world.projects.find(project => project.id === task.projectId);
+      client.toast(result.moved && place ? t('GitHub 이슈를 “{1}”에 가져왔습니다: {0}', { 0: task.content, 1: place.inbox ? t('관리함') : place.name }) : t('GitHub 이슈를 가져왔습니다: {0}', { 0: task?.content ?? '' }));
+    }
+    if (task) onAdded(result.taskId);
     onClose();
   };
 
@@ -134,6 +158,7 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
       </div>
       <textarea className="todo-quick-description" value={description} rows={description ? 3 : 1} maxLength={16_383} placeholder={t('설명')} aria-label={t('설명')} onChange={event => setDescription(event.target.value)}
         onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void submit(); } }} />
+      {issue && <div className="todo-quick-follow todo-quick-issue"><Github size={13} aria-hidden="true" /><span>{t('GitHub 이슈 {0}을(를) 가져와 할 일로 연결합니다', { 0: `${issue.repo}#${issue.number}` })}</span></div>}
       {files.length > 0 && <ul className="todo-pending-files" aria-label={t('첨부할 파일')}>{files.map((file, index) => <li key={`${file.name}-${index}`}>
         <Paperclip size={12} /><span>{file.name}</span><small>{sizeLabel(file.size)}</small>
         <button type="button" className="icon-button" aria-label={t('“{0}” 빼기', { 0: file.name })} disabled={saving} onClick={() => setFiles(previous => previous.filter((_, position) => position !== index))}><X size={12} /></button>
@@ -155,7 +180,7 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
         <AttachButton onFiles={addFiles} disabled={saving} compact />
         <span className="todo-muted todo-quick-hint">{t('Enter 추가 · Esc 취소')}</span>
         <button type="button" className="todo-secondary" onClick={onClose}>{t('취소')}</button>
-        <button type="button" className="todo-primary" disabled={!content.trim() || saving} onClick={() => void submit()}>{follow?.complete ? t('완료하고 추가') : t('작업 추가')}</button>
+        <button type="button" className="todo-primary" disabled={!content.trim() || saving} onClick={() => void submit()}>{follow?.complete ? t('완료하고 추가') : issue ? t('가져와 추가') : t('작업 추가')}</button>
       </footer>
     </div>
   </div>;

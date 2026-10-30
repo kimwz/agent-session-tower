@@ -67,6 +67,11 @@ const OPERATIONS: { [N in TodoOpName]: Handler } = {
   'file.restore': handler(restoreFile),
 };
 
+/** A request's operations, in order, as `TodoStore.apply` makes them; for work that adds its own in the same transaction. */
+export function applyOps(ctx: TodoContext, ops: readonly TodoOp[]): void {
+  for (const op of ops) OPERATIONS[op.op](ctx, op);
+}
+
 /** The copies a restore makes of the file it replaces; only the newest few are kept. */
 const RESTORE_COPIES_KEPT = 3;
 const RESTORE_COPY = /^todo-restore-before-\d{8}T\d{6}\d{3}Z(?:-[0-9a-f]{6})?\.sqlite$/;
@@ -369,7 +374,7 @@ export class TodoStore {
       const earlier = this.get<{ result: string }>('SELECT result FROM todo_requests WHERE id = ?', request.requestId);
       // An answer kept by an earlier build lacks what was added since.
       if (earlier) return { ...this.emptyChanges(0), ...JSON.parse(earlier.result) as TodoChanges };
-      for (const op of request.ops) OPERATIONS[op.op](ctx, op);
+      applyOps(ctx, request.ops);
       const changes = this.changes(ctx, this.nextRevision());
       this.run('INSERT INTO todo_requests (id, result, at) VALUES (?, ?, ?)', request.requestId, JSON.stringify(changes), ctx.now);
       return changes;

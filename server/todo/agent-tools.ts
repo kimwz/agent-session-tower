@@ -3,10 +3,11 @@ import { hostname } from 'node:os';
 import { z } from 'zod';
 import { completeOp, liveProjectIds, quickAddOps, type QuickAddDraft } from '../../shared/todo/compose.js';
 import { addDays, formatDate } from '../../shared/todo/dates.js';
-import { labelName, MAX_TODO_OPS, TodoOpSchema, TodoRequestSchema, type TodoOp } from '../../shared/todo/ops.js';
+import { labelName, MAX_TODO_OPS, TodoOpSchema, TodoRequestSchema, type TodoOp, type TodoRequest } from '../../shared/todo/ops.js';
+import { githubIssueAddress } from '../../shared/todo/github-issue.js';
 import { parseQuickAdd, type QuickAddResult } from '../../shared/todo/quick-add.js';
 import { slackThreadOf, slackThreadUrl } from '../../shared/todo/slack-thread.js';
-import type { TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoFile, TodoOverview, TodoSlackThread, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
+import type { TodoChanges, TodoCommentAuthor, TodoCompletedPage, TodoFile, TodoGitHubImport, TodoOverview, TodoSlackThread, TodoTask, TodoTaskDetail } from '../../shared/todo/types.js';
 import { TowerError } from '../../shared/errors.js';
 import { checkLocalMedia, LOCAL_MEDIA } from './files.js';
 import { commentWriter, OUTSIDE_SHORT, outsideNotice } from './github/outside.js';
@@ -33,6 +34,8 @@ export interface TodoToolStore {
   apply(request: z.infer<typeof TodoRequestSchema>, by: TodoCommentAuthor): TodoChanges;
   /** Attaches a file on this computer to a task or comment (TodoFiles.attachLocal); absent where files cannot be kept. */
   attachFile?(input: { taskId: string; commentId: string | null; path: string }): Promise<TodoFile>;
+  /** Adds a todo whose title is a GitHub issue's address as that issue (TodoGitHubSync.importIssue); absent without GitHub sync. */
+  importIssue?(request: TodoRequest, taskId: string): Promise<TodoGitHubImport>;
 }
 
 /** `slackThread` is the Slack thread of the conversation the turn is in (todo/agent-mcp.ts), when it is one. */
@@ -124,12 +127,17 @@ function task(overview: TodoOverview, store: TodoToolStore, taskId: string): Tod
   return overview.tasks.find(item => item.id === taskId) ?? store.detail(taskId).task;
 }
 
-/** Checks a request in full, as the HTTP route does, and applies it. */
-function apply(context: Context, ops: readonly unknown[]): TodoChanges {
+/** Checks a request in full, as the HTTP route does. */
+function checked(context: Context, ops: readonly unknown[]): TodoRequest {
   const request = TodoRequestSchema.safeParse({ requestId: context.newId(), ops });
   if (!request.success) throw new TowerError('invalid', request.error.issues.map(issue => `${issue.path.join('.') || 'ops'}: ${issue.message}`).join('; '));
+  return request.data;
+}
+
+/** Checks a request in full and applies it. */
+function apply(context: Context, ops: readonly unknown[]): TodoChanges {
   // Whatever a tool changes is an agent's doing: its comments are recorded as an agent's.
-  return context.store.apply(request.data, 'agent');
+  return context.store.apply(checked(context, ops), 'agent');
 }
 
 /** Label names as ids, with label.create operations for the new ones (to go first in the same request). */
@@ -187,12 +195,27 @@ function add(context: Context, input: z.infer<typeof AddInput>, follow?: { after
     input.parentId ? { parentId: input.parentId } : {}, context.newId);
   const thread = context.slackThread;
   const linked = thread ? ops.map(op => op.op === 'task.create' && op.id === created ? { ...op, slackThread: thread } : op) : ops;
+  if (input.parse !== false && githubIssueAddress(draft.content)) return addIssue(context, checked(context, [...labelOps, ...linked]), created, follow);
   const changes = apply(context, [...labelOps, ...linked]);
   const after = context.store.overview();
   const name = namer(after);
   const made = changes.tasks.find(item => item.id === created);
   const done = follow && changes.tasks.find(item => item.id === follow.after.id);
   return { added: made ? name(made) : { id: created }, ...(done ? { completed: name(done) } : {}) };
+}
+
+/** Adding a task whose title is a GitHub issue's address: the issue comes in as a synced todo, or the one already synced is named. */
+async function addIssue(context: Context, request: TodoRequest, created: string, follow?: { after: TodoTask; complete: boolean }) {
+  if (!context.store.importIssue) throw new TowerError('unavailable', 'GitHub sync is not available here, so the issue cannot be brought in; pass parse: false to add the address as an ordinary title.');
+  const result = await context.store.importIssue(request, created).catch(error => {
+    throw error instanceof TowerError ? new TowerError(error.kind, `${error.message} (To add the address as an ordinary title instead, pass parse: false.)`) : error;
+  });
+  const after = context.store.overview();
+  const name = namer(after);
+  const made = task(after, context.store, result.taskId);
+  if (result.existing) return { existing: { ...name(made), ...(made.deletedAt ? { deleted: true } : {}) }, note: 'This issue is already synced with this todo; nothing was added.' };
+  const done = follow && result.changes?.tasks.find(item => item.id === follow.after.id);
+  return { added: name(made), ...(result.moved ? { note: 'Put in the project or section linked to the issue\'s repository.' } : {}), ...(done ? { completed: name(done) } : {}) };
 }
 
 const TOOLS: Tool[] = [
@@ -285,7 +308,7 @@ const TOOLS: Tool[] = [
   }),
   tool({
     name: 'todos_add',
-    description: 'Adds a task, written as the owner would type it in Quick Add (e.g. "견적 회신 내일 오후 3시 #타워 p1"). With after, it comes after that task as its next step (order only: either can be done first); completeAfter also completes that task in the same request. Added in a Slack conversation, the task links to its thread by itself: no need to write channel ids.',
+    description: 'Adds a task, written as the owner would type it in Quick Add (e.g. "견적 회신 내일 오후 3시 #타워 p1"). With after, it comes after that task as its next step (order only: either can be done first); completeAfter also completes that task in the same request. Added in a Slack conversation, the task links to its thread by itself: no need to write channel ids. A title that is only a GitHub issue address (https://github.com/owner/repo/issues/12) brings that open issue in as a todo synced with it (its title, body, labels and comments), in the project or section linked to its repository; an issue already synced names its todo instead.',
     input: AddInput.extend({ after: id.optional().describe('The task this one comes after.'), completeAfter: z.boolean().optional() }).strict(),
     run: ({ after, completeAfter, ...input }, context) => {
       if (completeAfter && !after) throw new TowerError('invalid', 'completeAfter needs after.');

@@ -22,9 +22,13 @@ export function bindingOfTask(ctx: TodoContext, taskId: string, bindings: readon
   if (!bindings.length) return undefined;
   let row = ctx.get<{ id: string; parent_id: string | null; project_id: string; section_id: string | null }>('SELECT id, parent_id, project_id, section_id FROM todo_tasks WHERE id = ?', taskId);
   for (let depth = 0; row?.parent_id && depth < 10; depth++) row = ctx.get('SELECT id, parent_id, project_id, section_id FROM todo_tasks WHERE id = ?', row.parent_id);
-  if (!row) return undefined;
-  return (row.section_id ? bindings.find(item => item.scope.kind === 'section' && item.scope.id === row!.section_id) : undefined)
-    ?? bindings.find(item => item.scope.kind === 'project' && item.scope.id === row!.project_id);
+  return row ? bindingOfPlace(row.project_id, row.section_id, bindings) : undefined;
+}
+
+/** The link a top-level task in this project and section would sync through. */
+export function bindingOfPlace(projectId: string, sectionId: string | null, bindings: readonly BindingRow[]): BindingRow | undefined {
+  return (sectionId ? bindings.find(item => item.scope.kind === 'section' && item.scope.id === sectionId) : undefined)
+    ?? bindings.find(item => item.scope.kind === 'project' && item.scope.id === projectId);
 }
 
 /** Links a project or section to a repository, in place of the link it had. */
