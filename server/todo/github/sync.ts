@@ -264,6 +264,8 @@ export class TodoGitHubSync {
     // GitHub answers an issue moved to another repository from there: only this repository's own issue is brought in.
     if (issue.html_url.toLowerCase() !== `https://github.com/${binding.repo}/issues/${address.number}`.toLowerCase()) throw new TowerError('invalid', `${ref} 이슈는 다른 리포로 옮겨졌습니다(${issue.html_url}). 옮겨진 이슈의 주소로 가져오세요.`);
     if (issue.state === 'closed') throw new TowerError('invalid', `${ref}은(는) 닫힌 이슈입니다. GitHub에서 다시 연 뒤 가져오세요.`);
+    // A body cut to fit would be sent back cut with Tower's next change, dropping the rest from someone's issue.
+    if (writtenPart(issue.body).length > MAX_DESCRIPTION) throw new TowerError('invalid', `${ref}의 본문이 너무 길어(${MAX_DESCRIPTION.toLocaleString('en-US')}자 초과) 가져오지 않았습니다.`);
     const comments = await this.pages<GitHubComment>(`/repos/${binding.repo}/issues/${address.number}/comments`);
     const today = this.today();
     const { result, changes } = this.store.github(ctx => {

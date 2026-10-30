@@ -2987,6 +2987,7 @@ export const english: Record<string, string> = {
   "가져와 추가": "Bring in",
   "GitHub 이슈를 가져오지 못했습니다: {0}": "Could not bring in the GitHub issue: {0}",
   "이 이슈와 연결된 할 일이 이미 있습니다: {0}": "A task is already linked to this issue: {0}",
+  "“{0}”은(는) 완료하지 않았습니다.": "“{0}” was not completed.",
   "이 이슈는 삭제한 할 일 “{0}”과 연결되어 있습니다.": "This issue is linked to the deleted task “{0}”.",
   "이 이슈는 완료한 할 일 “{0}”과 연결되어 있습니다.": "This issue is linked to the completed task “{0}”.",
   "GitHub 이슈를 “{1}”에 가져왔습니다: {0}": "Brought the GitHub issue into “{1}”: {0}",

@@ -135,6 +135,8 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
     if (existing) client.toast(existing.state === 'deleted' ? t('이 이슈는 삭제한 할 일 “{0}”과 연결되어 있습니다.', { 0: existing.content })
       : existing.state === 'completed' ? t('이 이슈는 완료한 할 일 “{0}”과 연결되어 있습니다.', { 0: existing.content }) : t('이 이슈와 연결된 할 일이 이미 있습니다: {0}', { 0: existing.content }),
     'info', existing.state === 'deleted' ? [] : [{ label: t('열기'), run: () => onOpen(result.taskId) }]);
+    // Nothing of the request was applied: "complete and add" left the task before it open.
+    if (existing && follow?.complete && before) client.toast(t('“{0}”은(는) 완료하지 않았습니다.', { 0: before.content }));
     else {
       if (files.length) attach(result.taskId, files);
       const place = task && world.projects.find(project => project.id === task.projectId);

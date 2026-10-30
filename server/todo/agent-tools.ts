@@ -210,7 +210,8 @@ async function addIssue(context: Context, request: TodoRequest, created: string,
   const result = await context.store.importIssue(request, created).catch(error => {
     throw error instanceof TowerError ? new TowerError(error.kind, `${error.message} (To add the address as an ordinary title instead, pass parse: false.)`) : error;
   });
-  if (result.existing) return { existing: { id: result.taskId, content: result.existing.content, state: result.existing.state }, note: 'This issue is already synced with this todo; nothing was added.' };
+  if (result.existing) return { existing: { id: result.taskId, content: result.existing.content, state: result.existing.state }, outside: OUTSIDE_SHORT,
+    note: `This issue is already synced with this todo; nothing was added${follow ? `, and "${follow.after.content}" was ${follow.complete ? 'neither completed nor ' : 'not '}linked` : ''}.` };
   const after = context.store.overview();
   const name = namer(after);
   const made = task(after, context.store, result.taskId);
