@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { TodoOp } from '../../../shared/todo/ops.js';
-import { saveWithFiles } from '../../../client/src/todo/QuickAdd.js';
+import { importOutcome, saveWithFiles } from '../../../client/src/todo/QuickAdd.js';
 import { activityText, shareItems } from '../../../client/src/todo/TaskDetail.js';
 import { subtaskToggleText } from '../../../client/src/todo/TaskCard.js';
 import { CalendarView } from '../../../client/src/todo/calendar/CalendarView.js';
@@ -156,4 +156,12 @@ test('in a column of several dates the dates stay together, and a drop finds the
   assert.equal(dayAfterOf(order, 'd', 'c'), 'c');
   assert.equal(dayAfterOf(order, 'y', 'x'), null);
   assert.equal(dayAfterOf(order, 'c', 'y'), undefined, 'another date is a change of date, not of order');
+});
+
+test('after bringing an issue in, only a todo it made takes the picked files; one already synced says what was not done', () => {
+  assert.deepEqual(importOutcome({ taskId: 'a', moved: true }, { title: 'Crash', place: 'Work' }), { attach: true, open: false, messages: ['GitHub 이슈를 “Work”에 가져왔습니다: Crash'] });
+  assert.deepEqual(importOutcome({ taskId: 'a' }, { title: 'Crash', notCompleted: 'Step one' }), { attach: true, open: false, messages: ['GitHub 이슈를 가져왔습니다: Crash'] });
+  assert.deepEqual(importOutcome({ taskId: 'b', existing: { content: 'Crash', state: 'open' } }, {}), { attach: false, open: true, messages: ['이 이슈와 연결된 할 일이 이미 있습니다: Crash'] });
+  assert.deepEqual(importOutcome({ taskId: 'b', existing: { content: 'Crash', state: 'deleted' } }, { notCompleted: 'Step one' }),
+    { attach: false, open: false, messages: ['이 이슈는 삭제한 할 일 “Crash”과 연결되어 있습니다.', '“Step one”은(는) 완료하지 않았습니다.'] });
 });

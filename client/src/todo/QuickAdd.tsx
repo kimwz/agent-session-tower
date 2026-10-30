@@ -4,7 +4,7 @@ import { liveProjectIds } from '../../../shared/todo/compose';
 import { githubIssueAddress } from '../../../shared/todo/github-issue';
 import type { TodoOp } from '../../../shared/todo/ops';
 import { parseQuickAdd, type QuickAddKind, type QuickAddToken } from '../../../shared/todo/quick-add';
-import type { TodoPriority, TodoRecurrence } from '../../../shared/todo/types';
+import type { TodoGitHubImport, TodoPriority, TodoRecurrence } from '../../../shared/todo/types';
 import { translate as t, translateMessage } from '../i18n/i18n';
 import { DatePicker, type DateValue } from './DatePicker';
 import { Menu, Popover, usePopover, type MenuItem } from './Popover';
@@ -41,6 +41,21 @@ export async function saveWithFiles(client: Pick<TodoClient, 'applyAndWait'>, at
   if (!(await client.applyAndWait(ops))) return false;
   attach(id, files);
   return true;
+}
+
+/**
+ * What Quick Add says once an issue was brought in, and whether the files picked go to its todo: only a todo it made
+ * takes them. An issue already synced made nothing, so a "complete and add" left the task before it open.
+ */
+export function importOutcome(result: TodoGitHubImport, shown: { title?: string; place?: string; notCompleted?: string }): { messages: string[]; attach: boolean; open: boolean } {
+  const { existing } = result;
+  if (!existing) return { attach: true, open: false, messages: [result.moved && shown.place
+    ? t('GitHub 이슈를 “{1}”에 가져왔습니다: {0}', { 0: shown.title ?? '', 1: shown.place }) : t('GitHub 이슈를 가져왔습니다: {0}', { 0: shown.title ?? '' })] };
+  return { attach: false, open: existing.state !== 'deleted', messages: [
+    existing.state === 'deleted' ? t('이 이슈는 삭제한 할 일 “{0}”과 연결되어 있습니다.', { 0: existing.content })
+      : existing.state === 'completed' ? t('이 이슈는 완료한 할 일 “{0}”과 연결되어 있습니다.', { 0: existing.content }) : t('이 이슈와 연결된 할 일이 이미 있습니다: {0}', { 0: existing.content }),
+    ...(shown.notCompleted ? [t('“{0}”은(는) 완료하지 않았습니다.', { 0: shown.notCompleted })] : []),
+  ] };
 }
 
 /** The text without the given tokens. */
@@ -131,17 +146,10 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
     busy.current = false; setSaving(false);
     if (!result) { requestAnimationFrame(() => input.current?.focus()); return; }
     const task = client.getState().world.tasks[result.taskId];
-    const { existing } = result;
-    if (existing) client.toast(existing.state === 'deleted' ? t('이 이슈는 삭제한 할 일 “{0}”과 연결되어 있습니다.', { 0: existing.content })
-      : existing.state === 'completed' ? t('이 이슈는 완료한 할 일 “{0}”과 연결되어 있습니다.', { 0: existing.content }) : t('이 이슈와 연결된 할 일이 이미 있습니다: {0}', { 0: existing.content }),
-    'info', existing.state === 'deleted' ? [] : [{ label: t('열기'), run: () => onOpen(result.taskId) }]);
-    // Nothing of the request was applied: "complete and add" left the task before it open.
-    if (existing && follow?.complete && before) client.toast(t('“{0}”은(는) 완료하지 않았습니다.', { 0: before.content }));
-    else {
-      if (files.length) attach(result.taskId, files);
-      const place = task && world.projects.find(project => project.id === task.projectId);
-      client.toast(result.moved && place ? t('GitHub 이슈를 “{1}”에 가져왔습니다: {0}', { 0: task.content, 1: place.inbox ? t('관리함') : place.name }) : t('GitHub 이슈를 가져왔습니다: {0}', { 0: task?.content ?? '' }));
-    }
+    const place = task && world.projects.find(project => project.id === task.projectId);
+    const outcome = importOutcome(result, { title: task?.content, place: place && (place.inbox ? t('관리함') : place.name), notCompleted: follow?.complete ? before?.content : undefined });
+    outcome.messages.forEach((message, index) => client.toast(message, 'info', index === 0 && outcome.open ? [{ label: t('열기'), run: () => onOpen(result.taskId) }] : []));
+    if (outcome.attach && files.length) attach(result.taskId, files);
     if (task) onAdded(result.taskId);
     onClose();
   };
