@@ -547,7 +547,7 @@ export function TodoPage({ token, revision, sidebarOpen, drawer, onSidebarOpen, 
       onClose={closeTask} onOpen={openTask} onFollowUp={followUp}
       tab={detailTab} onTab={chooseTab} />}
     {switcher && state.phase === 'ready' && <ViewSwitcher anchor={titleRef} world={world} current={view} onClose={() => setSwitcher(false)} onChoose={next => { setSwitcher(false); goTo(next); }} />}
-    {quick && <QuickAdd world={world} today={today} client={client} preset={quick.preset} follow={quick.follow} attach={attach} onClose={() => setQuick(null)} onAdded={id => setSelectedId(id)} />}
+    {quick && <QuickAdd world={world} today={today} client={client} preset={quick.preset} follow={quick.follow} attach={attach} onClose={() => setQuick(null)} onAdded={id => setSelectedId(id)} onOpen={openTask} />}
     {cardMenu && <Menu anchor={menuAnchor} label={t('작업 메뉴')} items={cardMenuItems(cardMenu.task)} onClose={() => setCardMenu(null)} align={cardMenu.at ? 'start' : 'end'} at={cardMenu.at} />}
     {sectionMenu && section && <Menu anchor={menuAnchor} label={t('섹션 메뉴')} onClose={() => setSectionMenu(null)} items={[
       { key: 'rename', label: t('이름 바꾸기'), icon: <Pencil size={13} />, run: () => setSectionRename(section.id) },

@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.178.0] - 2026-10-30
+
+- **할 일 제목에 GitHub 이슈 주소만 넣으면 그 이슈를 가져와 GitHub와 동기화되는 할 일로 등록합니다** (#219). 빠른 추가에 `https://github.com/owner/repo/issues/30`만 붙이면(날짜·`#프로젝트`·`p1`·`@라벨` 같은 말은 함께 써도 됩니다) 창에 "GitHub 이슈 owner/repo#30을(를) 가져와 할 일로 연결합니다"가 보이고, `가져와 추가`를 누르면 이슈의 제목·본문·라벨(`P1`–`P3`는 우선순위)·기존 댓글을 가져와 Tower에서 만든 동기화 할 일과 똑같이 연결합니다(카드·상세의 `#30`, 이후 양방향 동기화). 에이전트의 `todos_add`도 같은 경로를 탑니다. 할 일은 그 repo에 연결된 곳에 들어갑니다: 고른 프로젝트·섹션이 그 repo와 연결돼 있으면 거기, 아니면 그 repo에 연결된 프로젝트·섹션으로 옮겨 넣고 알려 줍니다. 빠른 추가에서 직접 정한 우선순위·라벨·설명은 Tower의 수정으로 이슈에 올라가고, 날짜 같은 Tower 전용 값은 그대로 붙습니다. 같은 이슈에 연결된 할 일이 이미 있으면(완료·삭제 포함) 새로 만들지 않고 그 할 일을 알려 줍니다. 그 repo에 연결된 곳이 없거나, gh 로그인 계정이 연결 계정과 다르거나, 쓰기 권한이 없거나, 이슈가 없거나 닫혔거나 PR이거나 다른 repo로 옮겨졌으면 아무것도 만들지 않고 이유를 보여 줍니다(창은 입력한 그대로 남습니다). 주소 앞뒤에 다른 말이 있으면, 또는 `todos_add`의 `parse: false`면 지금처럼 일반 할 일입니다. 가져온 제목·본문·댓글은 다른 동기화 할 일처럼 외부 내용으로 표시됩니다.
+- 할 일 화면의 오류 알림이 잘리지 않고 줄을 바꿔 이유 전체를 보여 줍니다.
+- web이 새 버전으로 다시 시작하면 바로 적용됩니다(실행 워커와 무관).
+
 ## [1.177.0] - 2026-10-28
 
 - **마스터가 일을 맡길 때 Claude Code의 자동 승인 검사에 막히지 않습니다** (#217). 마스터와 이슈 마스터가 "prod에 배포해 주세요" 같은 작업을 다른 세션에 보내면, Claude Code auto 모드 분류기가 보내는 글을 보고 "Production Deploy"로 막아 마스터가 "Tower 도구가 없다"고 보고하곤 했습니다. 마스터에게 위임 전용 도구 `session_start`(새 세션)와 `session_message`(기존 세션에 메시지)가 생기고, 마스터 턴에서는 이 둘과 `autoPrompt_submit`을 묻지 않고 부릅니다(Claude는 허용 도구로, Codex는 승인 생략으로). 일을 맡기는 것 자체는 아무것도 바꾸지 않고, 받은 세션의 턴이 실제로 하는 일(배포 명령 등)은 그 세션의 권한 검사를 그대로 거칩니다. 이 도구들은 `tower_api`의 같은 경로를 그대로 부르므로 결과 보고, `master.worker` 모델, 연결된 컴퓨터(`node`)도 같습니다. 나머지 `tower_api` 호출은 지금처럼 검사를 받습니다. 마스터 안내문도 위임에 이 도구들을 쓰라고 바뀝니다.

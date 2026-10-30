@@ -202,6 +202,19 @@ export interface TodoGitHubBinding {
 /** The GitHub issue a todo is synced with. */
 export interface TodoGitHubIssue { repo: string; number: number; url: string; error: string | null }
 
+/**
+ * What adding a todo whose title is an issue's address did: the todo it made (`changes` says what changed), or the one
+ * already synced with that issue (`existing`). `moved` when it went to the project or section linked to the issue's
+ * repository instead of the one asked for.
+ */
+export interface TodoGitHubImport {
+  taskId: string;
+  /** The todo already synced with the issue: its title and whether it is still open (it may not be on the page). */
+  existing?: { content: string; state: 'open' | 'completed' | 'deleted' };
+  moved?: boolean;
+  changes?: TodoChanges;
+}
+
 /** Everything open, for the Todo page. Archived projects are included; deleted things are not. */
 export interface TodoOverview {
   availability: TodoAvailability;

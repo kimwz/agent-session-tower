@@ -33,6 +33,7 @@ class FakeTransport implements TodoTransport {
   started: { taskId: string; text: string }[] = [];
   startAnswer: (taskId: string) => Promise<{ agent?: TodoAgent } | undefined> = async () => undefined;
   async startAgent(taskId: string, text: string) { this.started.push({ taskId, text }); return this.startAnswer(taskId); }
+  github?: TodoTransport['github'];
 }
 
 const clients: TodoClient[] = [];
@@ -595,4 +596,31 @@ test("a completion taken back shows again when the server refuses that, and a li
   assert.deepEqual([completing(), client.getState().undoing], [['c2'], ['c2']]);
   await settle();
   assert.deepEqual([completing(), client.getState().undoing], [['c2'], []]);
+});
+
+test('bringing a GitHub issue in waits for the server and shows the todo it made; a refusal makes nothing', async () => {
+  const transport = new FakeTransport();
+  const sent: { request: TodoRequest; taskId: string }[] = [];
+  let refuse = false;
+  transport.github = { check: async () => { throw new Error('unused'); }, link: async () => undefined, unlink: async () => undefined,
+    importIssue: async (request, taskId) => {
+      sent.push({ request, taskId });
+      if (refuse) throw new ApiError('kimwz/x에 연결된 프로젝트나 섹션이 없습니다.', 404);
+      const made = task(taskId, { content: 'From GitHub' });
+      transport.current.tasks.push(made);
+      return { taskId, changes: changes(++transport.current.revision, { tasks: [made] }) };
+    } };
+  const { client } = await ready(transport);
+  const ops = quickAddOps({ content: 'https://github.com/kimwz/x/issues/1', description: '', result: { labelIds: [], newLabels: [] } }, null, undefined, '2026-10-30');
+  const reads = transport.reads.overview;
+  assert.equal((await client.githubImport(ops.ops, ops.id)).existing, undefined);
+  assert.deepEqual(sent.map(item => [item.taskId, item.request.ops]), [[ops.id, ops.ops]]);
+  assert.equal(client.getState().world.tasks[ops.id].content, 'From GitHub');
+  assert.equal(transport.requests.length, 0, 'not sent as an ordinary change');
+  await settle();
+  assert.equal(transport.reads.overview, reads + 1, 'the overview is read again for the todo\'s issue link');
+  refuse = true;
+  const again = quickAddOps({ content: 'https://github.com/kimwz/x/issues/2', description: '', result: { labelIds: [], newLabels: [] } }, null, undefined, '2026-10-30');
+  await assert.rejects(client.githubImport(again.ops, again.id), /연결된 프로젝트나 섹션이 없습니다/);
+  assert.equal(client.getState().world.tasks[again.id], undefined);
 });

@@ -78,6 +78,7 @@ Storage diagnostics/recovery
 Todos (this computer's; turns Tower runs also have the simpler tower_todos tools: todos_list, todos_add, todos_complete, …)
 - GET /api/todos — projects, sections, labels, open tasks and their links. GET /api/todos/tasks/{id} — one task with its sub-tasks, comments, attachments, completions and links. GET /api/todos/search?q=&completed=1 · GET /api/todos/completed?projectId=&before=&limit=
 - POST /api/todos/ops {requestId(uuid), ops:[…]} — changes applied together or not at all: task.create|update|move|complete|uncomplete|delete|restore, link.create|delete, project.*, section.*, label.*, comment.*, file.delete|restore. New items take ids you choose (letters, digits, - or _).
+- POST /api/todos/github/import {request:{requestId, ops}, taskId} — the same request, whose task.create (id taskId) has a GitHub issue address as its whole title: that issue comes in as a todo synced with it, or the todo already synced with it is named.
 
 Account and Tower (this computer only)
 - GET /api/auth/overview · POST /api/auth/unblock {ip} (the login password, which also opens the secret vault, is changed only on the owner's own page)

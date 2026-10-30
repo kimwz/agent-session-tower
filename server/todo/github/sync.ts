@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { TowerError } from '../../../shared/errors.js';
 import { formatDate } from '../../../shared/todo/dates.js';
-import type { TodoChanges, TodoCommentAuthor, TodoGitHubBinding, TodoPriority } from '../../../shared/todo/types.js';
+import { githubIssueAddress, type GitHubIssueAddress } from '../../../shared/todo/github-issue.js';
+import type { TodoOpOf, TodoRequest } from '../../../shared/todo/ops.js';
+import type { TodoChanges, TodoCommentAuthor, TodoGitHubBinding, TodoGitHubImport, TodoPriority } from '../../../shared/todo/types.js';
 import { GitHubError } from '../../triggers/github.js';
 import type { TodoContext } from '../context.js';
 import { todoFilePath } from '../files.js';
 import { createLabel } from '../ops/projects.js';
-import { completeTask, uncompleteTask, updateTask } from '../ops/tasks.js';
+import { completeTask, shelved, uncompleteTask, updateTask } from '../ops/tasks.js';
 import { VISIBLE_FILE } from '../rows.js';
-import type { TodoStore } from '../store.js';
-import { bindingOfTask, liveBindings, linkScope, REPO, unlink, type BindingRow } from './bindings.js';
+import { applyOps, INBOX_ID, type TodoStore } from '../store.js';
+import { bindingOfPlace, bindingOfTask, liveBindings, linkScope, REPO, unlink, type BindingRow } from './bindings.js';
 import { GitHubCallError, withUploadCopy, type TodoGitHub } from './client.js';
 import { commentBody, contentHash, issueBody, issueHash, issueTitle, lastAssetUrl, priorityLabel, sortLabels, UPLOADABLE, uploadable, writtenPart, type IssueContent, type ShownFile } from './issue-text.js';
 
@@ -85,6 +87,87 @@ const labelNames = (issue: GitHubIssue) => issue.labels.map(label => typeof labe
 const iso = (value: string) => new Date(value).toISOString();
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
+/**
+ * An issue as GitHub has it brought into its todo: title, body, labels, priority, and a real change of state. After it,
+ * `synced_hash` says GitHub shows the todo, unless Tower's state could not follow.
+ */
+function bringIssue(ctx: TodoContext, map: IssueMap, issue: GitHubIssue, view: TaskView, today: string): void {
+  const labels = sortLabels(labelNames(issue));
+  if (!view.deleted) {
+    const patch: { content?: string; description?: string; priority?: TodoPriority; labelIds?: string[] } = {};
+    const title = issue.title.trim().slice(0, MAX_CONTENT);
+    if (title && title !== issueTitle(view.content)) patch.content = title;
+    const description = writtenPart(issue.body).slice(0, MAX_DESCRIPTION);
+    if (description !== view.description.trim()) patch.description = description;
+    if (labels.priority !== view.priority) patch.priority = labels.priority;
+    const labelIds = labels.tower.map(name => {
+      const found = ctx.get<{ id: string }>('SELECT id FROM todo_labels WHERE name = ? AND deleted_at IS NULL', name);
+      if (found) return found.id;
+      const id = randomUUID();
+      createLabel(ctx, { op: 'label.create', id, name });
+      return id;
+    }).sort();
+    if (JSON.stringify([...new Set(labelIds)]) !== JSON.stringify(view.labelIds)) patch.labelIds = [...new Set(labelIds)];
+    if (Object.keys(patch).length) updateTask(ctx, { op: 'task.update', id: view.id, patch });
+    // Only a real change of state completes or reopens it; a repeating todo is completed only in Tower.
+    if (issue.state === 'closed' && !view.completed && !view.recurring) completeTask(ctx, { op: 'task.complete', id: view.id, completionId: randomUUID(), occurrence: view.dueDate, today });
+    if (issue.state === 'open' && view.completed) {
+      const latest = ctx.get<{ id: string }>('SELECT id FROM todo_completions WHERE task_id = ? AND undone_at IS NULL ORDER BY completed_at DESC, rowid DESC LIMIT 1', view.id);
+      if (latest) uncompleteTask(ctx, { op: 'task.uncomplete', id: view.id, completionId: latest.id });
+    }
+  }
+  const after = issueContent(taskView(ctx, map.task_id, map.repo)!, labels.extra);
+  // Where Tower's state could not follow (a repeating or deleted todo), the next push sends Tower's back.
+  const same = (issue.state === 'closed') === (after.state === 'closed');
+  ctx.run('UPDATE todo_github_issues SET synced_hash = ?, gh_updated_at = ?, extra_labels = ? WHERE task_id = ?',
+    same ? issueHash(after) : null, issue.updated_at, JSON.stringify(labels.extra), map.task_id);
+}
+
+/** A comment written on GitHub, new to Tower, as GitHub's comment on the todo. */
+function addGitHubComment(ctx: TodoContext, taskId: string, comment: GitHubComment): void {
+  const id = randomUUID();
+  // Written when it was written on GitHub, and not since: the page marks a comment edited by its two times.
+  const at = iso(comment.created_at);
+  ctx.run('INSERT INTO todo_comments (id, task_id, body, author, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?)', id, taskId, (comment.body ?? '').slice(0, MAX_COMMENT), at, at);
+  ctx.run("INSERT INTO todo_github_comments (comment_id, task_id, github_id, url, origin, login, gh_updated_at) VALUES (?, ?, ?, ?, 'github', ?, ?)",
+    id, taskId, comment.id, comment.html_url, comment.user?.login ?? 'unknown', comment.updated_at);
+  ctx.touched.comments.add(id);
+  ctx.event(taskId, 'commented', { comment: id, via: 'github' });
+}
+
+/** The todo already synced with this issue, deleted or completed ones too, as an import answers it. */
+function syncedTask(ctx: TodoContext, address: GitHubIssueAddress): TodoGitHubImport | undefined {
+  const row = ctx.get<{ id: string; content: string; completed_at: string | null; deleted_at: string | null }>(`SELECT t.id, t.content, t.completed_at, t.deleted_at
+    FROM todo_github_issues g JOIN todo_tasks t ON t.id = g.task_id WHERE lower(g.repo) = lower(?) AND g.number = ? LIMIT 1`, address.repo, address.number);
+  return row ? { taskId: row.id, existing: { content: row.content, state: row.deleted_at ? 'deleted' : row.completed_at ? 'completed' : 'open' } } : undefined;
+}
+
+/**
+ * Where an issue brought in goes: a todo syncs only through the link of where it is, so it goes where it was asked to
+ * when that syncs with the issue's repository, else to the place first linked to that repository (`place`). A sub-task
+ * cannot move away from its parent.
+ */
+function importPlace(ctx: TodoContext, create: TodoOpOf<'task.create'>, repo: string): { binding: BindingRow; place?: { projectId: string; sectionId: string | null } } {
+  const bindings = liveBindings(ctx);
+  const ofRepo = (binding: BindingRow | undefined): binding is BindingRow => !!binding && binding.repo.toLowerCase() === repo.toLowerCase();
+  if (create.parentId) {
+    const binding = bindingOfTask(ctx, create.parentId, bindings);
+    if (ofRepo(binding)) return { binding };
+    throw new TowerError('invalid', `상위 작업이 ${repo}와 동기화되지 않아 하위 작업으로 가져올 수 없습니다.`);
+  }
+  const asked = bindingOfPlace(create.projectId ?? INBOX_ID, create.sectionId ?? null, bindings);
+  if (ofRepo(asked)) return { binding: asked };
+  // Only a place a task can be put in now: neither deleted nor archived (nor under an archived project).
+  for (const binding of bindings.filter(ofRepo)) {
+    const place = binding.scope.kind === 'project'
+      ? ctx.get<{ projectId: string; sectionId: null }>('SELECT id AS projectId, NULL AS sectionId FROM todo_projects WHERE id = ? AND deleted_at IS NULL', binding.scope.id)
+      : ctx.get<{ projectId: string; sectionId: string }>(`SELECT s.project_id AS projectId, s.id AS sectionId FROM todo_sections s JOIN todo_projects p ON p.id = s.project_id AND p.deleted_at IS NULL
+        WHERE s.id = ? AND s.deleted_at IS NULL`, binding.scope.id);
+    if (place && !shelved(ctx, place.projectId, place.sectionId)) return { binding, place };
+  }
+  throw new TowerError('not-found', `${repo}에 연결된 프로젝트나 섹션이 없습니다. 프로젝트 메뉴의 'GitHub 연결…'로 먼저 연결하세요.`);
+}
+
 export class TodoGitHubSync {
   private timer?: ReturnType<typeof setInterval>;
   private soon?: ReturnType<typeof setTimeout>;
@@ -152,6 +235,62 @@ export class TodoGitHubSync {
   unlink(id: string): void {
     this.store.github(ctx => unlink(ctx, id));
     this.store.touchRevision();
+  }
+
+  // ---- An issue brought in -------------------------------------------------------------------------------------
+
+  /**
+   * Adds a todo as `request` would, whose title is an issue's address (shared/todo/github-issue.ts), as that issue: its
+   * title, body, labels and comments, synced from then on as any linked todo. An issue already synced answers its todo.
+   * Anything that stops it (no link to the repository, another gh account, no write access, no such open issue) is
+   * refused with the reason, and nothing is made. Who sent it is not recorded: the todo is the issue's, and an agent's
+   * would say so in the issue's body.
+   */
+  async importIssue(request: TodoRequest, taskId: string): Promise<TodoGitHubImport> {
+    const create = request.ops.find((op): op is TodoOpOf<'task.create'> => op.op === 'task.create' && op.id === taskId);
+    const address = create && githubIssueAddress(create.content);
+    if (!create || !address) throw new TowerError('invalid', '가져올 GitHub 이슈 주소가 없습니다.');
+    const ref = `${address.repo}#${address.number}`;
+    const existing = this.store.githubRead(ctx => syncedTask(ctx, address));
+    if (existing) return existing;
+    const { binding, place } = this.store.githubRead(ctx => importPlace(ctx, create, address.repo));
+    const checked = await this.check(binding.repo);
+    if (checked.login.toLowerCase() !== binding.account.toLowerCase()) throw new TowerError('forbidden', `gh가 ${checked.login} 계정으로 로그인되어 있어 가져오지 않았습니다(연결 계정: ${binding.account}).`);
+    if (!checked.canPush) throw new TowerError('forbidden', `${checked.login} 계정은 ${binding.repo}에 쓸 수 없어 ${ref}을(를) 가져오지 않았습니다.`);
+    const issue = await this.github.call<GitHubIssue>('GET', `/repos/${binding.repo}/issues/${address.number}`).catch(error => {
+      throw error instanceof GitHubCallError && (error.status === 404 || error.status === 410) ? new TowerError('not-found', `${ref} 이슈를 찾을 수 없습니다.`) : error;
+    });
+    if (issue.pull_request) throw new TowerError('invalid', `${ref}은(는) PR입니다. 이슈만 가져올 수 있습니다.`);
+    // GitHub answers an issue moved to another repository from there: only this repository's own issue is brought in.
+    if (issue.html_url.toLowerCase() !== `https://github.com/${binding.repo}/issues/${address.number}`.toLowerCase()) throw new TowerError('invalid', `${ref} 이슈는 다른 리포로 옮겨졌습니다(${issue.html_url}). 옮겨진 이슈의 주소로 가져오세요.`);
+    if (issue.state === 'closed') throw new TowerError('invalid', `${ref}은(는) 닫힌 이슈입니다. GitHub에서 다시 연 뒤 가져오세요.`);
+    // A body cut to fit would be sent back cut with Tower's next change, dropping the rest from someone's issue.
+    if (writtenPart(issue.body).length > MAX_DESCRIPTION) throw new TowerError('invalid', `${ref}의 본문이 너무 길어(${MAX_DESCRIPTION.toLocaleString('en-US')}자 초과) 가져오지 않았습니다.`);
+    const comments = await this.pages<GitHubComment>(`/repos/${binding.repo}/issues/${address.number}/comments`);
+    const today = this.today();
+    const { result, changes } = this.store.github(ctx => {
+      const again = syncedTask(ctx, address);
+      if (again) return again;
+      // The issue's own values first, which GitHub shows: what was set by hand when adding it goes on top, below.
+      const { priority: typedPriority, labelIds: typedLabels = [], description: typedDescription = '', ...rest } = create;
+      const made: TodoOpOf<'task.create'> = { ...rest, ...(place ? { projectId: place.projectId, sectionId: place.sectionId, afterId: undefined } : {}),
+        content: issue.title.trim().slice(0, MAX_CONTENT) || ref, description: writtenPart(issue.body).slice(0, MAX_DESCRIPTION) };
+      applyOps(ctx, request.ops.map(op => op === create ? made : op));
+      if (bindingOfTask(ctx, taskId)?.id !== binding.id) throw new TowerError('conflict', 'GitHub 연결이 바뀌었습니다. 다시 시도하세요.');
+      ctx.run("INSERT INTO todo_github_issues (task_id, repo, number, issue_id, url, synced_hash, gh_updated_at) VALUES (?, ?, ?, ?, ?, NULL, '')", taskId, binding.repo, issue.number, issue.id, issue.html_url);
+      bringIssue(ctx, issueMap(ctx, taskId)!, issue, taskView(ctx, taskId, binding.repo)!, today);
+      for (const comment of comments) if (!ctx.get('SELECT 1 FROM todo_github_comments WHERE github_id = ?', comment.id)) addGitHubComment(ctx, taskId, comment);
+      // Set by hand, so Tower's change: it goes up with the next pass.
+      const view = taskView(ctx, taskId, binding.repo)!;
+      const patch: { priority?: TodoPriority; labelIds?: string[]; description?: string } = {};
+      if (typedPriority && typedPriority < 4 && typedPriority !== view.priority) patch.priority = typedPriority;
+      const labelIds = [...new Set([...view.labelIds, ...typedLabels])];
+      if (labelIds.length !== view.labelIds.length) patch.labelIds = labelIds;
+      if (typedDescription.trim()) patch.description = [view.description.trim(), typedDescription.trim()].filter(Boolean).join('\n\n').slice(0, MAX_DESCRIPTION);
+      if (Object.keys(patch).length) updateTask(ctx, { op: 'task.update', id: taskId, patch });
+      return { taskId, ...(place ? { moved: true } : {}) };
+    });
+    return { ...result, ...(changes ? { changes } : {}) };
   }
 
   // ---- A pass --------------------------------------------------------------------------------------------------
@@ -370,7 +509,7 @@ export class TodoGitHubSync {
   private async pages<T>(path: string): Promise<T[]> {
     const all: T[] = [];
     for (let page = 1; ; page++) {
-      const items = await this.github.call<T[]>('GET', `${path}&per_page=100&page=${page}`);
+      const items = await this.github.call<T[]>('GET', `${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`);
       all.push(...items);
       if (items.length < 100) break;
     }
@@ -406,41 +545,18 @@ export class TodoGitHubSync {
 
   /** Brings an issue's change into its todo, unless Tower changed the todo meanwhile (then Tower's goes up instead). */
   private takeIssue(map: IssueMap, issue: GitHubIssue): void {
-    const today = (() => { const now = this.now(); return formatDate(now.getFullYear(), now.getMonth() + 1, now.getDate()); })();
+    const today = this.today();
     const { changes } = this.store.github(ctx => {
       const view = taskView(ctx, map.task_id, map.repo);
       if (!view || issueHash(issueContent(view, JSON.parse(map.extra_labels) as string[])) !== map.synced_hash) return;
-      const labels = sortLabels(labelNames(issue));
-      if (!view.deleted) {
-        const patch: { content?: string; description?: string; priority?: TodoPriority; labelIds?: string[] } = {};
-        const title = issue.title.trim().slice(0, MAX_CONTENT);
-        if (title && title !== issueTitle(view.content)) patch.content = title;
-        const description = writtenPart(issue.body).slice(0, MAX_DESCRIPTION);
-        if (description !== view.description.trim()) patch.description = description;
-        if (labels.priority !== view.priority) patch.priority = labels.priority;
-        const labelIds = labels.tower.map(name => {
-          const found = ctx.get<{ id: string }>('SELECT id FROM todo_labels WHERE name = ? AND deleted_at IS NULL', name);
-          if (found) return found.id;
-          const id = randomUUID();
-          createLabel(ctx, { op: 'label.create', id, name });
-          return id;
-        }).sort();
-        if (JSON.stringify([...new Set(labelIds)]) !== JSON.stringify(view.labelIds)) patch.labelIds = [...new Set(labelIds)];
-        if (Object.keys(patch).length) updateTask(ctx, { op: 'task.update', id: view.id, patch });
-        // Only a real change of state completes or reopens it; a repeating todo is completed only in Tower.
-        if (issue.state === 'closed' && !view.completed && !view.recurring) completeTask(ctx, { op: 'task.complete', id: view.id, completionId: randomUUID(), occurrence: view.dueDate, today });
-        if (issue.state === 'open' && view.completed) {
-          const latest = ctx.get<{ id: string }>('SELECT id FROM todo_completions WHERE task_id = ? AND undone_at IS NULL ORDER BY completed_at DESC, rowid DESC LIMIT 1', view.id);
-          if (latest) uncompleteTask(ctx, { op: 'task.uncomplete', id: view.id, completionId: latest.id });
-        }
-      }
-      const after = issueContent(taskView(ctx, map.task_id, map.repo)!, labels.extra);
-      // Where Tower's state could not follow (a repeating or deleted todo), the next push sends Tower's back.
-      const same = (issue.state === 'closed') === (after.state === 'closed');
-      ctx.run('UPDATE todo_github_issues SET synced_hash = ?, gh_updated_at = ?, extra_labels = ? WHERE task_id = ?',
-        same ? issueHash(after) : null, issue.updated_at, JSON.stringify(labels.extra), map.task_id);
+      bringIssue(ctx, map, issue, view, today);
     });
     if (changes) this.options.changed(changes);
+  }
+
+  private today(): string {
+    const now = this.now();
+    return formatDate(now.getFullYear(), now.getMonth() + 1, now.getDate());
   }
 
   /** A new comment on the issue comes in as GitHub's; an edit comes in unless Tower changed that comment meanwhile. */
@@ -468,14 +584,7 @@ export class TodoGitHubSync {
       }
       const task = ctx.get<{ deleted_at: string | null }>('SELECT deleted_at FROM todo_tasks WHERE id = ?', map.task_id);
       if (!task || task.deleted_at) return;
-      const id = randomUUID();
-      // Written when it was written on GitHub, and not since: the page marks a comment edited by its two times.
-      const at = iso(comment.created_at);
-      ctx.run('INSERT INTO todo_comments (id, task_id, body, author, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, ?)', id, map.task_id, (comment.body ?? '').slice(0, MAX_COMMENT), at, at);
-      ctx.run("INSERT INTO todo_github_comments (comment_id, task_id, github_id, url, origin, login, gh_updated_at) VALUES (?, ?, ?, ?, 'github', ?, ?)",
-        id, map.task_id, comment.id, comment.html_url, comment.user?.login ?? 'unknown', comment.updated_at);
-      ctx.touched.comments.add(id);
-      ctx.event(map.task_id, 'commented', { comment: id, via: 'github' });
+      addGitHubComment(ctx, map.task_id, comment);
     });
     if (changes) this.options.changed(changes);
   }

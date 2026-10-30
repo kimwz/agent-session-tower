@@ -2,7 +2,7 @@ import { useSyncExternalStore } from 'react';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { formatDate } from '../../../shared/todo/dates';
 import type { TodoOp, TodoRequest } from '../../../shared/todo/ops';
-import type { TodoAgent, TodoChanges, TodoCompletedPage, TodoOverview, TodoTask, TodoTaskDetail } from '../../../shared/todo/types';
+import type { TodoAgent, TodoChanges, TodoCompletedPage, TodoGitHubImport, TodoOverview, TodoTask, TodoTaskDetail } from '../../../shared/todo/types';
 import { api, ApiError } from '../common/lib';
 import { translate as t, translateMessage } from '../i18n/i18n';
 import { applyOps, emptyWorld, inverseOps, mergeChanges, touchesDetail, withAgents, withDetail, worldFromOverview, type TodoWorld } from './todo-model';
@@ -27,6 +27,8 @@ export interface TodoTransport {
     check(repo: string): Promise<TodoGitHubCheck>;
     link(kind: 'project' | 'section', id: string, repo: string): Promise<unknown>;
     unlink(id: string): Promise<unknown>;
+    /** Adds a todo whose title is an issue's address as that issue (server/todo/github/sync.ts `importIssue`). */
+    importIssue(request: TodoRequest, taskId: string): Promise<TodoGitHubImport>;
   };
 }
 
@@ -54,6 +56,7 @@ export function httpTransport(token: () => string): TodoTransport {
       check: repo => api<TodoGitHubCheck>('/api/todos/github/check', { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token() }, body: JSON.stringify({ repo }) }),
       link: (kind, id, repo) => api('/api/todos/github/bindings', { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token() }, body: JSON.stringify({ kind, id, repo }) }),
       unlink: id => api(`/api/todos/github/bindings/${encodeURIComponent(id)}`, { method: 'DELETE', headers: { [REQUEST_TOKEN_HEADER]: token() } }),
+      importIssue: (request, taskId) => api<TodoGitHubImport>('/api/todos/github/import', { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token() }, body: JSON.stringify({ request, taskId }) }),
     },
   };
 }
@@ -405,6 +408,20 @@ export class TodoClient {
     await this.transport.github.link(kind, id, repo);
     this.wantRead = true;
     this.pump();
+  }
+
+  /**
+   * Adds a todo whose title is a GitHub issue's address as that issue. The server reads the issue first, so this waits
+   * for its answer instead of showing the todo at once; a refusal throws with the reason, and nothing was made.
+   */
+  async githubImport(ops: TodoOp[], taskId: string): Promise<TodoGitHubImport> {
+    if (!this.transport.github) throw new Error(t('GitHub 연결을 사용할 수 없습니다.'));
+    const result = await this.transport.github.importIssue({ requestId: newId(), ops }, taskId);
+    if (result.changes) this.receive(result.changes);
+    // The todo's issue link (its card's `#n`) comes with the overview, not with the changes.
+    this.wantRead = true;
+    this.pump();
+    return result;
   }
 
   async githubUnlink(id: string): Promise<void> {

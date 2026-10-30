@@ -287,6 +287,15 @@ async function main() {
       todoSync.nudge();
       return attached.file;
     },
+    // A todo brought in from a GitHub issue moves pages and issue masters as any added todo does.
+    importIssue: async (request: Parameters<TodoGitHubSync['importIssue']>[0], taskId: string) => {
+      const result = await todoSync.importIssue(request, taskId);
+      if (!result.changes) return result;
+      const agents = todoAgents.settle(result.changes.tasks.map(task => task.id));
+      changed();
+      todoSync.nudge();
+      return Object.keys(agents).length ? { ...result, changes: { ...result.changes, revision: todos.revision(), agents } } : result;
+    },
   };
   // The Todo tools every turn Tower runs gets (todo/agent-mcp.ts) reach the web with this key. Without one (a state
   // folder it cannot write) only those tools are unavailable; Tower starts all the same.
@@ -579,6 +588,7 @@ async function main() {
         check: repo => todoSync.check(repo),
         link: async input => { const binding = await todoSync.link(input); changed(); return binding; },
         unlink: id => { todoSync.unlink(id); changed(); },
+        importIssue: todoCalls.importIssue,
       },
       files: {
         startUpload: input => todoFiles.startUpload(input),

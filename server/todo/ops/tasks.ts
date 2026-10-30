@@ -57,7 +57,7 @@ function schedule(dueDate: string | null, dueTime: string | null, recurrence: To
 
 /** Where a task lands: under a parent (taking its project and section), or in a project and section. */
 /** An archived project (or one above it) or an archived section: shown read-only, so nothing is put in it. */
-function shelved(ctx: TodoContext, projectId: string, sectionId: string | null): boolean {
+export function shelved(ctx: TodoContext, projectId: string, sectionId: string | null): boolean {
   for (let id: string | null = projectId, count = 0; id && count < 8; count++) {
     const project: { parent_id: string | null; archived_at: string | null } | undefined = ctx.get('SELECT parent_id, archived_at FROM todo_projects WHERE id = ?', id);
     if (!project) break;
