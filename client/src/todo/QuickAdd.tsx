@@ -50,11 +50,13 @@ const without = (text: string, tokens: QuickAddToken[]) => {
   return (result + text.slice(last)).replace(/\s{2,}/g, ' ').trimStart();
 };
 
-export function QuickAdd({ world, today, client, preset, follow, attach, onClose, onAdded }: {
+export function QuickAdd({ world, today, client, preset, follow, attach, onClose, onAdded, onOpen }: {
   world: TodoWorld; today: string; client: TodoClient; preset: QuickAddPreset; follow: FollowUp | null;
   /** Uploads files to a saved task's description (TodoActions.attach with the page's uploads). */
   attach: (taskId: string, files: File[]) => void;
   onClose: () => void; onAdded: (id: string) => void;
+  /** Opens a task's detail: the todo already synced with an issue brought in again. */
+  onOpen: (id: string) => void;
 }) {
   const before = follow ? world.tasks[follow.taskId] : undefined;
   const [text, setText] = useState('');
@@ -131,7 +133,8 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
     const task = client.getState().world.tasks[result.taskId];
     const { existing } = result;
     if (existing) client.toast(existing.state === 'deleted' ? t('이 이슈는 삭제한 할 일 “{0}”과 연결되어 있습니다.', { 0: existing.content })
-      : existing.state === 'completed' ? t('이 이슈는 완료한 할 일 “{0}”과 연결되어 있습니다.', { 0: existing.content }) : t('이 이슈와 연결된 할 일이 이미 있습니다: {0}', { 0: existing.content }));
+      : existing.state === 'completed' ? t('이 이슈는 완료한 할 일 “{0}”과 연결되어 있습니다.', { 0: existing.content }) : t('이 이슈와 연결된 할 일이 이미 있습니다: {0}', { 0: existing.content }),
+    'info', existing.state === 'deleted' ? [] : [{ label: t('열기'), run: () => onOpen(result.taskId) }]);
     else {
       if (files.length) attach(result.taskId, files);
       const place = task && world.projects.find(project => project.id === task.projectId);
