@@ -606,14 +606,19 @@ test('bringing a GitHub issue in waits for the server and shows the todo it made
     importIssue: async (request, taskId) => {
       sent.push({ request, taskId });
       if (refuse) throw new ApiError('kimwz/x에 연결된 프로젝트나 섹션이 없습니다.', 404);
-      return { taskId, existing: false, changes: changes(++transport.current.revision, { tasks: [task(taskId, { content: 'From GitHub' })] }) };
+      const made = task(taskId, { content: 'From GitHub' });
+      transport.current.tasks.push(made);
+      return { taskId, changes: changes(++transport.current.revision, { tasks: [made] }) };
     } };
   const { client } = await ready(transport);
   const ops = quickAddOps({ content: 'https://github.com/kimwz/x/issues/1', description: '', result: { labelIds: [], newLabels: [] } }, null, undefined, '2026-10-30');
-  assert.equal((await client.githubImport(ops.ops, ops.id)).existing, false);
+  const reads = transport.reads.overview;
+  assert.equal((await client.githubImport(ops.ops, ops.id)).existing, undefined);
   assert.deepEqual(sent.map(item => [item.taskId, item.request.ops]), [[ops.id, ops.ops]]);
   assert.equal(client.getState().world.tasks[ops.id].content, 'From GitHub');
   assert.equal(transport.requests.length, 0, 'not sent as an ordinary change');
+  await settle();
+  assert.equal(transport.reads.overview, reads + 1, 'the overview is read again for the todo\'s issue link');
   refuse = true;
   const again = quickAddOps({ content: 'https://github.com/kimwz/x/issues/2', description: '', result: { labelIds: [], newLabels: [] } }, null, undefined, '2026-10-30');
   await assert.rejects(client.githubImport(again.ops, again.id), /연결된 프로젝트나 섹션이 없습니다/);

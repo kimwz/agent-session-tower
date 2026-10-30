@@ -207,7 +207,13 @@ export interface TodoGitHubIssue { repo: string; number: number; url: string; er
  * already synced with that issue (`existing`). `moved` when it went to the project or section linked to the issue's
  * repository instead of the one asked for.
  */
-export interface TodoGitHubImport { taskId: string; existing: boolean; moved?: boolean; changes?: TodoChanges }
+export interface TodoGitHubImport {
+  taskId: string;
+  /** The todo already synced with the issue: its title and whether it is still open (it may not be on the page). */
+  existing?: { content: string; state: 'open' | 'completed' | 'deleted' };
+  moved?: boolean;
+  changes?: TodoChanges;
+}
 
 /** Everything open, for the Todo page. Archived projects are included; deleted things are not. */
 export interface TodoOverview {

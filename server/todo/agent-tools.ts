@@ -210,10 +210,10 @@ async function addIssue(context: Context, request: TodoRequest, created: string,
   const result = await context.store.importIssue(request, created).catch(error => {
     throw error instanceof TowerError ? new TowerError(error.kind, `${error.message} (To add the address as an ordinary title instead, pass parse: false.)`) : error;
   });
+  if (result.existing) return { existing: { id: result.taskId, content: result.existing.content, state: result.existing.state }, note: 'This issue is already synced with this todo; nothing was added.' };
   const after = context.store.overview();
   const name = namer(after);
   const made = task(after, context.store, result.taskId);
-  if (result.existing) return { existing: { ...name(made), ...(made.deletedAt ? { deleted: true } : {}) }, note: 'This issue is already synced with this todo; nothing was added.' };
   const done = follow && result.changes?.tasks.find(item => item.id === follow.after.id);
   return { added: name(made), ...(result.moved ? { note: 'Put in the project or section linked to the issue\'s repository.' } : {}), ...(done ? { completed: name(done) } : {}) };
 }

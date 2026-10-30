@@ -129,7 +129,9 @@ export function QuickAdd({ world, today, client, preset, follow, attach, onClose
     busy.current = false; setSaving(false);
     if (!result) { requestAnimationFrame(() => input.current?.focus()); return; }
     const task = client.getState().world.tasks[result.taskId];
-    if (result.existing) client.toast(task ? t('이 이슈와 연결된 할 일이 이미 있습니다: {0}', { 0: task.content }) : t('이 이슈는 완료했거나 삭제한 할 일과 연결되어 있습니다.'));
+    const { existing } = result;
+    if (existing) client.toast(existing.state === 'deleted' ? t('이 이슈는 삭제한 할 일 “{0}”과 연결되어 있습니다.', { 0: existing.content })
+      : existing.state === 'completed' ? t('이 이슈는 완료한 할 일 “{0}”과 연결되어 있습니다.', { 0: existing.content }) : t('이 이슈와 연결된 할 일이 이미 있습니다: {0}', { 0: existing.content }));
     else {
       if (files.length) attach(result.taskId, files);
       const place = task && world.projects.find(project => project.id === task.projectId);

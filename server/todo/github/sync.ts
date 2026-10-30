@@ -8,7 +8,7 @@ import { GitHubError } from '../../triggers/github.js';
 import type { TodoContext } from '../context.js';
 import { todoFilePath } from '../files.js';
 import { createLabel } from '../ops/projects.js';
-import { completeTask, uncompleteTask, updateTask } from '../ops/tasks.js';
+import { completeTask, shelved, uncompleteTask, updateTask } from '../ops/tasks.js';
 import { VISIBLE_FILE } from '../rows.js';
 import { applyOps, INBOX_ID, type TodoStore } from '../store.js';
 import { bindingOfPlace, bindingOfTask, liveBindings, linkScope, REPO, unlink, type BindingRow } from './bindings.js';
@@ -135,9 +135,12 @@ function addGitHubComment(ctx: TodoContext, taskId: string, comment: GitHubComme
   ctx.event(taskId, 'commented', { comment: id, via: 'github' });
 }
 
-/** The todo already synced with this issue, deleted or completed ones too. */
-const syncedTask = (ctx: TodoContext, address: GitHubIssueAddress) =>
-  ctx.get<{ task_id: string }>('SELECT task_id FROM todo_github_issues WHERE lower(repo) = lower(?) AND number = ? LIMIT 1', address.repo, address.number)?.task_id;
+/** The todo already synced with this issue, deleted or completed ones too, as an import answers it. */
+function syncedTask(ctx: TodoContext, address: GitHubIssueAddress): TodoGitHubImport | undefined {
+  const row = ctx.get<{ id: string; content: string; completed_at: string | null; deleted_at: string | null }>(`SELECT t.id, t.content, t.completed_at, t.deleted_at
+    FROM todo_github_issues g JOIN todo_tasks t ON t.id = g.task_id WHERE lower(g.repo) = lower(?) AND g.number = ? LIMIT 1`, address.repo, address.number);
+  return row ? { taskId: row.id, existing: { content: row.content, state: row.deleted_at ? 'deleted' : row.completed_at ? 'completed' : 'open' } } : undefined;
+}
 
 /**
  * Where an issue brought in goes: a todo syncs only through the link of where it is, so it goes where it was asked to
@@ -154,13 +157,13 @@ function importPlace(ctx: TodoContext, create: TodoOpOf<'task.create'>, repo: st
   }
   const asked = bindingOfPlace(create.projectId ?? INBOX_ID, create.sectionId ?? null, bindings);
   if (ofRepo(asked)) return { binding: asked };
+  // Only a place a task can be put in now: neither deleted nor archived (nor under an archived project).
   for (const binding of bindings.filter(ofRepo)) {
-    if (binding.scope.kind === 'project') {
-      if (ctx.get('SELECT 1 FROM todo_projects WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL', binding.scope.id)) return { binding, place: { projectId: binding.scope.id, sectionId: null } };
-      continue;
-    }
-    const section = ctx.get<{ project_id: string }>('SELECT project_id FROM todo_sections WHERE id = ? AND deleted_at IS NULL AND archived_at IS NULL', binding.scope.id);
-    if (section) return { binding, place: { projectId: section.project_id, sectionId: binding.scope.id } };
+    const place = binding.scope.kind === 'project'
+      ? ctx.get<{ projectId: string; sectionId: null }>('SELECT id AS projectId, NULL AS sectionId FROM todo_projects WHERE id = ? AND deleted_at IS NULL', binding.scope.id)
+      : ctx.get<{ projectId: string; sectionId: string }>(`SELECT s.project_id AS projectId, s.id AS sectionId FROM todo_sections s JOIN todo_projects p ON p.id = s.project_id AND p.deleted_at IS NULL
+        WHERE s.id = ? AND s.deleted_at IS NULL`, binding.scope.id);
+    if (place && !shelved(ctx, place.projectId, place.sectionId)) return { binding, place };
   }
   throw new TowerError('not-found', `${repo}에 연결된 프로젝트나 섹션이 없습니다. 프로젝트 메뉴의 'GitHub 연결…'로 먼저 연결하세요.`);
 }
@@ -249,7 +252,7 @@ export class TodoGitHubSync {
     if (!create || !address) throw new TowerError('invalid', '가져올 GitHub 이슈 주소가 없습니다.');
     const ref = `${address.repo}#${address.number}`;
     const existing = this.store.githubRead(ctx => syncedTask(ctx, address));
-    if (existing) return { taskId: existing, existing: true };
+    if (existing) return existing;
     const { binding, place } = this.store.githubRead(ctx => importPlace(ctx, create, address.repo));
     const checked = await this.check(binding.repo);
     if (checked.login.toLowerCase() !== binding.account.toLowerCase()) throw new TowerError('forbidden', `gh가 ${checked.login} 계정으로 로그인되어 있어 가져오지 않았습니다(연결 계정: ${binding.account}).`);
@@ -265,7 +268,7 @@ export class TodoGitHubSync {
     const today = this.today();
     const { result, changes } = this.store.github(ctx => {
       const again = syncedTask(ctx, address);
-      if (again) return { taskId: again, existing: true };
+      if (again) return again;
       // The issue's own values first, which GitHub shows: what was set by hand when adding it goes on top, below.
       const { priority: typedPriority, labelIds: typedLabels = [], description: typedDescription = '', ...rest } = create;
       const made: TodoOpOf<'task.create'> = { ...rest, ...(place ? { projectId: place.projectId, sectionId: place.sectionId, afterId: undefined } : {}),
@@ -283,7 +286,7 @@ export class TodoGitHubSync {
       if (labelIds.length !== view.labelIds.length) patch.labelIds = labelIds;
       if (typedDescription.trim()) patch.description = [view.description.trim(), typedDescription.trim()].filter(Boolean).join('\n\n').slice(0, MAX_DESCRIPTION);
       if (Object.keys(patch).length) updateTask(ctx, { op: 'task.update', id: taskId, patch });
-      return { taskId, existing: false, ...(place ? { moved: true } : {}) };
+      return { taskId, ...(place ? { moved: true } : {}) };
     });
     return { ...result, ...(changes ? { changes } : {}) };
   }

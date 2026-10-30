@@ -418,6 +418,9 @@ export class TodoClient {
     if (!this.transport.github) throw new Error(t('GitHub 연결을 사용할 수 없습니다.'));
     const result = await this.transport.github.importIssue({ requestId: newId(), ops }, taskId);
     if (result.changes) this.receive(result.changes);
+    // The todo's issue link (its card's `#n`) comes with the overview, not with the changes.
+    this.wantRead = true;
+    this.pump();
     return result;
   }
 
