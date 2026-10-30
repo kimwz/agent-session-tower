@@ -431,6 +431,8 @@ a.todo-github-link.error, a.todo-github-link.error svg { color:#e58a8a; }
 .todo-toast { display:flex; align-items:center; gap:12px; min-height:40px; padding:6px 6px 6px 14px; border:1px solid #2c3a4d; border-radius:10px; background:#1a2535; color:#dbe6f4; font-size:12.5px; box-shadow:0 14px 40px #0009; }
 .todo-toast > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:46ch; }
 .todo-toast.error { border-color:#8c4450; }
+/* An error says why: it wraps rather than being cut. */
+.todo-toast.error > span { white-space:normal; overflow-wrap:anywhere; max-width:60ch; }
 .todo-toast > button:not(.icon-button) { flex:none; height:28px; padding:0 8px; border-radius:6px; color:#e6a16f; font-weight:600; max-width:22ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .todo-toast > button:not(.icon-button):hover { background:#24334a; }
 .todo-toast .icon-button { width:26px; height:26px; }
@@ -654,6 +656,7 @@ a.todo-file-name:hover { text-decoration:underline; }
   .todo-quick-footer .todo-attach-icon { margin-right:auto; }
   .todo-toasts { bottom:calc(16px + env(safe-area-inset-bottom)); }
   .todo-toast > span { max-width:24ch; }
+  .todo-toast.error > span { max-width:none; }
   .todo-calendar { padding:0 12px 12px; }
   .todo-cal-toolbar { flex-wrap:wrap; gap:8px; }
   .todo-cal-toolbar .todo-tool span { display:none; }
