@@ -575,7 +575,7 @@ export class StorageClient {
     worker.on('error', error => { handle.lastError = error instanceof Error ? error.message : String(error); });
     worker.on('messageerror', error => {
       handle.lastError = error.message;
-      if (handle === this.#thread) this.#threadFailed(failureOf('command', 'invalid-command', `A storage answer could not be read: ${error.message}`, true));
+      if (handle === this.#thread && !handle.expected) this.#threadFailed(failureOf('command', 'invalid-command', `A storage answer could not be read: ${error.message}`, true));
     });
     this.#thread = handle;
     return handle;

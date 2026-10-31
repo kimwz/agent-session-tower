@@ -21,7 +21,7 @@ import type { CodexStdioOptions, CodexStdioRun } from './codex-stdio.js';
 import { withNativeContext } from '../sessions/context.js';
 import { defaultStateDir } from '../state-dir.js';
 import { findExecutable, PROVIDERS } from '../providers/discovery.js';
-import { UUID, type CreatedSession } from './saved-state.js';
+import { UUID } from './saved-state.js';
 import { checkClaudeSubscription, markMaster, subscriptionOnly } from './subscription.js';
 import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { automatedOrigin, sameDelegation, sameOrigin, type SessionOrigin } from './origin.js';
@@ -532,7 +532,6 @@ export class RunManager extends EventEmitter {
   }
 
   private monitorSessionId(id: string): string { return this.registry.monitorId(id); }
-
 
   sessionList(nativeSessions: readonly Session[]): Session[] {
     const listed = markMaster(this.registry.list(nativeSessions, id => this.getSession(id)).filter(session => !this.coldSessionIds.has(this.nativeSessionId(session.id))).map(session => this.sessionWithContext(session)), this.options.stateDir ?? defaultStateDir());

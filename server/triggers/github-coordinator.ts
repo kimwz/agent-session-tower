@@ -131,6 +131,7 @@ export class GitHubCoordinator extends EventEmitter {
         return { runId: run.id };
       },
       findConversation: id => { const run = options.runs.list().find(item => item.autoPromptId === id); return run ? { sessionId: run.sessionId, runId: run.id } : undefined; },
+      // list(id) keeps the copying to this session's runs; the filter also holds for stand-ins that ignore it.
       getSessionRuns: id => options.runs.list(id).filter(run => run.sessionId === id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
       fetchThread: async mention => {
         const get = await options.github(triggerOf(mention), false, this.sourceGate(triggerOf(mention)));

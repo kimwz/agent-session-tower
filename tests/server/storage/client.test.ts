@@ -174,21 +174,58 @@ test('a missed deadline fails the storage: the running write is unknown, waiting
   assert.deepEqual(await client.receipt('after-1'), { found: false });
 });
 
+/**
+ * Blocks this thread, as a busy worker would, until the storage thread has committed the command and so has its answer
+ * on the way (the post follows the commit by a few statements, given 100 ms more).
+ */
+function blockUntilCommitted(dir: string, commandId: string): void {
+  const reader = new DatabaseSync(databasePath(dir), { readOnly: true });
+  try {
+    const committed = reader.prepare('SELECT count(*) AS n FROM operation_receipts WHERE command_id = ?');
+    const limit = Date.now() + 30_000;
+    while ((committed.get(commandId) as { n: number }).n === 0) assert.ok(Date.now() < limit, `${commandId} was not committed within 30 s`);
+  } finally { reader.close(); }
+  const posted = Date.now() + 100;
+  while (Date.now() < posted) { /* still blocked */ }
+}
+
 test('an answer that waited while the loop itself was blocked past the deadline is taken, not a deadline failure', async t => {
   const dir = await stateDir(t);
   const client = await openFixture(t, dir, { limits: { commandDeadlineMs: 1000 } });
   await client.prepare({ allowMigration: true });
+  // Continue from the timers phase, where a real deadline fires.
+  await new Promise(resolve => setTimeout(resolve, 0));
   t.mock.timers.enable({ apis: ['setTimeout'] });
   t.after(() => t.mock.timers.reset());
   const put = client.write('fixture', 'put', { key: 'late', value: '1' }, 'late-1');
-  // The deadline passes on a fake clock while this thread is busy; meanwhile the storage thread answers for real.
+  // The deadline passes on a fake clock while this thread is blocked; meanwhile the storage thread answers for real.
   t.mock.timers.tick(1000);
-  const until = Date.now() + 500;
-  while (Date.now() < until) { /* the loop is blocked: the answer waits in the queue */ }
+  blockUntilCommitted(dir, 'late-1');
   await put;
   t.mock.timers.reset();
   assert.equal(client.status().state, 'ready');
   assert.deepEqual(await client.read('fixture', 'get', { key: 'late' }), { key: 'late', value: '1' });
+});
+
+test('an answer arriving after the deadline failed the storage leaves that failure as the reason', async t => {
+  const dir = await stateDir(t);
+  const statuses: StorageStatus[] = [];
+  const client = await openFixture(t, dir, { limits: { commandDeadlineMs: 1000 }, onUnavailable: status => statuses.push(status) });
+  await client.prepare({ allowMigration: true });
+  // Both phases on the fake clock: the deadline fails the storage before the loop reads the answer that is on its way.
+  t.mock.timers.enable({ apis: ['setTimeout', 'setImmediate'] });
+  t.after(() => t.mock.timers.reset());
+  const put = client.write('fixture', 'put', { key: 'late', value: '1' }, 'late-1');
+  void put.catch(() => {});
+  blockUntilCommitted(dir, 'late-1');
+  t.mock.timers.tick(1000);
+  t.mock.timers.tick(0);
+  t.mock.timers.reset();
+  await rejectsWith(put, { code: 'deadline-exceeded', disposition: 'unknown' });
+  // The thread ends; whatever it had sent is read meanwhile and changes nothing.
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(client.status().failure?.code, 'deadline-exceeded');
+  assert.equal(statuses.length, 1);
 });
 
 test('a full queue still drains on flush and close: the accepted write commits, close acks, the thread exits 0, intake is refused meanwhile', async t => {

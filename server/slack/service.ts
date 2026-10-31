@@ -99,6 +99,7 @@ export class SlackService extends EventEmitter {
         return { runId: run.id };
       } } : {}),
       findConversation: id => { const run = options.runs.list().find(run => run.autoPromptId === id); return run ? { sessionId: run.sessionId, runId: run.id } : undefined; },
+      // list(id) keeps the copying to this session's runs; the filter also holds for stand-ins that ignore it.
       getSessionRuns: id => options.runs.list(id).filter(run => run.sessionId === id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
       fetchThread: mention => this.client(mention.teamId).thread(mention.channel, mention.threadTs),
       match: async input => {
