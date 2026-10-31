@@ -99,7 +99,8 @@ export class SlackService extends EventEmitter {
         return { runId: run.id };
       } } : {}),
       findConversation: id => { const run = options.runs.list().find(run => run.autoPromptId === id); return run ? { sessionId: run.sessionId, runId: run.id } : undefined; },
-      getSessionRuns: id => options.runs.list().filter(run => run.sessionId === id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+      // list(id) keeps the copying to this session's runs; the filter also holds for stand-ins that ignore it.
+      getSessionRuns: id => options.runs.list(id).filter(run => run.sessionId === id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
       fetchThread: mention => this.client(mention.teamId).thread(mention.channel, mention.threadTs),
       match: async input => {
         const model = await resolveModel(options.stateDir, 'slack.match', { provider: input.rules[0]?.provider ?? 'codex' });
@@ -237,11 +238,13 @@ export class SlackService extends EventEmitter {
   }
   coordinatorSessionIds(): string[] {
     const workflows = this.automation.list().filter(item => item.mode === 'conversation');
-    return [...new Set(workflows.flatMap(item => item.sessionId ? [item.sessionId] : this.options.runs.list().filter(run => run.autoPromptId === item.id).map(run => run.sessionId)))];
+    const runs = this.options.runs.list();
+    return [...new Set(workflows.flatMap(item => item.sessionId ? [item.sessionId] : runs.filter(run => run.autoPromptId === item.id).map(run => run.sessionId)))];
   }
   /** The Slack conversation a session is: its own, or the one whose Auto Prompt run made it. */
   private conversationOf(sessionId: string) {
-    return this.automation.list().find(item => item.mode === 'conversation' && (item.sessionId === sessionId || this.options.runs.list().some(run => run.sessionId === sessionId && run.autoPromptId === item.id)));
+    const runs = this.options.runs.list(sessionId);
+    return this.automation.list().find(item => item.mode === 'conversation' && (item.sessionId === sessionId || runs.some(run => run.sessionId === sessionId && run.autoPromptId === item.id)));
   }
   sessionMcp(sessionId: string): SessionMcpServers | undefined {
     const item = this.conversationOf(sessionId);

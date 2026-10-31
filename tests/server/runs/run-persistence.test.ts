@@ -19,7 +19,7 @@ import { until } from '../../helpers/until.ts';
 const ID = '10000000-0000-4000-8000-000000000001';
 
 /** The private save path, reached directly to order writes deterministically. */
-interface Internals { touch(...ids: string[]): void; changed(...runs: Run[]): void; registry: { touch(id: string): void }; persist(): void; flush(): Promise<void>; runs: Map<string, Run>; createdSessions: Map<string, CreatedSession> }
+interface Internals { touch(...ids: string[]): void; changed(...runs: Run[]): void; registry: { load(saved: CreatedSession[]): string }; persist(): void; flush(): Promise<void>; runs: Map<string, Run> }
 
 async function fixture(t: TestContext, outputPersistMs = 60_000) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-run-persistence-'));
@@ -149,8 +149,8 @@ test('a known SQL failure retries only the touched run and does not rewrite save
   const savedPrompt = (await f.saved()).find(item => item.id === run.id)!.prompt;
   const session = f.manager.getSession(`codex:${ID}`)!;
   const createdId = 'codex:created-fixture';
-  f.internals.createdSessions.set(createdId, { session: { ...session, id: createdId }, runId: run.id, confirmed: true });
-  f.internals.registry.touch(createdId); f.internals.persist(); await f.internals.flush();
+  f.internals.registry.load([{ session: { ...session, id: createdId }, runId: run.id, confirmed: true }]);
+  f.internals.persist(); await f.internals.flush();
   const identity = (await new RunsRepository(f.db).exportCurrent()).rows.find(row => row.kind === 'created' && row.id === createdId)!.json;
   const write = f.db.write.bind(f.db);
   let failed = false, identityWrites = 0;

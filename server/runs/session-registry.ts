@@ -11,14 +11,21 @@ export interface RegistryHost {
   persist(): void;
 }
 
+const nativeKey = (created: CreatedSession) => `${created.session.provider}:${created.session.nativeId}`;
+
 /**
  * The conversations Tower created: their stable monitor IDs, how they map to the provider's native IDs once confirmed,
  * their provenance and creation name. Native discovery may show the same conversation under its native ID; it is listed
  * once, under the monitor ID, so layout, titles and closure stay attached to it.
  */
 export class CreatedSessionRegistry {
+  readonly #records = new Map<string, CreatedSession>();
+  /** `provider:nativeId` → monitor ID of each confirmed record: a confirmed identity never changes. */
+  readonly #byNative = new Map<string, string>();
+  /** A native identity belongs to one record; should two ever claim it, the first indexed keeps it. */
+  #index(id: string, created: CreatedSession): void { const key = nativeKey(created); if (!this.#byNative.has(key)) this.#byNative.set(key, id); }
   /** The records themselves; only the registry changes them. */
-  readonly records = new Map<string, CreatedSession>();
+  get records(): ReadonlyMap<string, CreatedSession> { return this.#records; }
   private readonly touched = new Set<string>();
   touch(id: string): void { this.touched.add(id); }
   takeTouched(): string[] { const ids = [...this.touched]; this.touched.clear(); return ids; }
@@ -30,39 +37,37 @@ export class CreatedSessionRegistry {
     for (const value of saved) {
       const origin = restoredSessionOrigin((value as { origin?: unknown }).origin);
       if (origin) value.origin = origin; else delete value.origin;
-      this.records.set(value.session.id, value);
+      this.#records.set(value.session.id, value);
+      if (value.confirmed) this.#index(value.session.id, value);
       this.touch(value.session.id);
     }
     return this.serialize();
   }
 
-  serialize(): string { return JSON.stringify([...this.records.values()]); }
+  serialize(): string { return JSON.stringify([...this.#records.values()]); }
 
   /** Only after a receipt proves the first run was not committed. Never removes a native session. */
   removeUnconfirmed(id: string, runId: string): void {
-    const record = this.records.get(id);
-    if (record && !record.confirmed && record.runId === runId) { this.records.delete(id); this.touch(id); }
+    const record = this.#records.get(id);
+    if (record && !record.confirmed && record.runId === runId) { this.#records.delete(id); this.touch(id); }
   }
 
-  has(id: string): boolean { return this.records.has(id); }
+  has(id: string): boolean { return this.#records.has(id); }
   /** The session as created, before any native record of it. */
-  created(id: string): Session | undefined { return this.records.get(id)?.session; }
+  created(id: string): Session | undefined { return this.#records.get(id)?.session; }
   /** The run that creates the conversation. */
-  creationRun(id: string): string | undefined { return this.records.get(id)?.runId; }
+  creationRun(id: string): string | undefined { return this.#records.get(id)?.runId; }
 
   monitorId(id: string): string {
-    if (this.records.has(id)) return id;
-    for (const [monitorId, created] of this.records) {
-      if (created.confirmed && `${created.session.provider}:${created.session.nativeId}` === id) return monitorId;
-    }
-    return id;
+    if (this.#records.has(id)) return id;
+    return this.#byNative.get(id) ?? id;
   }
 
   /** Stable monitor IDs keep layout, titles and closure attached after native discovery. */
   nativeId(id: string): string {
     id = this.monitorId(id);
-    const created = this.records.get(id);
-    return created?.confirmed ? `${created.session.provider}:${created.session.nativeId}` : id;
+    const created = this.#records.get(id);
+    return created?.confirmed ? nativeKey(created) : id;
   }
 
   /**
@@ -70,7 +75,7 @@ export class CreatedSessionRegistry {
    * A ledger link to external content (`linked`) always wins over the stored record.
    */
   origin(id: string, linked: boolean): SessionOrigin | undefined {
-    const created = this.records.get(id);
+    const created = this.#records.get(id);
     if (!created) return linked ? { kind: 'unknown', untrustedInput: true } : undefined;
     if (linked && !created.origin?.untrustedInput) {
       // The mark is permanent: record it so a later ledger cleanup cannot clear it.
@@ -86,7 +91,7 @@ export class CreatedSessionRegistry {
    */
   backfill(links: { sessionIds: ReadonlySet<string>; requestIds: ReadonlySet<string> }, run: (id: string) => Run | undefined): number {
     let changed = 0;
-    for (const [id, created] of this.records) {
+    for (const [id, created] of this.#records) {
       if (created.origin) continue;
       const initial = run(created.runId);
       const aliases = [id, this.nativeId(id)];
@@ -102,18 +107,19 @@ export class CreatedSessionRegistry {
 
   /** Once external content is queued for a conversation, it stays marked. */
   markUntrusted(id: string): void {
-    const created = this.records.get(id)!;
+    const created = this.#records.get(id)!;
     if (!created.origin?.untrustedInput) { created.origin = { ...(created.origin ?? { kind: 'unknown' as const }), untrustedInput: true }; this.touch(id); }
   }
 
   /** Whether the conversation is one Tower created whose native ID the provider has not confirmed yet. */
-  unconfirmed(id: string): boolean { const created = this.records.get(id); return Boolean(created && !created.confirmed); }
+  unconfirmed(id: string): boolean { const created = this.#records.get(id); return Boolean(created && !created.confirmed); }
 
   /** The provider confirmed the conversation's native ID; false when it is gone or was confirmed as another. */
   confirm(id: string, nativeId: string): boolean {
-    const created = this.records.get(id);
+    const created = this.#records.get(id);
     if (!created || (created.confirmed && created.session.nativeId !== nativeId)) return false;
     created.confirmed = true; created.session.nativeId = nativeId; created.session.creationPending = false;
+    this.#index(id, created);
     this.touch(id);
     return true;
   }
@@ -129,7 +135,7 @@ export class CreatedSessionRegistry {
       status: 'idle', statusReason: '새 세션을 생성하고 있습니다.', createdAt: run.createdAt, updatedAt: run.createdAt,
       lastRequestAt: run.createdAt, lastMessage: input.prompt.trim().slice(0, 512), messageCount: 0, isSubagent: false, resumable: false, creationPending: true,
     };
-    this.records.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}), origin: sessionOriginOf(origin, untrustedInput) });
+    this.#records.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}), origin: sessionOriginOf(origin, untrustedInput) });
     this.touch(id);
     return session;
   }
@@ -140,7 +146,7 @@ export class CreatedSessionRegistry {
    * whose first run ended, is no longer listed.
    */
   view(id: string, run: (id: string) => Run | undefined, withContext: (session: Session) => Session): Session | undefined {
-    const created = this.records.get(id)!;
+    const created = this.#records.get(id)!;
     const native = created.confirmed ? this.host.native(this.nativeId(id)) : undefined;
     if (native && !created.seenNative) { created.seenNative = true; this.touch(id); this.host.persist(); }
     const initialRun = run(created.runId);
@@ -163,9 +169,9 @@ export class CreatedSessionRegistry {
 
   /** Native sessions with the created ones listed once, under their monitor IDs, and children pointing at them. */
   list(nativeSessions: readonly Session[], view: (id: string) => Session | undefined): Session[] {
-    const aliases = new Map([...this.records.keys()].map(id => [this.nativeId(id), id]));
+    const aliases = new Map([...this.#records.keys()].map(id => [this.nativeId(id), id]));
     const sessions = new Map(nativeSessions.filter(session => !aliases.has(session.id)).map(session => [session.id, session]));
-    for (const id of this.records.keys()) {
+    for (const id of this.#records.keys()) {
       const session = view(id);
       if (session) sessions.set(id, session);
     }
