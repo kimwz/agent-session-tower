@@ -131,7 +131,7 @@ export class GitHubCoordinator extends EventEmitter {
         return { runId: run.id };
       },
       findConversation: id => { const run = options.runs.list().find(item => item.autoPromptId === id); return run ? { sessionId: run.sessionId, runId: run.id } : undefined; },
-      getSessionRuns: id => options.runs.list().filter(run => run.sessionId === id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+      getSessionRuns: id => options.runs.list(id).filter(run => run.sessionId === id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
       fetchThread: async mention => {
         const get = await options.github(triggerOf(mention), false, this.sourceGate(triggerOf(mention)));
         const issue = await get(issuePath(mention));

@@ -174,6 +174,23 @@ test('a missed deadline fails the storage: the running write is unknown, waiting
   assert.deepEqual(await client.receipt('after-1'), { found: false });
 });
 
+test('an answer that waited while the loop itself was blocked past the deadline is taken, not a deadline failure', async t => {
+  const dir = await stateDir(t);
+  const client = await openFixture(t, dir, { limits: { commandDeadlineMs: 1000 } });
+  await client.prepare({ allowMigration: true });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => t.mock.timers.reset());
+  const put = client.write('fixture', 'put', { key: 'late', value: '1' }, 'late-1');
+  // The deadline passes on a fake clock while this thread is busy; meanwhile the storage thread answers for real.
+  t.mock.timers.tick(1000);
+  const until = Date.now() + 500;
+  while (Date.now() < until) { /* the loop is blocked: the answer waits in the queue */ }
+  await put;
+  t.mock.timers.reset();
+  assert.equal(client.status().state, 'ready');
+  assert.deepEqual(await client.read('fixture', 'get', { key: 'late' }), { key: 'late', value: '1' });
+});
+
 test('a full queue still drains on flush and close: the accepted write commits, close acks, the thread exits 0, intake is refused meanwhile', async t => {
   const dir = await stateDir(t);
   const client = await openFixture(t, dir, { limits: { maxQueue: 1 } });

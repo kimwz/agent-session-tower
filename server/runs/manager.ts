@@ -497,7 +497,8 @@ export class RunManager extends EventEmitter {
 
   private retainedIds(): Set<string> { return this.history.retainedIds(this.runs, retainedReceipts(this.runs.values())); }
 
-  list(): Run[] { return [...this.runs.values()].map((run) => ({ ...shown(run), ...steerable(this.steering(run)), ...(run.steering ? { steering: { ...run.steering } } : {}), ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
+  /** Copies of the runs, or only one session's: the filter comes before the copying. */
+  list(sessionId?: string): Run[] { return [...this.runs.values()].filter(run => sessionId === undefined || run.sessionId === sessionId).map((run) => ({ ...shown(run), ...steerable(this.steering(run)), ...(run.steering ? { steering: { ...run.steering } } : {}), ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
     ...(run.contextUsage ? { contextUsage: { ...run.contextUsage } } : {}),
     ...(run.approvals ? { approvals: structuredClone(run.approvals) } : {}) })); }
   async attachment(id: string) {
@@ -532,8 +533,6 @@ export class RunManager extends EventEmitter {
 
   private monitorSessionId(id: string): string { return this.registry.monitorId(id); }
 
-  /** The records of created conversations, for tests that reach them directly; only the registry changes them. */
-  private get createdSessions(): Map<string, CreatedSession> { return this.registry.records; }
 
   sessionList(nativeSessions: readonly Session[]): Session[] {
     const listed = markMaster(this.registry.list(nativeSessions, id => this.getSession(id)).filter(session => !this.coldSessionIds.has(this.nativeSessionId(session.id))).map(session => this.sessionWithContext(session)), this.options.stateDir ?? defaultStateDir());

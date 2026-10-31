@@ -611,15 +611,20 @@ export class StorageClient {
     const pending = this.#inflight = this.#queue.shift()!;
     thread.worker.ref();
     pending.timer = setTimeout(() => {
-      if (this.#inflight !== pending) return;
-      this.#threadFailed(failureOf('deadline', 'deadline-exceeded', `The storage thread did not answer ${pending.request.op} within ${pending.deadlineMs} ms.`, true));
+      // Timers run before the loop reads messages: when the loop itself was blocked past the deadline, the answer may
+      // already be waiting. One turn later it has been taken, so only a command still unanswered fails the thread.
+      setImmediate(() => {
+        if (this.#inflight !== pending) return;
+        this.#threadFailed(failureOf('deadline', 'deadline-exceeded', `The storage thread did not answer ${pending.request.op} within ${pending.deadlineMs} ms.`, true));
+      });
     }, pending.deadlineMs);
     thread.worker.postMessage({ ...pending.request, id: pending.id });
   }
 
   #answer(handle: ThreadHandle, response: ThreadResponse): void {
     const pending = this.#inflight;
-    if (handle !== this.#thread) return;
+    // A thread being ended may still deliver an answer it sent before: the failure that ended it stands.
+    if (handle !== this.#thread || handle.expected) return;
     if (!pending || response?.type !== 'result' || response.id !== pending.id) {
       this.#threadFailed(failureOf('command', 'invalid-command', 'The storage thread answered a command that was not asked.', true));
       return;

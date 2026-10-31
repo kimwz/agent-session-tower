@@ -16,9 +16,16 @@ export interface RegistryHost {
  * their provenance and creation name. Native discovery may show the same conversation under its native ID; it is listed
  * once, under the monitor ID, so layout, titles and closure stay attached to it.
  */
+const nativeKey = (created: CreatedSession) => `${created.session.provider}:${created.session.nativeId}`;
+
 export class CreatedSessionRegistry {
+  readonly #records = new Map<string, CreatedSession>();
+  /** `provider:nativeId` → monitor ID of each confirmed record: a confirmed identity never changes. */
+  readonly #byNative = new Map<string, string>();
+  /** A native identity belongs to one record; should two ever claim it, the first indexed keeps it. */
+  #index(id: string, created: CreatedSession): void { const key = nativeKey(created); if (!this.#byNative.has(key)) this.#byNative.set(key, id); }
   /** The records themselves; only the registry changes them. */
-  readonly records = new Map<string, CreatedSession>();
+  get records(): ReadonlyMap<string, CreatedSession> { return this.#records; }
   private readonly touched = new Set<string>();
   touch(id: string): void { this.touched.add(id); }
   takeTouched(): string[] { const ids = [...this.touched]; this.touched.clear(); return ids; }
@@ -30,7 +37,8 @@ export class CreatedSessionRegistry {
     for (const value of saved) {
       const origin = restoredSessionOrigin((value as { origin?: unknown }).origin);
       if (origin) value.origin = origin; else delete value.origin;
-      this.records.set(value.session.id, value);
+      this.#records.set(value.session.id, value);
+      if (value.confirmed) this.#index(value.session.id, value);
       this.touch(value.session.id);
     }
     return this.serialize();
@@ -41,7 +49,7 @@ export class CreatedSessionRegistry {
   /** Only after a receipt proves the first run was not committed. Never removes a native session. */
   removeUnconfirmed(id: string, runId: string): void {
     const record = this.records.get(id);
-    if (record && !record.confirmed && record.runId === runId) { this.records.delete(id); this.touch(id); }
+    if (record && !record.confirmed && record.runId === runId) { this.#records.delete(id); this.touch(id); }
   }
 
   has(id: string): boolean { return this.records.has(id); }
@@ -52,17 +60,14 @@ export class CreatedSessionRegistry {
 
   monitorId(id: string): string {
     if (this.records.has(id)) return id;
-    for (const [monitorId, created] of this.records) {
-      if (created.confirmed && `${created.session.provider}:${created.session.nativeId}` === id) return monitorId;
-    }
-    return id;
+    return this.#byNative.get(id) ?? id;
   }
 
   /** Stable monitor IDs keep layout, titles and closure attached after native discovery. */
   nativeId(id: string): string {
     id = this.monitorId(id);
     const created = this.records.get(id);
-    return created?.confirmed ? `${created.session.provider}:${created.session.nativeId}` : id;
+    return created?.confirmed ? nativeKey(created) : id;
   }
 
   /**
@@ -114,6 +119,7 @@ export class CreatedSessionRegistry {
     const created = this.records.get(id);
     if (!created || (created.confirmed && created.session.nativeId !== nativeId)) return false;
     created.confirmed = true; created.session.nativeId = nativeId; created.session.creationPending = false;
+    this.#index(id, created);
     this.touch(id);
     return true;
   }
@@ -129,7 +135,7 @@ export class CreatedSessionRegistry {
       status: 'idle', statusReason: '새 세션을 생성하고 있습니다.', createdAt: run.createdAt, updatedAt: run.createdAt,
       lastRequestAt: run.createdAt, lastMessage: input.prompt.trim().slice(0, 512), messageCount: 0, isSubagent: false, resumable: false, creationPending: true,
     };
-    this.records.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}), origin: sessionOriginOf(origin, untrustedInput) });
+    this.#records.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}), origin: sessionOriginOf(origin, untrustedInput) });
     this.touch(id);
     return session;
   }
