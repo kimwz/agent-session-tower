@@ -733,7 +733,9 @@ export class MasterSession {
   private async sendApprovalReports(binding: MasterBinding): Promise<boolean> {
     if (this.heartbeatStopped()) return false;
     const now = this.now();
-    const waiting = (this.file.approvalWaits ?? []).filter(wait => !wait.settledAt && (wait.report === undefined || wait.report === 'pending')
+    // Not of a joined computer out of reach: it may have been answered there, and the master could not answer it anyway.
+    const streaming = new Set((this.options.live.snapshot()?.nodes ?? []).filter(node => node.streaming).map(node => node.id));
+    const waiting = (this.file.approvalWaits ?? []).filter(wait => !wait.settledAt && (wait.report === undefined || wait.report === 'pending') && (!wait.node || streaming.has(wait.node))
       && now - Date.parse(wait.firstSeenAt) >= APPROVAL_REPORT_DELAY_MS && this.reportDue(wait, wait.firstSeenAt, now));
     if (!waiting.length) return false;
     await this.sendBatches(binding, waiting, wait => approvalReportLine(wait, now), (reportId, lines) => approvalReportPrompt(REPORT_MARK, reportId, lines));

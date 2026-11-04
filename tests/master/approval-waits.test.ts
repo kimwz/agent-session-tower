@@ -122,6 +122,7 @@ test('the reported case: four messages joined in one turn, one approval, one rep
   assert.match(prompt, /Reads the database password/);
   assert.match(prompt, /"tool":"Bash"/);
   assert.match(prompt, /owner-only \(reads or handles a secret\)/);
+  assert.match(prompt, new RegExp(`Answer through POST /api/runs/${turn.id}/approvals/${ENV_READ.id}\\.`), 'the owner may say yes later: the master can still find it');
   assert.match(prompt, /untrusted/);
   assert.equal(h.notices.length, 0, 'the master has not answered yet');
 
@@ -155,7 +156,8 @@ test('an ordinary request within the master\'s reach: reported, allowed, and the
   await h.session.follow();
   h.advance(APPROVAL_REPORT_DELAY_MS);
   await h.session.follow();
-  assert.match(h.reports()[0]!.prompt, /You may allow it with POST \/api\/runs\/w1\/approvals\/test-1 \{"decision":"allow"\}/);
+  assert.match(h.reports()[0]!.prompt, /Answer through POST \/api\/runs\/w1\/approvals\/test-1\./);
+  assert.match(h.reports()[0]!.prompt, /You may allow it with \{"decision":"allow"\}/);
   assert.equal((await h.answer(run, PLAIN.id, { decision: 'allow' })).error, undefined);
   assert.deepEqual(h.answers.map(item => item.body), [{ decision: 'allow' }]);
   await h.session.follow();
@@ -374,7 +376,10 @@ test('only a plain yes is the master\'s alone: a no, a question\'s answer and a 
   await h.session.follow();
   h.advance(APPROVAL_REPORT_DELAY_MS);
   await h.session.follow();
-  assert.match(h.reports()[0]!.prompt, /It asks a question or a form: the owner answers it/);
+  const asked = h.reports()[0]!.prompt;
+  assert.match(asked, /It asks a question or a form: the owner answers it/);
+  assert.match(asked, /Which\?/, 'a question\'s words are in its interaction, not its input');
+  assert.match(asked, /approvals\/q1\./);
   for (const [id, body] of [[PLAIN.id, { decision: 'deny' }], [question.id, { decision: 'allow' }], [question.id, { answers: { 0: { answers: ['A'] } } }], [form.id, { action: 'accept', content: {} }], [PLAIN.id, { decision: 'allow', extra: 1 }]] as const) {
     assert.match((await h.answer(run, id, body)).error ?? '', /소유자가 판단합니다/, JSON.stringify(body));
   }
@@ -450,6 +455,21 @@ test('a joined computer\'s approval is reported and answered through its node wh
   run.approvals = [{ ...PLAIN, id: 'p2' }];
   assert.equal((await h.answer(run, 'p2', { decision: 'allow' }, NODE)).error, undefined);
   assert.equal(h.answers[0]!.path, `/api/nodes/${NODE}/runs/n1/approvals/p2`);
+});
+
+test('a joined computer lost between first sight and the report gets no report; back in reach, it does', async t => {
+  const h = await harness(t);
+  const run = await h.handOut('n1', {}, NODE);
+  run.approvals = [PLAIN];
+  h.nodes!.push({ id: NODE, streaming: true } as NonNullable<Snapshot['nodes']>[number]);
+  await h.session.follow();
+  h.nodes![0]!.streaming = false;
+  h.advance(APPROVAL_REPORT_DELAY_MS);
+  await h.session.follow();
+  assert.equal(h.reports().length, 0);
+  h.nodes![0]!.streaming = true;
+  await h.session.follow();
+  assert.equal(h.reports().length, 1);
 });
 
 test('what the floor marks for the owner, and what it leaves to the master', () => {

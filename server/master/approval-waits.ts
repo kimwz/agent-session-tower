@@ -64,7 +64,8 @@ export const waitKey = (node: string | undefined, runId: string, approvalId: str
 export function newWait(input: { node?: string; run: Run; approval: RunApproval; title: string; at: string }): ApprovalWait {
   const { node, run, approval, title, at } = input;
   return { key: waitKey(node, run.id, approval.id), ...(node ? { node } : {}), runId: run.id, approvalId: approval.id, sessionId: run.sessionId, title, toolName: approval.toolName,
-    input: clip(JSON.stringify(approval.input ?? {}), INPUT_CHARS), ...(approval.description ? { description: clip(approval.description, INPUT_CHARS) } : {}),
+    // A Codex question has nothing in its input: what it asks is in its interaction.
+    input: clip(JSON.stringify(approval.interaction ? { input: approval.input ?? {}, interaction: approval.interaction } : approval.input ?? {}), INPUT_CHARS), ...(approval.description ? { description: clip(approval.description, INPUT_CHARS) } : {}),
     ...(approval.interaction ? { question: true as const } : {}), flags: approvalFlags(approval), firstSeenAt: at };
 }
 
@@ -106,8 +107,8 @@ export function approvalReportLine(wait: ApprovalWait, now: number): string {
   const route = `POST /api/runs/${encodeURIComponent(wait.runId)}/approvals/${encodeURIComponent(wait.approvalId)}${wait.node ? ` with node ${wait.node}` : ''}`;
   const owner = wait.question ? 'It asks a question or a form: the owner answers it.'
     : wait.flags.length ? `Tower marks it owner-only (${wait.flags.map(flag => FLAG_NAMES[flag]).join(', ')}): Tower refuses your allow until the owner has told you to.`
-      : `You may allow it with ${route} {"decision":"allow"} if it is clearly within what the owner asked.`;
-  return `- "${wait.title}" (${where}), waiting ${SECONDS(now - Date.parse(wait.firstSeenAt))}\n  ${owner}\n  Untrusted request data: ${JSON.stringify({ tool: wait.toolName, input: wait.input, ...(wait.description ? { description: wait.description } : {}) })}`;
+      : 'You may allow it with {"decision":"allow"} if it is clearly within what the owner asked.';
+  return `- "${wait.title}" (${where}), waiting ${SECONDS(now - Date.parse(wait.firstSeenAt))}\n  Answer through ${route}.\n  ${owner}\n  Untrusted request data: ${JSON.stringify({ tool: wait.toolName, input: wait.input, ...(wait.description ? { description: wait.description } : {}) })}`;
 }
 
 export function approvalReportPrompt(mark: string, reportId: string, lines: readonly string[]): string {
