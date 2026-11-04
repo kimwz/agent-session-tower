@@ -11,23 +11,26 @@ const OWNER_WORDS_WINDOW_MS = 30 * 60_000;
 const INPUT_CHARS = 2_000;
 
 /** What a master may not allow on its own, even when it looks within the owner's request. */
-export type ApprovalFlag = 'secret' | 'delete' | 'production' | 'publish' | 'money';
+export type ApprovalFlag = 'secret' | 'delete' | 'production' | 'publish' | 'money' | 'scope';
 
 /**
  * A floor, not a judge: it reads text an agent wrote, so it can miss. A false alarm only means the owner is asked;
  * what it misses is left to the master's judgment under its guide.
  */
 const FLAGS: ReadonlyArray<readonly [ApprovalFlag, RegExp]> = [
-  ['secret', /(?:^|[^a-z0-9])\.env\b|secret|passw(?:or)?d|credential|api[_-]?key|private[_-]?key|access[_-]?key|token|\.pem\b|\.p12\b|\.ssh\b|id_rsa|id_ed25519|keychain|vault|printenv|\bauth\s+print/i],
+  ['secret', /(?:^|[^a-z0-9])\.env\b|secret|passw(?:or)?d|credential|api[_-]?key|private[_-]?key|access[_-]?key|token|\.pem\b|\.p12\b|\.ssh\b|id-rsa|id-ed25519|keychain|vault|printenv|\bauth\s+print/i],
   ['delete', /\b(?:rm|rmdir|unlink|shred|mkfs|truncate|drop|delete|destroy|purge|wipe|prune)\b|reset\s+--hard|clean\s+-[a-z]*f|--force\b|push\s+-f\b/i],
   ['production', /\bprod(?:uction)?\b|\blive\b/i],
-  ['publish', /\bgit\s+push\b|\bgh\s+(?:pr|issue|release|repo|api)\b|\bnpm\s+publish\b|\bdeploy|\bkubectl\s+(?:apply|delete|rollout)|\bterraform\s+apply|\bslack\b|\bdiscord\b|\bsendmail\b|\bcurl\b[^\n]*(?:-X\s*(?:POST|PUT|PATCH|DELETE)|--data|\s-d\s)/i],
+  ['publish', /\bgit\b[^|;&]*\spush\b|\bgh\s+(?:pr|issue|release|repo|api)\b|\bnpm\s+publish\b|\bdeploy|\bkubectl\s+(?:apply|delete|rollout)|\bterraform\s+apply|\bslack\b|\bdiscord\b|\bsendmail\b|\bcurl\b[^|;&]*(?:(?:-X\s*|--request\s+)(?:POST|PUT|PATCH|DELETE)|--data|--json|--form|\s-[dF]\b)/i],
   ['money', /\bpayment|\bpayout|\brefund|\bcharge\b|\binvoice|\bbilling|\bstripe\b|\bwithdraw|\bwallet\b|\bcredit\b|\btransfer\b/i],
 ];
 
 export function approvalFlags(approval: RunApproval): ApprovalFlag[] {
-  const text = `${approval.toolName}\n${JSON.stringify(approval.input ?? {})}\n${approval.description ?? ''}`;
-  return FLAGS.filter(([, pattern]) => pattern.test(text)).map(([flag]) => flag);
+  // In JSON a line break is the two characters \n, which would make the next line's first word `ngit` or `nrm`. An MCP
+  // tool's name joins its words with _, a word character to \b: mcp__stripe__create_charge has no word "charge" in it.
+  const text = `${approval.toolName}\n${JSON.stringify(approval.input ?? {})}\n${approval.description ?? ''}`.replace(/\\[nrt]/g, ' ').replace(/_/g, '-');
+  // A grant for the rest of the turn lets through what would otherwise be asked about one by one.
+  return [...FLAGS.filter(([, pattern]) => pattern.test(text)).map(([flag]) => flag), ...(approval.scope === 'turn' ? ['scope' as const] : [])];
 }
 
 /** One wait a master follows: first seen, reported to it, handed to the owner, settled. Kept in its follow file. */
@@ -65,8 +68,13 @@ export function newWait(input: { node?: string; run: Run; approval: RunApproval;
   const { node, run, approval, title, at } = input;
   return { key: waitKey(node, run.id, approval.id), ...(node ? { node } : {}), runId: run.id, approvalId: approval.id, sessionId: run.sessionId, title, toolName: approval.toolName,
     // A Codex question has nothing in its input: what it asks is in its interaction.
-    input: clip(JSON.stringify(approval.interaction ? { input: approval.input ?? {}, interaction: approval.interaction } : approval.input ?? {}), INPUT_CHARS), ...(approval.description ? { description: clip(approval.description, INPUT_CHARS) } : {}),
+    input: clip(JSON.stringify(approval.interaction ? { input: approval.input ?? {}, interaction: approval.interaction } : approval.input ?? {}), INPUT_CHARS), ...(approval.description || asked(approval) ? { description: clip(approval.description || asked(approval), INPUT_CHARS) } : {}),
     ...(approval.interaction ? { question: true as const } : {}), flags: approvalFlags(approval), firstSeenAt: at };
+}
+
+/** What a question asks, for the owner's notice: a Codex question has no description of its own. */
+function asked(approval: RunApproval): string {
+  return approval.interaction?.type === 'questions' ? approval.interaction.questions.map(question => question.question || question.header).filter(Boolean).join(' / ') : '';
 }
 
 /** The approvals a session's running turns wait on now: a queued message waits behind them too. */
@@ -99,7 +107,7 @@ export function ownerWordsSince(wait: ApprovalWait | undefined, now: number): nu
 }
 
 const SECONDS = (ms: number) => `${Math.max(0, Math.round(ms / 1000))} s`;
-const FLAG_NAMES: Record<ApprovalFlag, string> = { secret: 'reads or handles a secret', delete: 'deletes', production: 'touches production', publish: 'publishes outside', money: 'involves money' };
+const FLAG_NAMES: Record<ApprovalFlag, string> = { secret: 'reads or handles a secret', delete: 'deletes', production: 'touches production', publish: 'publishes outside', money: 'involves money', scope: 'widens what the rest of the turn may do' };
 
 /** A wait as the master reads it. Everything the agent wrote goes in JSON, marked as data. */
 export function approvalReportLine(wait: ApprovalWait, now: number): string {

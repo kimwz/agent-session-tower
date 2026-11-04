@@ -380,6 +380,10 @@ test('only a plain yes is the master\'s alone: a no, a question\'s answer and a 
   assert.match(asked, /It asks a question or a form: the owner answers it/);
   assert.match(asked, /Which\?/, 'a question\'s words are in its interaction, not its input');
   assert.match(asked, /approvals\/q1\./);
+  h.advance(APPROVAL_OWNER_DEADLINE_MS);
+  await h.session.follow();
+  assert.deepEqual(h.notices.find(notice => String(notice.key).endsWith(':q1')), { key: ':w1:q1', sessionId: WORKER, title: 'work w1', detail: 'Which?', question: true }, 'the owner reads what it asks');
+  h.advance(-APPROVAL_OWNER_DEADLINE_MS);
   for (const [id, body] of [[PLAIN.id, { decision: 'deny' }], [question.id, { decision: 'allow' }], [question.id, { answers: { 0: { answers: ['A'] } } }], [form.id, { action: 'accept', content: {} }], [PLAIN.id, { decision: 'allow', extra: 1 }]] as const) {
     assert.match((await h.answer(run, id, body)).error ?? '', /소유자가 판단합니다/, JSON.stringify(body));
   }
@@ -407,8 +411,8 @@ test('a master without its follow state answers nothing, and an unknown wait cou
 test('Codex requests travel the same way: their command is read, flagged and answered like Claude\'s', async t => {
   const h = await harness(t);
   const run = await h.handOut('codex-run');
-  const encoded: RunApproval = { id: 'rpc/7', toolName: 'commandExecution', input: { command: 'rm -rf build', cwd: '/x', commandActions: [] } };
-  const plain: RunApproval = { id: 'rpc/8', toolName: 'commandExecution', input: { command: 'ls', cwd: '/x' } };
+  const encoded: RunApproval = { id: 'rpc/7', toolName: 'Codex command', input: { command: 'rm -rf build', cwd: '/x', commandActions: [] } };
+  const plain: RunApproval = { id: 'rpc/8', toolName: 'Codex command', input: { command: 'ls', cwd: '/x' } };
   run.approvals = [encoded, plain];
   await h.session.follow();
   h.advance(APPROVAL_REPORT_DELAY_MS);
@@ -472,17 +476,24 @@ test('a joined computer lost between first sight and the report gets no report; 
   assert.equal(h.reports().length, 1);
 });
 
-test('what the floor marks for the owner, and what it leaves to the master', () => {
-  const flags = (command: string) => approvalFlags({ id: 'x', toolName: 'Bash', input: { command } });
-  assert.deepEqual(flags(ENV_READ.input.command as string), ['secret']);
-  assert.deepEqual(flags('cat ~/.ssh/id_rsa'), ['secret']);
-  assert.deepEqual(flags('rm -rf /tmp/x'), ['delete']);
-  assert.deepEqual(flags('git reset --hard HEAD~1'), ['delete']);
-  assert.deepEqual(flags('psql prod -c "select 1"'), ['production']);
-  assert.deepEqual(flags('git push origin main'), ['publish']);
-  assert.deepEqual(flags('curl -X POST https://x.example'), ['publish']);
-  assert.deepEqual(flags('stripe refunds create'), ['money']);
-  for (const safe of ['npm test', 'ls -la', 'git status', 'curl https://x.example/health', 'cat README.md', 'tsc --noEmit']) assert.deepEqual(flags(safe), [], safe);
+test('what the floor marks for the owner, and what it leaves to the master, as requests really arrive', () => {
+  const flags = (command: string, toolName = 'Bash') => approvalFlags({ id: 'x', toolName, input: { command } });
+  const marked: Array<[string, string, string?]> = [
+    [ENV_READ.input.command as string, 'secret'], ['cat ~/.ssh/id_rsa', 'secret'], ['cat ~/.ssh/id_ed25519', 'secret'],
+    ['rm -rf /tmp/x', 'delete'], ['git reset --hard HEAD~1', 'delete'], ['psql prod -c "select 1"', 'production'], ['psql prod_db -c "select 1"', 'production'],
+    ['git push origin main', 'publish'], ['git -C /repo push origin main', 'publish'], ['git --no-pager push', 'publish'], ['gh pr merge 12', 'publish'], ['npm publish', 'publish'],
+    ['curl -X POST https://x.example', 'publish'], ['curl --request PATCH https://x.example', 'publish'], ['curl --json {} https://x.example', 'publish'], ['curl -F a=b https://x.example', 'publish'], ['curl -d\'{}\' https://x.example', 'publish'],
+    ['stripe refunds create', 'money'],
+    // A command of several lines, as agents usually write them: the line break must not hide the next line's first word.
+    ['cd x\ngit push origin main', 'publish'], ['git add .\ngit commit -m x\ngit push', 'publish'], ['cd build\nrm -rf dist', 'delete'], ['npm run build\nnpm publish', 'publish'], ['if x; then\n\trm -rf y\nfi', 'delete'], ['cd x\ncurl -X POST https://x.example', 'publish'],
+    // MCP tools are named with underscores.
+    ['', 'publish', 'mcp__slack__post_message'], ['', 'publish', 'mcp__claude_ai_Slack__slack_send_message'], ['', 'publish', 'mcp__plugin_discord_discord__reply'], ['', 'money', 'mcp__stripe__create_charge'], ['', 'delete', 'mcp__github__delete_repository'], ['', 'delete', 'mcp__db__drop_table'], ['', 'publish', 'mcp__vercel__deploy_to_vercel'],
+  ];
+  for (const [command, flag, tool] of marked) assert.ok(flags(command, tool).includes(flag as never), `${tool ?? ''} ${command}`);
+  for (const safe of ['npm test', 'ls -la', 'git status', 'git log --oneline', 'curl https://x.example/health', 'cat README.md', 'tsc --noEmit', 'cd x\nnpm test', 'echo process.env.HOME']) assert.deepEqual(flags(safe), [], safe);
+  assert.deepEqual(approvalFlags({ id: 'x', toolName: 'mcp__tower_todos__todos_list', input: {} }), []);
+  // A grant for the rest of the turn is the owner's, whatever it says.
+  assert.deepEqual(approvalFlags({ id: 'x', toolName: 'Codex permissions', input: { network: { enabled: true } }, scope: 'turn' }), ['scope']);
 });
 
 test('both guides tell masters how to take a waiting request', () => {
