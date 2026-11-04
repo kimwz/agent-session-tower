@@ -4,7 +4,7 @@ import { createECDH, randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deviceId, notificationMessage, NotificationService, pendingEvents, secretBlockMessage, withFollowing, type NotificationContext } from '../../../server/notifications/service.js';
+import { approvalNoticeMessage, deviceId, notificationMessage, NotificationService, pendingEvents, secretBlockMessage, withFollowing, type NotificationContext } from '../../../server/notifications/service.js';
 import type { SecretBlockNotice } from '../../../server/runs/runner-protocol.js';
 import type { Run, Session, Snapshot } from '../../../shared/types.js';
 
@@ -191,6 +191,41 @@ async function pushes(t: test.TestContext, context: NotificationContext) {
   const settle = async () => { service.check(); await new Promise(resolve => setTimeout(resolve, 30)); service.check(); await new Promise(resolve => setTimeout(resolve, 30)); };
   return { sent, settle };
 }
+
+test('a master\'s word that an approval still waits reaches devices that hear what waits on the owner, once, with a tag of its own; a first push about it is never replaced silently', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-notifications-notice-'));
+  const sent: Array<{ endpoint: string }> = [];
+  const fetcher: typeof fetch = async input => { sent.push({ endpoint: String(input) }); return new Response(null, { status: 201 }); };
+  const context: NotificationContext = { runs: () => [], session: id => id === 's1' ? { ...session, customTitle: '배포' } : undefined, project: () => 'App', trigger: () => undefined };
+  let service = new NotificationService(dir, context, fetcher);
+  await service.start();
+  t.after(async () => { await service.close(); await rm(dir, { recursive: true, force: true }); });
+  const phone = subscription(), quiet = subscription();
+  await service.subscribe({ subscription: phone, language: 'ko' });
+  await service.subscribe({ subscription: quiet, events: { runWaiting: false } });
+  const notice = { key: ':r1:a1', sessionId: 's1', title: 'work', detail: 'Reads the password' };
+  assert.deepEqual(approvalNoticeMessage(notice, context, 'ko'), { title: 'App · 승인을 기다립니다', body: '배포\nReads the password', url: '/?session=s1', tag: 'approval-notice::r1:a1' });
+  assert.equal(approvalNoticeMessage({ ...notice, question: true }, context, 'en').title, 'App · Waiting for your answer');
+  // A joined computer's session is named by what the master sent, and opens by the id this page gives it.
+  assert.deepEqual(approvalNoticeMessage({ ...notice, sessionId: `@${'a'.repeat(32)}/w` }, context, 'ko'), { title: '승인을 기다립니다', body: 'work\nReads the password', url: `/?session=${encodeURIComponent(`@${'a'.repeat(32)}/w`)}`, tag: 'approval-notice::r1:a1' });
+  assert.throws(() => service.approvalNotice({ key: 'x' }), { kind: 'invalid' });
+  service.approvalNotice(notice); service.approvalNotice(notice);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  service.approvalNotice(notice);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(sent, [{ endpoint: phone.endpoint }]);
+  await service.close();
+  service = new NotificationService(dir, context, fetcher);
+  await service.start();
+  service.approvalNotice(notice);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(sent.length, 1, 'nor after a restart');
+
+  const [wait] = pendingEvents([run('r1', { approvals: [{ id: 'a1', toolName: 'Bash', input: {} }] })], 0, new Set());
+  const [done] = pendingEvents([run('r2', { origin: { kind: 'owner' }, status: 'completed', finishedAt: at(1) })], 0, new Set());
+  assert.equal(notificationMessage(wait!, context, 'ko').tag, 'wait:r1:a1');
+  assert.equal(notificationMessage(done!, context, 'ko').tag, 'session:s1');
+});
 
 test('the host announces the work it sent to a computer that follows it, once, and opens it in its own page', async t => {
   const now = () => new Date().toISOString();

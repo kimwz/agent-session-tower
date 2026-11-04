@@ -22,6 +22,7 @@ const NOT_FOR_AGENTS = new Map<string, string>([
   ['/api/workspace/terminals/{}/socket', 'a terminal tab\'s WebSocket; agents use the input route and terminal_read'],
   ['/api/?:nodes/{}/workspace/terminals/{}/socket', 'the same WebSocket for a joined computer\'s terminal tab'],
   ['/api/master/presence', 'a page saying it shows the master'],
+  ['/api/master/approval-notice', 'the master host telling the owner an approval still waits; only its own caller secret passes'],
   ['/api/master/directives/{}', 'a page answering a screen command'],
   ['/api/master/voice/audio/{}', 'audio a page plays'],
   ...['on', 'off', 'presence', 'token', 'usage', 'request', 'activity', 'finished', 'played', 'progress', 'missed'].map(action => [`/api/master/voice/${action}`, 'the page\'s microphone and speaker'] as [string, string]),

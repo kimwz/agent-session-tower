@@ -80,7 +80,7 @@ test('an approval or question a conversation waits on is announced once, whoever
   assert.deepEqual(pendingEvents(runs, 0, new Set(['wait:owner:a1', 'wait:trigger:q1', 'trigger:t:e'])), []);
   const context: NotificationContext = { runs: () => runs, session: () => session, project: () => 'App', trigger: () => 'Nightly' };
   const byKey = new Map(events.map(event => [event.key, event]));
-  assert.deepEqual(notificationMessage(byKey.get('wait:owner:a1')!, context, 'ko'), { title: 'App · 승인 필요', body: 'Login bug\nRun npm publish', url: '/?session=s1', tag: 'session:s1' });
+  assert.deepEqual(notificationMessage(byKey.get('wait:owner:a1')!, context, 'ko'), { title: 'App · 승인 필요', body: 'Login bug\nRun npm publish', url: '/?session=s1', tag: 'wait:owner:a1' });
   assert.equal(notificationMessage(byKey.get('wait:trigger:q1')!, context, 'en').title, 'App · Question for you');
   assert.match(notificationMessage(byKey.get('wait:trigger:q1')!, context, 'en').body, /Which environment\?/);
 });
