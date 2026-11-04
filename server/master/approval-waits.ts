@@ -21,14 +21,16 @@ const FLAGS: ReadonlyArray<readonly [ApprovalFlag, RegExp]> = [
   ['secret', /(?:^|[^a-z0-9])\.env\b|secret|passw(?:or)?d|credential|api[_-]?key|private[_-]?key|access[_-]?key|token|\.pem\b|\.p12\b|\.ssh\b|id-rsa|id-ed25519|keychain|vault|printenv|\bauth\s+print/i],
   ['delete', /\b(?:rm|rmdir|unlink|shred|mkfs|truncate|drop|delete|destroy|purge|wipe|prune)\b|reset\s+--hard|clean\s+-[a-z]*f|--force\b|push\s+-f\b/i],
   ['production', /\bprod(?:uction)?\b|\blive\b/i],
-  ['publish', /\bgit\b[^|;&]*\spush\b|\bgh\s+(?:pr|issue|release|repo|api)\b|\bnpm\s+publish\b|\bdeploy|\bkubectl\s+(?:apply|delete|rollout)|\bterraform\s+apply|\bslack\b|\bdiscord\b|\bsendmail\b|\bcurl\b[^|;&]*(?:(?:-X\s*|--request\s+)(?:POST|PUT|PATCH|DELETE)|--data|--json|--form|\s-[dF]\b)/i],
+  ['publish', /\bgit\b[^|;&]*\spush\b|\bgh\s+(?:pr|issue|release|repo|api)\b|\bnpm\s+publish\b|\bdeploy|\bkubectl\s+(?:apply|delete|rollout)|\bterraform\s+apply|\bslack\b|\bdiscord\b|\bsendmail\b|\bcurl\b.*(?:(?:-X\s*|--request\s+)(?:POST|PUT|PATCH|DELETE)|--data|--json|--form|\s-[dF]\b)/i],
   ['money', /\bpayment|\bpayout|\brefund|\bcharge\b|\binvoice|\bbilling|\bstripe\b|\bwithdraw|\bwallet\b|\bcredit\b|\btransfer\b/i],
 ];
 
 export function approvalFlags(approval: RunApproval): ApprovalFlag[] {
   // In JSON a line break is the two characters \n, which would make the next line's first word `ngit` or `nrm`. An MCP
   // tool's name joins its words with _, a word character to \b: mcp__stripe__create_charge has no word "charge" in it.
-  const text = `${approval.toolName}\n${JSON.stringify(approval.input ?? {})}\n${approval.description ?? ''}`.replace(/\\[nrt]/g, ' ').replace(/_/g, '-');
+  // Escapes are read in pairs from the left: the written command `\rm` is `\\rm` in JSON, not a line feed before `m`.
+  const input = JSON.stringify(approval.input ?? {}).replace(/\\(.)/g, (_, char: string) => 'nrt'.includes(char) ? ' ' : char);
+  const text = `${approval.toolName}\n${input}\n${approval.description ?? ''}`.replace(/_/g, '-');
   // A grant for the rest of the turn lets through what would otherwise be asked about one by one.
   return [...FLAGS.filter(([, pattern]) => pattern.test(text)).map(([flag]) => flag), ...(approval.scope === 'turn' ? ['scope' as const] : [])];
 }

@@ -486,6 +486,8 @@ test('what the floor marks for the owner, and what it leaves to the master, as r
     ['stripe refunds create', 'money'],
     // A command of several lines, as agents usually write them: the line break must not hide the next line's first word.
     ['cd x\ngit push origin main', 'publish'], ['git add .\ngit commit -m x\ngit push', 'publish'], ['cd build\nrm -rf dist', 'delete'], ['npm run build\nnpm publish', 'publish'], ['if x; then\n\trm -rf y\nfi', 'delete'], ['cd x\ncurl -X POST https://x.example', 'publish'],
+    // A backslash the agent wrote is not a line break; a separator inside quotes does not end the command.
+    ['\\rm -rf dist', 'delete'], ['\\npm publish', 'publish'], ['curl "https://x.example/v1/a?b=1&c=2" -X POST', 'publish'], ['curl -H "Content-Type: application/json; charset=utf-8" -d a=1 https://x', 'publish'],
     // MCP tools are named with underscores.
     ['', 'publish', 'mcp__slack__post_message'], ['', 'publish', 'mcp__claude_ai_Slack__slack_send_message'], ['', 'publish', 'mcp__plugin_discord_discord__reply'], ['', 'money', 'mcp__stripe__create_charge'], ['', 'delete', 'mcp__github__delete_repository'], ['', 'delete', 'mcp__db__drop_table'], ['', 'publish', 'mcp__vercel__deploy_to_vercel'],
   ];
