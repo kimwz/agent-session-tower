@@ -37,3 +37,24 @@ test('authenticated master HTTP requests get the role automatically, while ordin
   assert.equal((await post('/api/sessions/codex:s/messages', { prompt: 'continue' })).status, 202);
   assert.equal(calls[4].input.model, undefined); assert.equal(calls[4].input.effort, undefined);
 });
+
+test('only the master host may say an approval still waits on the owner', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-approval-notice-http-'));
+  const notices: unknown[] = [];
+  const masterSecret = 'a'.repeat(64);
+  const notifications = { overview: () => ({ publicKey: 'k', devices: [] }), subscribe: async () => ({ publicKey: 'k', devices: [] }), update: async () => ({ publicKey: 'k', devices: [] }), remove: async () => ({ publicKey: 'k', devices: [] }), test: async () => ({ publicKey: 'k', devices: [] }),
+    approvalNotice: (body: Record<string, unknown>) => { notices.push(body); return { ok: true as const }; } };
+  const app = createMonitorServer({ port: 0, clientDir: directory, notifications, master: { callerSecret: masterSecret, handle: async () => false }, backend: {
+    snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'fixture', version: 'test', updatedAt: '' }), detail: async () => undefined, subscribe: () => () => {}, cancel: async () => {}, enqueue: async () => { throw new Error('unused'); } } });
+  await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { app.dispose(); app.server.closeAllConnections(); await new Promise<void>(resolve => app.server.close(() => resolve())); await rm(directory, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`;
+  const { token } = await fetch(`${base}/api/bootstrap`).then(r => r.json());
+  const post = (headers: Record<string, string>) => fetch(`${base}/api/master/approval-notice`, { method: 'POST', headers: { 'content-type': 'application/json', 'X-Agent-Monitor-Token': token, ...headers }, body: '{"key":"k"}' });
+  assert.equal((await post({})).status, 403);
+  assert.equal((await post({ 'X-Tower-Master': 'b'.repeat(64) })).status, 403);
+  assert.equal((await post({ 'x-tower-agent': 'local' })).status, 403);
+  assert.deepEqual(notices, []);
+  assert.equal((await post({ 'X-Tower-Master': masterSecret })).status, 200);
+  assert.deepEqual(notices, [{ key: 'k' }]);
+});

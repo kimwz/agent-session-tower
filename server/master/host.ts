@@ -276,7 +276,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       ...(options.followMs ? { followMs: options.followMs } : {}) });
     session = new MasterSession({ stateDir: paths.stateDir, dataDir: paths.data, settings, tower, live, room, onChange: broadcastOverview,
       otherMaster: { session: id => masters.masterSession(id), run: id => masters.masterRun(id) }, turns: masters.turnsOf(), ...(options.followMs ? { followMs: options.followMs } : {}) });
-    tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), screen, started: (target, body, answer) => session!.started(target, body, answer), delegated: () => session!.delegatedTable() });
+    tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), screen, started: (target, body, answer) => session!.started(target, body, answer), delegated: () => session!.delegatedTable(), approvalGate: input => session!.approvalGate(input) });
     const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), ...options.voice?.elevenLabs });
     voice = new MasterVoice({ dataDir: paths.data, settings, room, elevenLabs, firstReply: options.voice?.firstReply ?? new FirstReplyMaker({ stateDir: paths.stateDir }), ...(options.voice?.timing ? { timing: options.voice.timing } : {}),
       hooks: { hide: text => text, connectedSince: () => tower.connectedSince(), send: input => session!.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }),

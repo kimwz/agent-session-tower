@@ -89,7 +89,10 @@ export class MasterScreen {
   }
 }
 
-export type MasterToolsOptions = TowerToolsOptions & (MasterScreenOptions | { screen: MasterScreen });
+export type MasterToolsOptions = TowerToolsOptions & (MasterScreenOptions | { screen: MasterScreen }) & {
+  /** Whatever stands in the way of answering an approval (see MasterSession.approvalGate). Without one, nothing is answered. */
+  approvalGate?(input: { node?: string; runId: string; approvalId: string; body: unknown }): Promise<string | undefined>;
+};
 
 /**
  * What a master session's `tower_master` tools do, run here in the master host, which calls Tower like a page.
@@ -115,6 +118,13 @@ export class MasterTools extends TowerTools {
     if (name === 'tower_api' && args.method === 'POST') {
       try {
         const target = apiTarget(String(args.method), String(args.path), typeof args.node === 'string' ? args.node : undefined);
+        const answering = /^\/api\/runs\/([^/]+)\/approvals\/([^/]+)$/.exec(target.local);
+        if (answering) {
+          const refused = this.master.approvalGate
+            ? await this.master.approvalGate({ ...(target.node ? { node: target.node } : {}), runId: decodeURIComponent(answering[1]!), approvalId: decodeURIComponent(answering[2]!), body: args.body })
+            : '이 마스터를 아직 찾지 못해 승인에 답하지 않았습니다. 잠시 뒤 다시 시도하세요.';
+          if (refused) return { error: refused };
+        }
         if (['/api/sessions', '/api/auto-prompts', '/api/v1/autoPrompt.submit'].includes(target.local)) {
           const body = args.body && typeof args.body === 'object' && !Array.isArray(args.body) ? args.body as Record<string, unknown> : {};
           let input: Record<string, unknown> = { ...body, modelRole: 'master.worker' };

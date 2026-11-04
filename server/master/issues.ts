@@ -174,7 +174,7 @@ export class IssueMasters {
       folder: join(this.options.stateDir, TODO_MASTERS_FOLDER, taskId), writeGuide: folder => writeTodoMasterGuide(folder, taskId), ...(baselineAt ? { baselineAt } : {}),
       otherMaster: { session: id => this.masterSession(id), run: id => this.masterRun(id, taskId) }, turns: this.turnsOf(taskId, entry), tower, live, ...(followMs ? { followMs } : {}), ...(reportRetryMs ? { reportRetryMs } : {}),
       onChange: () => { if (entry.followed) this.notify(); } });
-    entry.tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), scope: `todo:${taskId}`, screen, started: (target, body, answer) => entry.session.started(target, body, answer), delegated: () => entry.session.delegatedTable() });
+    entry.tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), scope: `todo:${taskId}`, screen, started: (target, body, answer) => entry.session.started(target, body, answer), delegated: () => entry.session.delegatedTable(), approvalGate: input => entry.session.approvalGate(input) });
     try { await mkdir(issueDataDir(this.options.dataDir, taskId), { recursive: true, mode: 0o700 }); await entry.session.start(); }
     catch (error) {
       entry.followed = false;

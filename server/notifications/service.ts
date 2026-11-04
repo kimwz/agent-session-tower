@@ -193,7 +193,19 @@ export function notificationMessage(event: NotificationEvent, context: Notificat
     return { title: `${status} · ${name}`, body: [project, clip(run.prompt, 140)].filter(Boolean).join(' — '), url, tag: event.key };
   }
   const detail = clip(event.approval ? waitingDetail(event.approval) : run.status === 'error' ? run.error || '' : run.output, 160);
-  return { title: project ? `${project} · ${status}` : status, body: [conversation, detail].filter(Boolean).join('\n'), url, tag: `session:${session?.id ?? run.sessionId}` };
+  // A push with a tag already showing replaces it silently: what waits on the owner keeps a tag of its own, so it is heard.
+  return { title: project ? `${project} · ${status}` : status, body: [conversation, detail].filter(Boolean).join('\n'), url, tag: event.approval ? event.key : `session:${session?.id ?? run.sessionId}` };
+}
+/** A master did not settle an approval, or could not be told of it; the owner is told it still waits. */
+export interface ApprovalNotice { key: string; sessionId: string; title: string; detail: string; question?: boolean }
+export function approvalNoticeMessage(notice: ApprovalNotice, context: NotificationContext, language: NotificationLanguage): NotificationPayload {
+  const session = context.session(notice.sessionId);
+  const project = session ? context.project(session) : '';
+  const ko = language === 'ko';
+  const status = notice.question ? (ko ? '답변을 기다립니다' : 'Waiting for your answer') : (ko ? '승인을 기다립니다' : 'Waiting for your approval');
+  return { title: project ? `${project} · ${status}` : status,
+    body: [clip(session?.customTitle || session?.agentName || session?.title || notice.title, 80), clip(notice.detail, 160)].filter(Boolean).join('\n'),
+    url: `/?session=${encodeURIComponent(session?.id ?? notice.sessionId)}`, tag: `approval-notice:${notice.key}` };
 }
 /** A refused secret use: the conversation, why, and which secrets; it opens the conversation. */
 export function secretBlockMessage(block: SecretBlockNotice, context: NotificationContext, language: NotificationLanguage): NotificationPayload {
@@ -347,6 +359,23 @@ export class NotificationService {
   private async deliverBlock(block: SecretBlockNotice): Promise<void> {
     const devices = this.saved!.devices.filter(device => device.events.runWaiting);
     await Promise.all(devices.map(device => this.send(device, secretBlockMessage(block, this.context, device.language))));
+  }
+
+  /**
+   * A master's word that an approval still waits on the owner: each is announced once, however often it is said, so a
+   * master unsure whether it got through can say it again.
+   */
+  approvalNotice(body: Record<string, unknown>): { ok: true } {
+    this.ready();
+    const text = (value: unknown, max: number) => typeof value === 'string' && value && value.length <= max;
+    if (!text(body.key, 800) || !text(body.sessionId, 500) || !text(body.title, 500) || !text(body.detail, 4000) || (body.question !== undefined && body.question !== true)) throw new TowerError('invalid', '승인 알림 형식이 올바르지 않습니다.');
+    const notice = body as unknown as ApprovalNotice;
+    const key = `approval-notice:${notice.key}`;
+    if (this.closed || this.delivered.has(key) || this.judging.has(key)) return { ok: true };
+    this.track(key, this.now(), async () => {
+      await Promise.all(this.saved!.devices.filter(device => device.events.runWaiting).map(device => this.send(device, approvalNoticeMessage(notice, this.context, device.language))));
+    });
+    return { ok: true };
   }
 
   /** A secret request waits on the owner like an approval: devices that want those hear of it. */

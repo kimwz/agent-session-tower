@@ -153,6 +153,7 @@ export interface HttpOptions {
     update(body: Record<string, unknown>): Promise<NotificationOverview>;
     remove(body: Record<string, unknown>): Promise<NotificationOverview>;
     test(body: Record<string, unknown>): Promise<NotificationOverview>;
+    approvalNotice?(body: Record<string, unknown>): { ok: true };
   };
   /** Fast multiple-choice judgments (such as Jev) and the features that use them; set up from the owner's pages. */
   decisions?: {
@@ -436,6 +437,12 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         let released = false;
         const release = () => { if (!released) { released = true; activeUploads--; } };
         res.once('finish', release); res.once('close', release);
+      }
+      // Only the master host says an approval it follows still waits on the owner; its tools keep off /api/master routes.
+      if (path === '/api/master/approval-notice' && req.method === 'POST') {
+        if (!masterCall) return json(res, 403, { error: '마스터만 보낼 수 있습니다.' });
+        if (!notifications?.approvalNotice) return json(res, 503, { error: '알림을 사용할 수 없습니다.' });
+        return json(res, 200, notifications.approvalNotice(await readJson(req, 16 * 1024)));
       }
       if (master && path.startsWith('/api/master')) {
         // A signed-out page loses the master's live stream too, like every other stream here.

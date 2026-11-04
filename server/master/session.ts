@@ -7,6 +7,8 @@ import type { MasterEntryData, MasterFollowState } from '../../shared/master.js'
 import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { ApiTarget } from '../tower-tools/api-target.js';
 import { REPORT_MARK, VOICE_MARK, writeMasterGuide } from './guide.js';
+import { TOWER_NOTICE } from '../../shared/task-notification.js';
+import { approvalReportLine, approvalReportPrompt, APPROVAL_REPORT_DELAY_MS, masterMayAnswerAlone, newWait, ownerNoticeDue, ownerWordsSince, pendingApprovals, waitKey, type ApprovalWait } from './approval-waits.js';
 import type { LiveState } from '../tower-tools/live-state.js';
 import { replyError } from '../tower-tools/tower-client.js';
 import type { Table } from '../tower-tools/read-db.js';
@@ -29,6 +31,11 @@ const REPORT_TRIES = 8;
 /** A report whose sending was cut off is looked for this long in the master's runs and history before it goes again. */
 const RECONCILE_MS = 2 * 60_000;
 const RECONCILES = 60;
+/** How soon a notice to the owner that did not get through goes again. */
+const OWNER_NOTICE_RETRY_MS = 30_000;
+/** Settled approval waits kept, so a stale state cannot make one look new. */
+const SETTLED_WAITS = 200;
+const STOPS_SEEN = 100;
 /** How Tower adds attached files to a request in a session's history (`attachmentPrompt`), once spaces are folded. */
 const ATTACHED = ' 첨부 파일 (사용자가 이번 메시지에 첨부한 로컬 파일):';
 
@@ -66,6 +73,8 @@ export interface Followed {
   /** The message the report went in, named in its text, and when it was sent. */
   reportId?: string;
   reportAt?: string;
+  /** The master's turn it became; only approval waits read it. */
+  reportRunId?: string;
   /** A spoken request's key (from its client message ID), so the same request is sent once. */
   key?: string;
   /** Work sent to another master's session: reported when its turn ends, but what that master hands out is its own. */
@@ -89,7 +98,9 @@ export interface VoicedTurn { turn: string; state: 'started' | 'stopped' | 'done
 const VOICED = 200;
 
 /** `closedAt`: an issue master's session was closed then; its file waits there to be opened again or cleared away. */
-interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; followed: Followed[]; voiced?: VoicedTurn[]; stoppedAt?: string; closedAt?: string }
+interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; followed: Followed[]; approvalWaits?: ApprovalWait[]; voiced?: VoicedTurn[]; stoppedAt?: string; stopsSeen?: string[]; closedAt?: string }
+/** What sending a report needs of what it is about: finished work, or an approval it waits on. */
+type Reportable = Pick<Followed, 'report' | 'reportTries' | 'reportHeld' | 'reconciles' | 'reportId' | 'reportAt' | 'reportRunId'>;
 
 /** What the voice gets from the master session. */
 export interface VoiceSide {
@@ -135,6 +146,8 @@ export interface MasterSessionOptions {
   followMs?: number;
   /** Tests shorten the wait before a refused report goes again. */
   reportRetryMs?: number;
+  /** Tests move the clock approval waits are timed by. */
+  now?(): number;
   onChange?(): void;
 }
 
@@ -160,6 +173,7 @@ export class MasterSession {
   private followAgain = false;
   private unsubscribeLive?: () => void;
   private lookScheduled = false;
+  private readonly noticeTried = new Map<string, number>();
 
   constructor(private readonly options: MasterSessionOptions) {
     this.folder = options.folder ?? join(options.stateDir, MASTER_FOLDER);
@@ -172,6 +186,8 @@ export class MasterSession {
     if (saved) {
       this.file = { version: 1, baselineAt: saved.baselineAt, masterRuns: saved.masterRuns.filter(id => typeof id === 'string'), followed: saved.followed.filter(item => item && typeof item.id === 'string'),
         ...(typeof saved.stoppedAt === 'string' ? { stoppedAt: saved.stoppedAt } : {}),
+        stopsSeen: (Array.isArray(saved.stopsSeen) ? saved.stopsSeen : []).filter(id => typeof id === 'string'),
+        approvalWaits: (Array.isArray(saved.approvalWaits) ? saved.approvalWaits : []).filter(item => item && typeof item.key === 'string' && typeof item.firstSeenAt === 'string'),
         voiced: (Array.isArray(saved.voiced) ? saved.voiced : []).filter(item => item && typeof item.turn === 'string')
           // What was being read when the host stopped is not read on: its place in the words is gone.
           .map(item => item.state === 'started' ? { ...item, state: 'stopped' as const } : item) };
@@ -182,6 +198,7 @@ export class MasterSession {
       if (item.report === 'sending') item.report = 'uncertain';
       if (item.kind === 'spoken' && !item.runId && item.state === 'running') item.state = 'unknown';
     }
+    for (const wait of this.file.approvalWaits ?? []) if (wait.report === 'sending') wait.report = 'uncertain';
     for (const id of this.file.masterRuns) this.options.turns?.add(id);
     // Started again, an issue master's session is open again.
     delete this.file.closedAt;
@@ -315,7 +332,7 @@ export class MasterSession {
   failedReports(): number { return this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'failed').length; }
 
   /** A report is on its way: a host of another build waits until it is sent. */
-  busy(): boolean { return this.file.followed.some(item => item.report === 'sending'); }
+  busy(): boolean { return [...this.file.followed, ...this.file.approvalWaits ?? []].some(item => item.report === 'sending'); }
 
   /** The work handed out, as tower_query shows it. */
   delegatedTable(): Table {
@@ -441,8 +458,11 @@ export class MasterSession {
       // Saved as soon as it moves, so the chain is still found after a restart.
       if (item.currentRunId !== current) changed = true;
     }
+    if (this.watchApprovals(snapshot)) changed = true;
     if (await this.reconcile(snapshot, binding)) changed = true;
     if (!this.closed && await this.sendReports(binding)) changed = true;
+    if (!this.closed && await this.sendApprovalReports(binding)) changed = true;
+    if (!this.closed && await this.sendOwnerNotices(snapshot)) changed = true;
     if (changed) { this.trim(); await this.save(); this.options.onChange?.(); }
   }
 
@@ -451,14 +471,19 @@ export class MasterSession {
     let changed = false;
     for (const run of snapshot.runs ?? []) if (run.sessionId === binding.sessionId && !this.file.masterRuns.includes(run.id)) { this.remember(run.id); changed = true; }
     const masterTurns = (snapshot.runs ?? []).filter(run => run.sessionId === binding.sessionId);
-    // An explicit stop must not be undone by a background report. A newer owner request releases the hold.
+    // An explicit stop must not be undone by a background report, however the stopped turn ends: Codex may never confirm
+    // it and end in an error. Each stop counts once, from when it was first seen: the turn's end coming later must not
+    // bring back a stop the owner has since released, and its start must not make a message from before the stop release it.
+    const stops = this.file.stopsSeen ??= [];
     for (const run of masterTurns) {
-      if (run.status !== 'cancelled' || !run.ownerStopped) continue;
-      const at = run.finishedAt ?? run.createdAt;
-      if (!this.file.stoppedAt || Date.parse(at) > Date.parse(this.file.stoppedAt)) { this.file.stoppedAt = at; changed = true; }
+      if (!run.ownerStopped || stops.includes(run.id)) continue;
+      stops.push(run.id);
+      if (stops.length > STOPS_SEEN) stops.splice(0, stops.length - STOPS_SEEN);
+      changed = true;
+      const at = run.finishedAt ?? new Date(this.now()).toISOString();
+      if (!this.file.stoppedAt || Date.parse(at) > Date.parse(this.file.stoppedAt)) this.file.stoppedAt = at;
     }
-    if (this.file.stoppedAt && masterTurns.some(run => Date.parse(run.createdAt) > Date.parse(this.file.stoppedAt!)
-      && !run.delegation && !run.scheduled && !run.permissionNotice && !run.updateWrapUp && !run.prompt.startsWith(REPORT_MARK) && (!run.origin || run.origin.kind === 'owner'))) {
+    if (this.file.stoppedAt && masterTurns.some(run => Date.parse(run.createdAt) > Date.parse(this.file.stoppedAt!) && ownerMessage(run))) {
       delete this.file.stoppedAt; changed = true;
     }
     const after = (at: string) => Date.parse(at) >= Date.parse(this.file.baselineAt);
@@ -616,16 +641,26 @@ export class MasterSession {
    * sending was cut off can be found again. Nothing is sent twice.
    */
   private async sendReports(binding: MasterBinding): Promise<boolean> {
-    const retry = this.options.reportRetryMs ?? REPORT_RETRY_MS;
-    const since = (item: Followed) => Date.now() - Date.parse(item.reportAt ?? item.createdAt);
-    const due = (item: Followed) => item.reportHeld ? since(item) >= retry : !item.reportTries || since(item) >= retry * 2 ** (item.reportTries - 1);
     if (this.file.stoppedAt) return false;
-    const waiting = this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'pending' && due(item));
+    const waiting = this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'pending' && this.reportDue(item, item.createdAt, this.now()));
     if (!waiting.length) return false;
     const line = (item: Followed) => `- "${item.title}" — ${item.state}${item.sessionId ? ` (session ${item.sessionId}${item.node ? ` on node ${item.node}` : ''})` : ''}`
       + (item.answer ? `\n  Its answer:\n${indent(item.answer)}` : '\n  Its answer could not be read; the owner can open the session.')
       + `\n  Goal outcome: ${item.outcome ?? 'unknown (not yet verified)'}.`;
-    const batches: Followed[][] = [];
+    await this.sendBatches(binding, waiting, line, (reportId, lines) => `${REPORT_MARK} Work you handed out ended (report ${reportId}):\n${lines.join('\n')}\n\nExecution completed is not proof that the owner's goal is done. Inspect the answers and tracked follow-up work; continue authorized remaining steps, respect real approval waits and owner stops, and do not resubmit work already running.`);
+    return true;
+  }
+
+  /** Whether a report refused before has waited long enough to go again. */
+  private reportDue(item: Reportable, since: string, now: number): boolean {
+    const retry = this.options.reportRetryMs ?? REPORT_RETRY_MS;
+    const passed = now - Date.parse(item.reportAt ?? since);
+    return item.reportHeld ? passed >= retry : !item.reportTries || passed >= retry * 2 ** (item.reportTries - 1);
+  }
+
+  /** Reports as few messages as fit, in order; the rest wait for the next look when Tower refuses one. */
+  private async sendBatches<T extends Reportable>(binding: MasterBinding, waiting: readonly T[], line: (item: T) => string, message: (reportId: string, lines: string[]) => string): Promise<void> {
+    const batches: T[][] = [];
     let size = 0;
     for (const item of waiting) {
       const length = line(item).length + 1;
@@ -636,8 +671,8 @@ export class MasterSession {
     for (const batch of batches) {
       if (this.closed) break;
       const reportId = randomUUID().slice(0, 8);
-      const prompt = `${REPORT_MARK} Work you handed out ended (report ${reportId}):\n${batch.map(line).join('\n')}\n\nExecution completed is not proof that the owner's goal is done. Inspect the answers and tracked follow-up work; continue authorized remaining steps, respect real approval waits and owner stops, and do not resubmit work already running.`;
-      for (const item of batch) { item.report = 'sending'; item.reportId = reportId; item.reportAt = new Date().toISOString(); }
+      const prompt = message(reportId, batch.map(line));
+      for (const item of batch) { item.report = 'sending'; item.reportId = reportId; item.reportAt = new Date(this.options.now?.() ?? Date.now()).toISOString(); }
       await this.save();
       // A master let go of meanwhile (an issue master closed) gets no new turn; one already sent is not taken back.
       const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true, gate: async () => !this.closed })
@@ -645,6 +680,7 @@ export class MasterSession {
       const run = (response.body as { run?: Run } | undefined)?.run;
       for (const item of batch) {
         item.report = response.state === 'succeeded' ? 'sent' : response.state === 'uncertain' ? 'uncertain' : 'pending';
+        if (run?.id && response.state === 'succeeded') item.reportRunId = run.id;
         if (response.state === 'not-admitted') { item.reportHeld = true; continue; }
         delete item.reportHeld;
         if (item.report !== 'pending') continue;
@@ -655,8 +691,99 @@ export class MasterSession {
       // Tower refused it (the master busy, or the web away): the rest waits for the next look.
       if (response.state !== 'succeeded') break;
     }
+  }
+
+  /**
+   * Keeps the record of what the followed sessions' turns wait on: new approvals are first seen, and ones gone settled.
+   * A joined computer is judged only while its state is arriving: what it sent last says nothing about now.
+   */
+  private watchApprovals(snapshot: Snapshot): boolean {
+    const waits = this.file.approvalWaits ??= [];
+    const streaming = new Set((snapshot.nodes ?? []).filter(node => node.streaming).map(node => node.id));
+    const stateOf = (node?: string) => node ? streaming.has(node) ? this.options.live.node(node) : undefined : snapshot;
+    const now = this.now();
+    let changed = false;
+    const seen = new Set<string>();
+    for (const item of this.file.followed) {
+      if (item.kind !== 'delegated' || item.state !== 'running' || !item.sessionId) continue;
+      const where = stateOf(item.node);
+      if (!where) continue;
+      for (const { run, approval } of pendingApprovals(where.runs ?? [], item.sessionId)) {
+        const key = waitKey(item.node, run.id, approval.id);
+        seen.add(key);
+        const known = waits.find(wait => wait.key === key);
+        if (known) { if (known.settledAt) { delete known.settledAt; changed = true; } continue; }
+        waits.push(newWait({ ...(item.node ? { node: item.node } : {}), run, approval, title: item.title, at: new Date(now).toISOString() }));
+        changed = true;
+      }
+    }
+    for (const wait of waits) {
+      if (wait.settledAt || seen.has(wait.key)) continue;
+      const where = stateOf(wait.node);
+      if (!where) continue;
+      // Its followed work may have ended while another turn of that session still waits.
+      if (pendingApprovals(where.runs ?? [], wait.sessionId).some(pending => pending.run.id === wait.runId && pending.approval.id === wait.approvalId)) continue;
+      wait.settledAt = new Date(now).toISOString();
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** Approvals that outlasted the short wait go to the master, each once; one the master cannot be told of goes to the owner instead. */
+  private async sendApprovalReports(binding: MasterBinding): Promise<boolean> {
+    if (this.heartbeatStopped()) return false;
+    const now = this.now();
+    // Not of a joined computer out of reach: it may have been answered there, and the master could not answer it anyway.
+    const streaming = new Set((this.options.live.snapshot()?.nodes ?? []).filter(node => node.streaming).map(node => node.id));
+    const waiting = (this.file.approvalWaits ?? []).filter(wait => !wait.settledAt && (wait.report === undefined || wait.report === 'pending') && (!wait.node || streaming.has(wait.node))
+      && now - Date.parse(wait.firstSeenAt) >= APPROVAL_REPORT_DELAY_MS && this.reportDue(wait, wait.firstSeenAt, now));
+    if (!waiting.length) return false;
+    await this.sendBatches(binding, waiting, wait => approvalReportLine(wait, now), (reportId, lines) => approvalReportPrompt(REPORT_MARK, reportId, lines));
     return true;
   }
+
+  /** Tells the owner of approvals the master did not settle. The web keeps each notice to one, so one in doubt can go again. */
+  private async sendOwnerNotices(snapshot: Snapshot): Promise<boolean> {
+    const now = this.now();
+    let changed = false;
+    for (const wait of this.file.approvalWaits ?? []) {
+      if (this.closed) break;
+      const turnRun = wait.reportRunId ? (snapshot.runs ?? []).find(run => run.id === wait.reportRunId) : undefined;
+      const turn = turnRun && turnOf(turnRun, snapshot);
+      const ended = turn && FINISHED_RUN.has(turn.status) ? Date.parse(turn.finishedAt ?? '') : NaN;
+      if (!ownerNoticeDue(wait, { now, reportable: !this.heartbeatStopped(), ...(Number.isFinite(ended) ? { turnEndedAt: ended } : {}) })) continue;
+      if (now - (this.noticeTried.get(wait.key) ?? -Infinity) < OWNER_NOTICE_RETRY_MS) continue;
+      this.noticeTried.set(wait.key, now);
+      const response = await this.options.tower.call('POST', '/api/master/approval-notice', { key: wait.key, sessionId: wait.node ? `@${wait.node}/${wait.sessionId}` : wait.sessionId, title: wait.title, detail: wait.description || wait.toolName, ...(wait.question ? { question: true } : {}) }, { write: true })
+        .catch((error: unknown) => { console.error(`The owner could not be told of a waiting approval; it goes again: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
+      if (response?.state !== 'succeeded') continue;
+      wait.ownerNoticeAt = new Date(now).toISOString();
+      this.noticeTried.delete(wait.key);
+      changed = true;
+    }
+    return changed;
+  }
+
+  /**
+   * What stands in the way of this master answering an approval, if anything; the call does not go then. Plain yeses to
+   * ordinary requests are its own to give. Everything else (owner-only requests, a no, a question's answer, which the
+   * permission reviewer reads as the owner's words) needs the owner to have spoken to it since the request appeared.
+   */
+  async approvalGate(input: { node?: string; runId: string; approvalId: string; body: unknown }): Promise<string | undefined> {
+    const binding = this.binding();
+    const snapshot = await this.options.live.fresh();
+    const where = input.node ? this.options.live.node(input.node) : snapshot;
+    if (!binding || !snapshot || !where) return 'Tower의 현재 상태를 받지 못해 승인에 답하지 않았습니다. 잠시 뒤 상태를 확인해 주세요.';
+    const pending = pendingApprovals(where.runs ?? [], (where.runs ?? []).find(run => run.id === input.runId)?.sessionId ?? '').find(item => item.run.id === input.runId && item.approval.id === input.approvalId);
+    if (!pending) return '이 승인 요청은 이미 처리됐거나 더 기다리고 있지 않습니다. 보내지 않았습니다.';
+    if (masterMayAnswerAlone(pending.approval, input.body)) return undefined;
+    const wait = (this.file.approvalWaits ?? []).find(item => item.key === waitKey(input.node, input.runId, input.approvalId));
+    const since = ownerWordsSince(wait, this.now());
+    if ((snapshot.runs ?? []).some(run => run.sessionId === binding.sessionId && ownerMessage(run) && Date.parse(run.createdAt) > since)) return undefined;
+    return '이 승인은 소유자가 판단합니다(비밀값, 삭제, 프로덕션, 외부 게시, 금액, 거절, 질문 답). 보내지 않았습니다. 무엇을 왜 묻는지 소유자에게 쓰고 턴을 끝내세요. 소유자가 이 대화에서 답하면 다시 시도할 수 있고, 답이 없으면 Tower가 소유자에게 알립니다.';
+  }
+
+  private now(): number { return this.options.now?.() ?? Date.now(); }
 
   /** A report the master session took: its answer is read aloud when voice is on. */
   private reported(run: Run, binding: MasterBinding, prompt: string): void {
@@ -673,16 +800,17 @@ export class MasterSession {
    * in its history, by its report ID. Found, it counts as sent; surely missing after a while, it goes again.
    */
   private async reconcile(snapshot: Snapshot, binding: MasterBinding): Promise<boolean> {
-    const doubtful = this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'uncertain' && item.reportId);
+    const reportable = [...this.file.followed.filter(item => item.kind === 'delegated') as Reportable[], ...this.file.approvalWaits ?? []];
+    const doubtful = reportable.filter(item => item.report === 'uncertain' && item.reportId);
     if (!doubtful.length) return false;
     let changed = false;
-    const earliest = Math.min(...doubtful.map(item => Date.parse(item.reportAt ?? item.createdAt)));
+    const earliest = Math.min(...doubtful.map(item => Date.parse(item.reportAt!)));
     let history: ChatMessage[] | undefined | null = null;
     for (const reportId of new Set(doubtful.map(item => item.reportId!))) {
       const items = doubtful.filter(item => item.reportId === reportId);
       const named = (text: string) => text.startsWith(REPORT_MARK) && text.includes(`(report ${reportId})`);
       const run = (snapshot.runs ?? []).find(entry => entry.sessionId === binding.sessionId && named(entry.prompt));
-      if (run) { for (const item of items) item.report = 'sent'; this.reported(run, binding, run.prompt); changed = true; continue; }
+      if (run) { for (const item of items) { item.report = 'sent'; item.reportRunId = run.id; } this.reported(run, binding, run.prompt); changed = true; continue; }
       // Read back to before it was sent; history that could not be read that far proves nothing, and after many such
       // looks the report is shown as failed rather than kept in doubt for ever.
       if (history === null) history = await this.historySince(binding.sessionId, earliest - 60_000);
@@ -692,7 +820,7 @@ export class MasterSession {
         continue;
       }
       if (history.some(message => message.role === 'user' && named(normalize(message.text)))) { for (const item of items) item.report = 'sent'; changed = true; }
-      else if (Date.now() - Date.parse(items[0].reportAt ?? items[0].createdAt) > RECONCILE_MS) { for (const item of items) item.report = 'pending'; changed = true; }
+      else if (Date.now() - Date.parse(items[0].reportAt!) > RECONCILE_MS) { for (const item of items) item.report = 'pending'; changed = true; }
     }
     return changed;
   }
@@ -786,6 +914,11 @@ export class MasterSession {
 
   /** Keeps what is still followed or not yet reported, and the most recent of the rest. */
   private trim(): void {
+    const settled = (this.file.approvalWaits ?? []).filter(wait => wait.settledAt && !(wait.report === 'sending' || wait.report === 'uncertain'));
+    if (settled.length > SETTLED_WAITS) {
+      const gone = new Set(settled.slice(0, settled.length - SETTLED_WAITS).map(wait => wait.key));
+      this.file.approvalWaits = this.file.approvalWaits!.filter(wait => !gone.has(wait.key));
+    }
     // A spoken request whose sending is in doubt keeps its key, so it is never sent again.
     const open = (item: Followed) => item.state === 'running' || item.report === 'pending' || item.report === 'sending' || item.report === 'uncertain'
       || (item.kind === 'spoken' && !item.runId && item.state === 'unknown');
@@ -819,6 +952,15 @@ export class MasterSession {
     await this.following?.catch(() => {});
     await this.writes;
   }
+}
+
+/**
+ * Whether a run in a master's session is the owner speaking to it, spoken or written. Tower's reports and notices,
+ * its continuations and permission decision records (which it files as the owner's), and work other turns sent are not.
+ */
+function ownerMessage(run: Run): boolean {
+  return !run.delegation && !run.scheduled && !run.permissionNotice && !run.permissionRequestIds?.length && !run.updateWrapUp
+    && !run.prompt.startsWith(REPORT_MARK) && !run.prompt.startsWith(TOWER_NOTICE) && (!run.origin || run.origin.kind === 'owner');
 }
 
 /** The run whose words answer `run`: the turn it was steered into, when it was. */
