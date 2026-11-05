@@ -397,10 +397,8 @@ export class SlackService extends EventEmitter {
    * person's counts. Any failure but the missing scope rejects: the event stays unacknowledged and Slack delivers it again.
    */
   private async admitsAgentMention(teamId: string, user: string, thread: string, ts: string): Promise<boolean> {
-    const client = this.client(teamId);
-    if (!client.isPerson) return false;
     let person: boolean;
-    try { person = await client.isPerson(user); }
+    try { person = await this.client(teamId).isPerson!(user); }
     catch (error) {
       if (!(error instanceof SlackApiError && error.code === 'missing_scope')) throw error;
       this.noteAgentMention('다른 사람의 에이전트가 보낸 멘션을 확인하지 못했습니다. Slack 앱에 users:read 권한을 추가해 다시 설치하고 사용자 토큰을 다시 연결하세요.');
@@ -423,7 +421,7 @@ export class SlackService extends EventEmitter {
   }
   private async restartSocket(): Promise<void> {
     await this.effectsGate();
-    this.socket?.stop(); this.socket = undefined; this.socketError = undefined;
+    this.socket?.stop(); this.socket = undefined; this.socketError = undefined; this.agentMentionError = undefined;
     this.status = this.settings.userToken ? 'paused' : 'disconnected';
     if (!this.settings.enabled || !this.settings.appToken || !this.settings.account) return;
     const account = this.settings.account;
@@ -438,13 +436,17 @@ export class SlackService extends EventEmitter {
           || typeof event.user !== 'string' || typeof event.channel !== 'string' || typeof event.ts !== 'string' || typeof payload.event_id !== 'string') return;
         if (event.user === account.userId && typeof event.thread_ts === 'string' && this.automation.isOwnReply(event.channel, event.thread_ts, event.ts)) return;
         const mentioned = event.text.includes(`<@${account.userId}>`);
-        if (event.bot_id && !(mentioned && await this.admitsAgentMention(account.teamId, event.user, `${event.channel}:${String(event.thread_ts ?? event.ts)}`, event.ts))) return;
+        const threadTs = typeof event.thread_ts === 'string' ? event.thread_ts : event.ts;
+        if (event.bot_id) {
+          if (!mentioned) return;
+          if (!await this.admitsAgentMention(account.teamId, event.user, `${event.channel}:${threadTs}`, event.ts)) return;
+        }
         // A later message in a thread Tower already handled goes back to that conversation, mentioned or not.
         if (typeof event.thread_ts === 'string' && event.thread_ts !== event.ts
           && await this.automation.followUp({ channel: event.channel, threadTs: event.thread_ts, user: event.user, ts: event.ts, text: event.text, mentioned })) return;
         if (!mentioned) return;
         await this.automation.ingest({ id: payload.event_id, teamId: account.teamId, channel: event.channel, user: event.user, ts: event.ts,
-          threadTs: typeof event.thread_ts === 'string' ? event.thread_ts : event.ts, text: event.text });
+          threadTs, text: event.text });
       },
     });
     await this.effectsGate();

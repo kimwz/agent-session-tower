@@ -182,7 +182,7 @@ function SlackSetupGuide() {
     <ol>
       <li><a href="https://api.slack.com/apps" target="_blank" rel="noreferrer">{t('Slack 앱 만들기')}</a>{t('에서 워크스페이스용 내부 앱을 만드세요. 관리자 승인이 필요할 수 있습니다.')}</li>
       <li>{t('Socket Mode를 켜고 Basic Information → App-Level Tokens에서 connections:write 권한으로 앱 토큰(xapp-)을 생성하세요.')}</li>
-      <li>{t('OAuth & Permissions → User Token Scopes에 다음 권한을 추가하세요.')}<code>channels:history, groups:history, im:history, mpim:history, chat:write, reactions:write</code></li>
+      <li>{t('OAuth & Permissions → User Token Scopes에 다음 권한을 추가하세요.')}<code>channels:history, groups:history, im:history, mpim:history, chat:write, reactions:write, files:read, users:read</code></li>
       <li>{t('Event Subscriptions → Subscribe to events on behalf of users에 다음 이벤트를 추가하세요.')}<code>message.channels, message.groups, message.im, message.mpim</code>{t('개인 계정의 멘션을 감시하므로 app_mention이 아닌 사용자 이벤트를 선택하세요. 감시하지 않을 대화 유형은 권한과 이벤트를 함께 제외하세요.')}</li>
       <li>{t('앱을 워크스페이스에 설치하거나 재설치하고 User OAuth Token(xoxp-)을 복사하세요. 두 토큰은 같은 앱과 워크스페이스에서 발급해야 합니다. 이 버전은 토큰 자동 교체를 지원하지 않으므로 Token Rotation은 사용하지 마세요.')}</li>
       <li>{t('아래에 두 토큰을 입력해 계정을 연결하세요. 처리 지침을 저장한 뒤 멘션 감시를 켜세요. 계정 연결만으로 감시가 시작되지는 않습니다.')}</li>

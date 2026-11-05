@@ -17,7 +17,7 @@ test('Slack connection stays private, admits only personal mentions, and pauses 
   let socket: SlackSocketOptions | undefined;
   let starts = 0, stops = 0;
   const service: SlackService = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} }, {
-    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw new Error('Must not send'); } }),
+    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw new Error('Must not send'); }, isPerson: async () => false }),
     socket: options => { socket = options; return { start: () => { starts++; }, stop: () => { stops++; } }; },
     model: async () => { throw new Error('Must not start a provider'); },
   });
@@ -627,7 +627,7 @@ test('an agent\'s mention in a handled thread continues that conversation; witho
 });
 
 test('a lookup that may succeed later leaves the event unacknowledged; a missing scope says so and acknowledges', async t => {
-  let answer: () => Promise<boolean> = async () => { throw new SlackApiError('request_failed'); };
+  let answer: () => Promise<boolean>;
   const { service, send } = await agentMentionFixture(t, () => answer());
   // Slack's internal_error and service_unavailable reach Tower as request_failed.
   for (const code of ['request_failed', 'network_error', 'ratelimited']) {
@@ -639,9 +639,24 @@ test('a lookup that may succeed later leaves the event unacknowledged; a missing
   await send(agentMessage);
   assert.equal(service.overview().events.length, 0);
   assert.match(service.overview().error ?? '', /users:read/);
+  answer = async () => false;
+  await send(agentMessage);
+  assert.equal(service.overview().events.length, 0, 'a bot is still a bot');
+  assert.equal(service.overview().error, undefined, 'the lookup works again, whatever it answered');
+  answer = async () => { throw new SlackApiError('missing_scope'); };
+  await send(agentMessage);
+  assert.match(service.overview().error ?? '', /users:read/);
   answer = async () => true;
   await send(agentMessage);
   assert.equal(service.overview().events.length, 1);
+  assert.equal(service.overview().error, undefined);
+});
+
+test('connecting again, as the missing scope message asks, clears that message', async t => {
+  const { service, send } = await agentMentionFixture(t, async () => { throw new SlackApiError('missing_scope'); });
+  await send(agentMessage);
+  assert.match(service.overview().error ?? '', /users:read/);
+  await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   assert.equal(service.overview().error, undefined);
 });
 
