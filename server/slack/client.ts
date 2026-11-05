@@ -115,6 +115,13 @@ export class SlackClient {
     return { teamId: data.team_id, userId: data.user_id, teamName: data.team, userName: data.user };
   }
 
+  /** Slack's record of the user; `bot_id` on a message cannot tell, since an app posting with a person's token carries it too. Needs `users:read`. */
+  async isPerson(user: string): Promise<boolean> {
+    const data = await this.call('users.info', { user }, true);
+    if (typeof data.user?.is_bot !== 'boolean') throw new SlackApiError('invalid_response');
+    return !data.user.is_bot;
+  }
+
   async thread(channel: string, ts: string): Promise<SlackMessage[]> {
     const messages: SlackMessage[] = [];
     const seenCursors = new Set<string>();

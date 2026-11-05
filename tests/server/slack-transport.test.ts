@@ -67,6 +67,18 @@ test('Slack file info reports the scope it needs and where to download from', as
   assert.equal((await client.fileInfo('F2')).external, true);
   await assert.rejects(client.fileInfo('F3'), /missing_scope/);
 });
+test('Slack tells a person from a bot by the user record', async () => {
+  const client = new SlackClient('secret', { fetch: (async (_url, init) => {
+    const user = (init!.body as URLSearchParams).get('user');
+    return user === 'UMISSING' ? new Response(JSON.stringify({ ok: false, error: 'missing_scope' }))
+      : user === 'UODD' ? ok({ user: {} }) : ok({ user: { id: user, is_bot: user === 'UBOT' } });
+  }) as typeof fetch });
+  assert.equal(await client.isPerson('U1'), true);
+  assert.equal(await client.isPerson('UBOT'), false);
+  await assert.rejects(client.isPerson('UMISSING'), /missing_scope/);
+  await assert.rejects(client.isPerson('UODD'), /invalid_response/);
+});
+
 test('Slack reads retry rate limits; replies never retry and escape mentions', async () => {
   let calls = 0;
   const delays: number[] = [];

@@ -38,11 +38,13 @@ export function validSlackConnection(value: unknown): value is Settings {
   return !!saved && typeof saved === 'object' && !Array.isArray(saved) && !((saved.language !== undefined && saved.language !== 'ko' && saved.language !== 'en') || (saved.allowSelfMentions !== undefined && typeof saved.allowSelfMentions !== 'boolean') || (saved.workingReaction !== undefined && !(typeof saved.workingReaction === 'string' && EMOJI_NAME.test(saved.workingReaction))) || typeof saved.enabled !== 'boolean' || (saved.userToken && typeof saved.userToken !== 'string') || (saved.appToken && typeof saved.appToken !== 'string'));
 }
 interface Dependencies {
-  client?: (token: string) => Pick<SlackClient, 'auth' | 'thread' | 'reply'> & Partial<Pick<SlackClient, 'searchOwnMessages' | 'react' | 'fileInfo' | 'download'>>;
+  client?: (token: string) => Pick<SlackClient, 'auth' | 'thread' | 'reply'> & Partial<Pick<SlackClient, 'searchOwnMessages' | 'react' | 'fileInfo' | 'download' | 'isPerson'>>;
   socket?: (options: SlackSocketOptions) => Pick<SlackSocket, 'start' | 'stop'>;
   model?: typeof runAutoPromptModel;
 }
 const FOLLOW_UP_JUDGMENT_MS = 10_000;
+/** Two people's agents can each answer a mention with a mention; this is what ends that in one thread. */
+export const MAX_AGENT_MENTIONS_PER_THREAD = 10;
 const invalid = (message: string) => new TowerError('invalid', message);
 const slackOrigin = (workflowId: string): RunOrigin => ({ kind: 'slack', workflowId });
 
@@ -69,9 +71,11 @@ export class SlackService extends EventEmitter {
   private status = 'disconnected';
   private socketError?: string;
   private pollError?: string;
+  private agentMentionError?: string;
+  private readonly agentMentions = new Map<string, Set<string>>();
   private pollSequence = 0;
   private appliedPoll = 0;
-  private get error(): string | undefined { return [this.socketError, this.pollError].filter(Boolean).join('\n') || undefined; }
+  private get error(): string | undefined { return [this.socketError, this.pollError, this.agentMentionError].filter(Boolean).join('\n') || undefined; }
   private operations: Promise<unknown> = Promise.resolve();
   private changedAt = new Date().toISOString();
   readonly tone: SlackToneStore;
@@ -388,9 +392,36 @@ export class SlackService extends EventEmitter {
     }); }
     finally { await this.restartSocket(); this.startTicking(); }
   }
+  /**
+   * A message with `bot_id` is from a real bot, or from a person's agent posting with that person's token. Only a
+   * person's counts. Any failure but the missing scope rejects: the event stays unacknowledged and Slack delivers it again.
+   */
+  private async admitsAgentMention(teamId: string, user: string, thread: string, ts: string): Promise<boolean> {
+    let person: boolean;
+    try { person = await this.client(teamId).isPerson!(user); }
+    catch (error) {
+      if (!(error instanceof SlackApiError && error.code === 'missing_scope')) throw error;
+      this.noteAgentMention('다른 사람의 에이전트가 보낸 멘션을 확인하지 못했습니다. Slack 앱에 users:read 권한을 추가해 다시 설치하고 사용자 토큰을 다시 연결하세요.');
+      return false;
+    }
+    if (!person) { this.noteAgentMention(undefined); return false; }
+    const seen = this.agentMentions.get(thread) ?? new Set<string>();
+    if (!seen.has(ts) && seen.size >= MAX_AGENT_MENTIONS_PER_THREAD) {
+      this.noteAgentMention(`한 스레드에서 에이전트 멘션이 ${MAX_AGENT_MENTIONS_PER_THREAD}건을 넘어 더 받지 않습니다.`);
+      return false;
+    }
+    this.agentMentions.set(thread, seen.add(ts));
+    this.noteAgentMention(undefined);
+    return true;
+  }
+  private noteAgentMention(error: string | undefined) {
+    if (this.agentMentionError === error) return;
+    this.agentMentionError = error;
+    this.emit('change');
+  }
   private async restartSocket(): Promise<void> {
     await this.effectsGate();
-    this.socket?.stop(); this.socket = undefined; this.socketError = undefined;
+    this.socket?.stop(); this.socket = undefined; this.socketError = undefined; this.agentMentionError = undefined;
     this.status = this.settings.userToken ? 'paused' : 'disconnected';
     if (!this.settings.enabled || !this.settings.appToken || !this.settings.account) return;
     const account = this.settings.account;
@@ -399,18 +430,23 @@ export class SlackService extends EventEmitter {
       onEvent: async payload => {
         if (!payload.event || typeof payload.event !== 'object' || Array.isArray(payload.event)) return;
         const event = payload.event as Record<string, unknown>;
-        if (payload.team_id !== account.teamId || event?.type !== 'message' || event.bot_id || event.hidden || (event.user === account.userId && !this.settings.allowSelfMentions)
+        if (payload.team_id !== account.teamId || event?.type !== 'message' || event.hidden || (event.user === account.userId && (event.bot_id || !this.settings.allowSelfMentions))
           || (event.subtype && !['file_share', 'thread_broadcast'].includes(String(event.subtype)))
           || typeof event.text !== 'string'
           || typeof event.user !== 'string' || typeof event.channel !== 'string' || typeof event.ts !== 'string' || typeof payload.event_id !== 'string') return;
         if (event.user === account.userId && typeof event.thread_ts === 'string' && this.automation.isOwnReply(event.channel, event.thread_ts, event.ts)) return;
         const mentioned = event.text.includes(`<@${account.userId}>`);
+        const threadTs = typeof event.thread_ts === 'string' ? event.thread_ts : event.ts;
+        if (event.bot_id) {
+          if (!mentioned) return;
+          if (!await this.admitsAgentMention(account.teamId, event.user, `${event.channel}:${threadTs}`, event.ts)) return;
+        }
         // A later message in a thread Tower already handled goes back to that conversation, mentioned or not.
         if (typeof event.thread_ts === 'string' && event.thread_ts !== event.ts
           && await this.automation.followUp({ channel: event.channel, threadTs: event.thread_ts, user: event.user, ts: event.ts, text: event.text, mentioned })) return;
         if (!mentioned) return;
         await this.automation.ingest({ id: payload.event_id, teamId: account.teamId, channel: event.channel, user: event.user, ts: event.ts,
-          threadTs: typeof event.thread_ts === 'string' ? event.thread_ts : event.ts, text: event.text });
+          threadTs, text: event.text });
       },
     });
     await this.effectsGate();
