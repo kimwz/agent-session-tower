@@ -172,6 +172,8 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     let x = 0;
     const monitorWidth = monitorShown ? monitorLayout.width : 0;
     let monitorAt = 0;
+    // Every computer's folders, whichever card is being placed, so no card is drawn under a folder.
+    const placedFolders = manual ? frames.flatMap(frame => Object.hasOwn(manualLayout.projects, frame.id) ? [manualLayout.projects[frame.id]] : []) : [];
     // Each computer gets its own cluster: its host node above the folders it shares, left to right.
     machines.forEach((machine, machineIndex) => {
       const hostId = machine.node ? `host:${machine.node}` : 'host';
@@ -202,7 +204,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
       const automatic = { x: Math.max(start, (start + x - 36) / 2 - 128), y: 0 };
       const saved = machine.node ? manualLayout.hosts?.[machine.node] : manualLayout.host;
       const beside = frames.length ? hostAboveFolders(frames) : automatic;
-      const hostPosition = manual ? clearHostPosition(saved ?? beside, ns.filter(node => node.type === 'projectGroup').map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }))) : automatic;
+      const hostPosition = manual ? clearHostPosition(saved ?? beside, placedFolders) : automatic;
       // An empty node id says "this computer" explicitly, unlike a shortcut that leaves the computer open.
       ns.push({ id: hostId, type: 'host', position: hostPosition, data: { name: machine.name, active: sessions.filter(s => s.status === 'working' && s.node === machine.node).length, providers: machine.providers, disabled, onAutoPrompt: () => onAutoPrompt(undefined, machine.node ?? ''),
         ...(machine.node ? { link: { status: machine.status as HostLink['status'], live: machine.live, known: machine.known, canWork: machine.canWork, ...(machine.updating ? { updating: true } : {}), ...(machine.version ? { version: machine.version } : {}) } } : {}), ...(machine.versions ? { versions: machine.versions } : {}), ...(machine.system ? { system: machine.system } : {}) }, style: { width: HOST_WIDTH, height: HOST_HEIGHT, pointerEvents: 'all' }, zIndex: 20, draggable: manual, dragHandle: '.host-node', selectable: false, focusable: false });
@@ -226,7 +228,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
       es.push({ id: 'host-monitor', source: 'host', target: TRIGGER_MONITOR_ID, type: 'smoothstep', animated: motion && active > 0, style: { stroke: '#675077', strokeWidth: 1.2 } });
     }
     return { modelNodes: ns, edges: es, shown: grouped.reduce((total, [, members]) => total + members.length, 0) };
-  }, [monitorShown, monitorEntries, monitorLayout, slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, showMonitor, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, machines, language, motion, grouped, columns, changeColumns, manual, manualLayout, unreadIds, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt, repositoryByPath, onRepositoryAction, onIssue, todoBadges]);
+  }, [frames, monitorShown, monitorEntries, monitorLayout, slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, showMonitor, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, machines, language, motion, grouped, columns, changeColumns, manual, manualLayout, unreadIds, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt, repositoryByPath, onRepositoryAction, onIssue, todoBadges]);
 
   const [nodes, setNodes] = useState(modelNodes);
   const visibleProjectKey = modelNodes.filter(node => node.type === 'projectGroup' || node.type === 'triggerMonitor').map(node => node.id).join('|');

@@ -255,6 +255,16 @@ test('a new folder keeps off the card of a joined computer nobody placed by hand
   assertClear(next.projects, [added]);
 });
 
+test('the card of a computer with no folders shown steps clear when a new folder lands on it', () => {
+  const b = 'b'.repeat(32);
+  const folderOfB = graphProjectId(`@${b}//app`), added = graphProjectId(`@${b}//added`);
+  const layout: ManualGraphLayout = { host: { x: 5000, y: 5000 }, projects: { [folderOfB]: placedAt(0, 0) } };
+  const next = reconcileManualGraph(layout, [frame(folderOfB), frame(added)]);
+  const folders = Object.values(next.projects);
+  const card = { position: clearHostPosition({ x: 364, y: 0 }, folders), width: HOST_WIDTH, height: HOST_HEIGHT };
+  for (const folder of folders) assert.ok(clearance(card, folder) >= HOST_CLEARANCE, JSON.stringify(card.position));
+});
+
 test('with only a hidden group saved, a new folder still joins it instead of starting over', () => {
   const layout = layoutOf({ far: placedAt(4000, 3000) });
   const next = reconcileManualGraph(layout, [frame(fresh)]);
