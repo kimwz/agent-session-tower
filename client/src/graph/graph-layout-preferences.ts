@@ -1,5 +1,6 @@
 import type { Session } from '../../../shared/types';
-import { graphSessionGroups } from './graph-layout';
+import { clearHostPosition, graphProjectPath, graphSessionGroups, hostAboveFolders, HOST_CLEARANCE, HOST_HEIGHT, HOST_WIDTH } from './graph-layout';
+import { nodeOf } from '../remote/scope';
 
 // Storage keys keep the project's first name so saved user state survives the rename (shared/app-identity.ts LEGACY_APP_NAME).
 export const GRAPH_PREFERENCES_KEY = 'agent-monitor:graph-layout:v1';
@@ -32,6 +33,8 @@ const INSET = 20;
 const FIRST_ROW = 106;
 const BOTTOM = 28;
 export const PROJECT_GAP = 36;
+/** Folders with less empty space than this between them read as one group on the canvas. */
+const GROUP_REACH = 400;
 
 /** Cards fill a folder left to right, then continue on the next row. */
 export function projectGrid(count: number, columns: number, minimumWidth = 0): { width: number; height: number; cards: GraphPosition[] } {
@@ -57,8 +60,10 @@ export function setProjectColumns(preferences: GraphPreferences, projectId: stri
   return { ...preferences, columns: next };
 }
 
+const DEFAULT_HOST: GraphPosition = { x: 128, y: 0 };
+
 export function defaultGraphPreferences(): GraphPreferences {
-  return { version: 1, mode: 'auto', layout: { projects: {}, host: { x: 128, y: 0 } } };
+  return { version: 1, mode: 'auto', layout: { projects: {}, host: { ...DEFAULT_HOST } } };
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -139,12 +144,61 @@ function clearGrowth(projects: Record<string, ManualProject>, before: Map<string
   return projects;
 }
 
+/** Folders connected through neighbours within reach, in the order given. */
+function folderGroups(folders: ManualProject[]): ManualProject[][] {
+  const left = [...folders];
+  const groups: ManualProject[][] = [];
+  while (left.length) {
+    const group = left.splice(0, 1);
+    for (let index = 0; index < group.length; index++) {
+      for (let other = left.length - 1; other >= 0; other--) {
+        if (near(group[index], left[other], GROUP_REACH)) group.push(...left.splice(other, 1));
+      }
+    }
+    groups.push(group);
+  }
+  return groups;
+}
+
+/** The corner that centers a frame on the group holding the most sessions; area counts sessions, the first listed wins a tie. */
+function centerOnMainGroup(folders: ManualProject[], size: Pick<ManualProject, 'width' | 'height'>): GraphPosition {
+  const area = (group: ManualProject[]) => group.reduce((total, folder) => total + folder.width * folder.height, 0);
+  const main = folderGroups(folders).reduce((best, group) => area(group) > area(best) ? group : best);
+  const left = Math.min(...main.map(folder => folder.position.x)), top = Math.min(...main.map(folder => folder.position.y));
+  const right = Math.max(...main.map(folder => folder.position.x + folder.width)), bottom = Math.max(...main.map(folder => folder.position.y + folder.height));
+  return { x: (left + right - size.width) / 2, y: (top + bottom - size.height) / 2 };
+}
+
+type Obstacle = { box: ManualProject; gap: number };
+const clearOf = (size: Pick<ManualProject, 'width' | 'height'>, position: GraphPosition, obstacles: Obstacle[]) => !obstacles.some(({ box, gap }) => near({ ...size, position }, box, gap));
+
 /**
- * Keep hand-placed folder corners and give each newly shown folder a place
- * right of the visible ones, below any saved frame it would cover. `live` is
- * the authoritative set of folders; without it nothing is forgotten.
+ * The free spot nearest to `wanted` that lines up with an obstacle. Right of
+ * every obstacle is always free, so one is always found; equally near spots go
+ * right, then down, so the result depends on nothing else.
  */
-export function reconcileManualGraph(layout: ManualGraphLayout, frames: ProjectFrame[], live?: ReadonlySet<string>, retain: (id: string) => boolean = () => false): ManualGraphLayout {
+function nearestFreeCorner(size: Pick<ManualProject, 'width' | 'height'>, wanted: GraphPosition, obstacles: Obstacle[]): GraphPosition {
+  const xs = new Set(obstacles.flatMap(({ box, gap }) => [box.position.x, box.position.x + box.width + gap, box.position.x - size.width - gap]));
+  const ys = new Set(obstacles.flatMap(({ box, gap }) => [box.position.y, box.position.y + box.height + gap, box.position.y - size.height - gap]));
+  let best = wanted, bestDistance = Infinity;
+  for (const x of xs) for (const y of ys) {
+    const distance = (x - wanted.x) ** 2 + (y - wanted.y) ** 2;
+    if (distance > bestDistance || (distance === bestDistance && (x < best.x || (x === best.x && y < best.y)))) continue;
+    if (!clearOf(size, { x, y }, obstacles)) continue;
+    best = { x, y };
+    bestDistance = distance;
+  }
+  return best;
+}
+
+/**
+ * Keep hand-placed folder corners and give each newly shown folder the free
+ * place nearest to the main group of its computer's shown folders; the first
+ * folders on an empty canvas start the usual row. Nothing already placed moves
+ * for it. `avoid` lists other cards that stay where they are, and `live` is the
+ * authoritative set of folders; without it nothing is forgotten.
+ */
+export function reconcileManualGraph(layout: ManualGraphLayout, frames: ProjectFrame[], live?: ReadonlySet<string>, retain: (id: string) => boolean = () => false, avoid: ManualProject[] = []): ManualGraphLayout {
   let projects = layout.projects;
   const shown = new Set(frames.map(frame => frame.id));
   if (live && Object.keys(projects).some(id => !live.has(id) && !shown.has(id) && !retain(id))) {
@@ -158,19 +212,32 @@ export function reconcileManualGraph(layout: ManualGraphLayout, frames: ProjectF
     projects = { ...projects, [frame.id]: { ...saved, width: frame.width, height: frame.height } };
   }
   if (grown.size) projects = clearGrowth(projects, grown);
+  const emptyCanvas = !Object.keys(projects).length;
+  let rowEnd = 0;
   for (const frame of frames) {
     if (Object.hasOwn(projects, frame.id)) continue;
-    const visible = frames.flatMap(other => other.id !== frame.id && Object.hasOwn(projects, other.id) ? [projects[other.id]] : []);
-    const placed: ManualProject = { width: frame.width, height: frame.height, position: visible.length ? {
-      x: Math.max(...visible.map(other => other.position.x + other.width)) + PROJECT_GAP,
-      y: Math.min(...visible.map(other => other.position.y)),
-    } : { x: 0, y: 145 } };
-    for (;;) {
-      const blockers = Object.values(projects).filter(other => near(placed, other));
-      if (!blockers.length) break;
-      placed.position = { ...placed.position, y: Math.max(...blockers.map(other => other.position.y + other.height)) + PROJECT_GAP };
+    const size = { width: frame.width, height: frame.height };
+    const visible = frames.flatMap(other => other.id !== frame.id && Object.hasOwn(projects, other.id) ? [{ id: other.id, folder: projects[other.id] }] : []);
+    const byComputer = new Map<string | undefined, ManualProject[]>();
+    for (const { id, folder } of visible) {
+      const node = nodeOf(graphProjectPath(id));
+      byComputer.set(node, [...byComputer.get(node) ?? [], folder]);
     }
-    projects = { ...projects, [frame.id]: placed };
+    const shownFolders = visible.map(other => other.folder);
+    const peers = byComputer.get(nodeOf(graphProjectPath(frame.id))) ?? shownFolders;
+    const obstacles: Obstacle[] = [...Object.values(projects).map(box => ({ box, gap: PROJECT_GAP })), ...avoid.map(box => ({ box, gap: PROJECT_GAP }))];
+    // A joined computer nobody placed by hand has its card above its folders.
+    const unplaced = [...byComputer].flatMap(([node, folders]) => node && !layout.hosts?.[node] ? [hostAboveFolders(folders)] : []);
+    for (const host of [layout.host, ...Object.values(layout.hosts ?? {}), ...unplaced]) {
+      // A card nobody moved steps up over the first row by itself, as it always has.
+      if (emptyCanvas && host.x === DEFAULT_HOST.x && host.y === DEFAULT_HOST.y) continue;
+      obstacles.push({ box: { position: clearHostPosition(host, shownFolders), width: HOST_WIDTH, height: HOST_HEIGHT }, gap: HOST_CLEARANCE });
+    }
+    const nextInRow = { x: rowEnd, y: 145 };
+    const position = emptyCanvas && clearOf(size, nextInRow, obstacles) ? nextInRow
+      : nearestFreeCorner(size, emptyCanvas ? nextInRow : centerOnMainGroup(peers.length ? peers : Object.values(projects), size), obstacles);
+    rowEnd = position.x + frame.width + PROJECT_GAP;
+    projects = { ...projects, [frame.id]: { ...size, position } };
   }
   return projects === layout.projects ? layout : { ...layout, projects };
 }

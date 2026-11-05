@@ -10,6 +10,11 @@ export function graphProjectId(path: string): string {
   return `project:${encodeURIComponent(path)}`;
 }
 
+/** The folder key a canvas project id was made from. */
+export function graphProjectPath(id: string): string {
+  return decodeURIComponent(id.slice('project:'.length));
+}
+
 export function graphSessionGroups(sessions: Session[], limit: number, selectedId: string | null): [string, Session[]][] {
   const visible = [...sessions].sort(sortSessions).slice(0, limit);
   const selected = sessions.find(session => session.id === selectedId);
@@ -26,13 +31,22 @@ export function graphSessionGroups(sessions: Session[], limit: number, selectedI
   return [...groups.entries()].sort(([a, aSessions], [b, bSessions]) => sortSessions(aSessions[0], bSessions[0]) || a.localeCompare(b));
 }
 
+export const HOST_WIDTH = 256;
 export const HOST_HEIGHT = 169;
+/** The room a computer card keeps around folders. */
+export const HOST_CLEARANCE = 16;
+type PlacedBox = { position: { x: number; y: number }; width: number; height: number };
+/** Where the card of a computer nobody placed by hand sits: above its top-left folder. */
+export function hostAboveFolders(folders: PlacedBox[]) {
+  return { x: Math.min(...folders.map(folder => folder.position.x)), y: Math.min(...folders.map(folder => folder.position.y)) - HOST_HEIGHT - 40 };
+}
+
 /** Reserve room for account usage without rewriting saved folder or card positions. */
-export function clearHostPosition(host: { x: number; y: number }, projects: Array<{ position: { x: number; y: number }; width: number; height: number }>) {
+export function clearHostPosition(host: { x: number; y: number }, projects: PlacedBox[]) {
   let y = host.y;
-  const gap = 16;
+  const gap = HOST_CLEARANCE;
   for (let pass = 0; pass <= projects.length; pass++) {
-    const collisions = projects.filter(project => host.x < project.position.x + project.width + gap && host.x + 256 + gap > project.position.x
+    const collisions = projects.filter(project => host.x < project.position.x + project.width + gap && host.x + HOST_WIDTH + gap > project.position.x
       && y < project.position.y + project.height + gap && y + HOST_HEIGHT + gap > project.position.y);
     if (!collisions.length) break;
     y = Math.min(...collisions.map(project => project.position.y - HOST_HEIGHT - gap));
