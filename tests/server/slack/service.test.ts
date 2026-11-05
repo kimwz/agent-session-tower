@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SlackService } from '../../../server/slack/service.js';
+import { MAX_AGENT_MENTIONS_PER_THREAD, SlackService } from '../../../server/slack/service.js';
+import { SlackApiError } from '../../../server/slack/client.js';
 import type { SlackSocketOptions } from '../../../server/slack/socket.js';
 import type { DecisionEngine } from '../../../server/decisions/engine.js';
 import type { Run } from '../../../shared/types.js';
@@ -559,4 +560,103 @@ test('every reply Tower posts in Slack says "Sent by <name>\'s agent", whoever a
   await service.mutate('disconnect', {}); await service.mutate('connect', credentials);
   await sendReply(mention, '배포를 마쳤습니다.', ['U2']);
   assert.deepEqual(notes, ["Sent by karl's agent", 'Sent by an agent']);
+});
+
+/** What Slack delivers when a colleague's agent posts with that person's token: bot_id under the person's own user. */
+const agentMessage = { type: 'message', channel: 'C1', user: 'U2', ts: '1793866477.988899', thread_ts: '1793866332.245539', parent_user_id: 'UBOT', team: 'T1',
+  bot_id: 'B0CF75KT0EQ', app_id: 'A0CF5B3TD09', bot_profile: { id: 'B0CF75KT0EQ', deleted: false, name: 'kiwon-agent', app_id: 'A0CF5B3TD09', team_id: 'T1' },
+  text: '<@U1> PR 리뷰 부탁드립니다.', blocks: [{ type: 'rich_text' }, { type: 'context' }] };
+
+async function agentMentionFixture(t: import('node:test').TestContext, isPerson: (user: string) => Promise<boolean>, runs: Partial<ConstructorParameters<typeof SlackService>[0]['runs']> = {}) {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-agent-'));
+  const storage = await externalStorageFixture(t, stateDir);
+  let socket: SlackSocketOptions | undefined;
+  const service: SlackService = new SlackService({ repository: storage.workflows, effectGate: storage.effectGate, stateDir, runs: { list: () => [], ...runs }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not delegate'); } }, refresh: async () => {} }, {
+    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [{ user: 'U2', ts: '100.001', text: '<@U1> review please' }], reply: async () => { throw new Error('Must not send'); }, isPerson }),
+    socket: options => { socket = options; return { start() {}, stop() {} }; },
+    model: async () => { throw new Error('Must not start a provider'); },
+  });
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  await service.start(); await service.startRuntimeEffects();
+  await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await service.mutate('settings', { enabled: true, allowSelfMentions: true });
+  // Slack delivers an event again under the same event_id.
+  return { service, send: (event: Record<string, unknown>) => socket!.onEvent({ team_id: 'T1', event_id: `Ev${String(event.ts)}`, event }) };
+}
+
+test('a colleague\'s agent mentioning the owner reaches Tower as that person\'s request', async t => {
+  const asked: string[] = [];
+  const { service, send } = await agentMentionFixture(t, async user => { asked.push(user); return user === 'U2'; });
+  await send(agentMessage);
+  assert.deepEqual(asked, ['U2']);
+  assert.deepEqual(service.overview().events.map(item => item.mention.ts), ['1793866477.988899']);
+  assert.equal(service.overview().events[0].mention.threadTs, '1793866332.245539');
+  assert.equal(service.overview().events[0].mention.user, 'U2');
+});
+
+test('real bots, the owner\'s own apps and agent messages without a mention stay out', async t => {
+  const asked: string[] = [];
+  const { service, send } = await agentMentionFixture(t, async user => { asked.push(user); return user === 'U2'; });
+  // GitHub as Slack delivers it: its broadcasts have no bot_profile, so that field cannot tell a person from a bot.
+  await send({ ...agentMessage, user: 'UBOT', ts: '1.1', bot_profile: { id: 'B1', name: 'GitHub', user_id: 'UBOT' } });
+  await send({ ...agentMessage, user: 'UBOT', ts: '1.2', subtype: 'thread_broadcast', bot_profile: undefined });
+  assert.deepEqual(asked, ['UBOT', 'UBOT'], 'a bot is told apart by its user, not by what the message carries');
+  asked.length = 0;
+  await send({ ...agentMessage, user: 'U1', ts: '1.3', bot_profile: { id: 'B2', name: 'KARL_BOT' } });
+  await send({ ...agentMessage, ts: '1.4', text: 'no mention here' });
+  await send({ ...agentMessage, ts: '1.5', subtype: 'bot_message' });
+  await send({ ...agentMessage, ts: '1.6', user: undefined });
+  assert.deepEqual(asked, [], 'these never need a lookup');
+  assert.equal(service.overview().events.length, 0);
+});
+
+test('an agent\'s mention in a handled thread continues that conversation; without a mention it does not', async t => {
+  const runs: Run[] = [];
+  const { service, send } = await agentMentionFixture(t, async () => true, { list: () => runs,
+    create: (async (request: { prompt: string }) => { const run = { id: 'coordinator-run', sessionId: 'coordinator', prompt: request.prompt, status: 'completed', createdAt: '', output: '' } as Run; runs.push(run); return { session: { id: run.sessionId }, run }; }) as never,
+    enqueue: (async () => { throw new Error('Must not deliver here'); }) as never });
+  await service.mutate('rules', { rules: [{ id: 'review', name: 'Review', enabled: true, condition: 'review', instructions: 'Review it', replyInstructions: 'Say done', provider: 'claude' }] });
+  await send({ type: 'message', channel: 'C1', user: 'U2', ts: '100.001', text: '<@U1> review please' });
+  await service.automation.tick();
+  await until(() => service.overview().events[0].sessionId === 'coordinator');
+  const inThread = { ...agentMessage, thread_ts: '100.001' };
+  await send({ ...inThread, ts: '100.002', text: 'comment applied, no mention' });
+  await send({ ...inThread, ts: '100.003', text: '<@U1> 코멘트 반영했습니다' });
+  assert.equal(service.overview().events.length, 1);
+  assert.deepEqual(service.overview().events[0].followUps?.map(({ ts, mentioned }) => [ts, mentioned]), [['100.003', true]]);
+});
+
+test('a lookup that may succeed later leaves the event unacknowledged; a missing scope says so and acknowledges', async t => {
+  let answer: () => Promise<boolean> = async () => { throw new SlackApiError('request_failed'); };
+  const { service, send } = await agentMentionFixture(t, () => answer());
+  // Slack's internal_error and service_unavailable reach Tower as request_failed.
+  for (const code of ['request_failed', 'network_error', 'ratelimited']) {
+    answer = async () => { throw new SlackApiError(code); };
+    await assert.rejects(send(agentMessage), new RegExp(code), 'the socket then reconnects without an ack and Slack delivers it again');
+  }
+  assert.equal(service.overview().events.length, 0);
+  answer = async () => { throw new SlackApiError('missing_scope'); };
+  await send(agentMessage);
+  assert.equal(service.overview().events.length, 0);
+  assert.match(service.overview().error ?? '', /users:read/);
+  answer = async () => true;
+  await send(agentMessage);
+  assert.equal(service.overview().events.length, 1);
+  assert.equal(service.overview().error, undefined);
+});
+
+test('two agents cannot keep mentioning each other in one thread without limit', async t => {
+  const { service, send } = await agentMentionFixture(t, async () => true);
+  const message = (at: number, thread = '500.000') => ({ ...agentMessage, ts: `500.${at}`, thread_ts: thread });
+  for (let at = 0; at < MAX_AGENT_MENTIONS_PER_THREAD; at++) await send(message(at));
+  assert.equal(service.overview().events.length, MAX_AGENT_MENTIONS_PER_THREAD);
+  await send(message(0));
+  assert.equal(service.overview().error, undefined, 'Slack delivering an accepted message again uses up nothing');
+  await send(message(MAX_AGENT_MENTIONS_PER_THREAD));
+  assert.equal(service.overview().events.length, MAX_AGENT_MENTIONS_PER_THREAD);
+  assert.match(service.overview().error ?? '', new RegExp(String(MAX_AGENT_MENTIONS_PER_THREAD)));
+  await send(message(9000, '600.000'));
+  assert.equal(service.overview().events.length, MAX_AGENT_MENTIONS_PER_THREAD + 1, 'another thread has its own count');
+  await send({ type: 'message', channel: 'C1', user: 'U2', ts: '500.9001', thread_ts: '500.000', text: '<@U1> a person, typing' });
+  assert.equal(service.overview().events.length, MAX_AGENT_MENTIONS_PER_THREAD + 2, 'people are not limited');
 });
