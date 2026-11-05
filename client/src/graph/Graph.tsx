@@ -146,10 +146,10 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     return node !== undefined && (!hostsComplete || unknownNodes.has(node));
   }, [unknownNodes, hostsComplete]);
   const monitorShown = showMonitor && machines.some(machine => !machine.node);
-  const monitorEntries = useMemo(() => monitorShown ? monitorItems(slack?.connected ? slack.events : [], triggerEvents, slackLimit, selectedTriggerEventId ?? selectedSlackId) : [], [monitorShown, slack, triggerEvents, slackLimit, selectedTriggerEventId, selectedSlackId]);
+  const monitorEntries = useMemo(() => showMonitor ? monitorItems(slack?.connected ? slack.events : [], triggerEvents, slackLimit, selectedTriggerEventId ?? selectedSlackId) : [], [showMonitor, slack, triggerEvents, slackLimit, selectedTriggerEventId, selectedSlackId]);
   const monitorLayout = useMemo(() => slackMentionLayout(monitorEntries.length, monitorTotal - monitorEntries.length > 0 || triggerHasMore), [monitorEntries.length, monitorTotal, triggerHasMore]);
-  // Without a place of its own the monitor follows the folders' right edge, so only a dragged one can be in a new folder's way.
-  const avoid = useMemo<ManualProject[]>(() => monitorShown && slackPosition ? [{ position: slackPosition, width: monitorLayout.width, height: monitorLayout.height }] : [], [monitorShown, slackPosition, monitorLayout.width, monitorLayout.height]);
+  // Without a place of its own the monitor follows the folders' right edge, so only a dragged one can be in a new folder's way, also while a computer filter leaves it out.
+  const avoid = useMemo<ManualProject[]>(() => showMonitor && slackPosition ? [{ position: slackPosition, width: monitorLayout.width, height: monitorLayout.height }] : [], [showMonitor, slackPosition, monitorLayout.width, monitorLayout.height]);
   const reconcile = useCallback((layout: GraphPreferences['layout']) => reconcileManualGraph(layout, frames, liveProjects, retain, avoid), [frames, liveProjects, retain, avoid]);
   const manualLayout = useMemo(() => reconcile(preferences.layout), [preferences.layout, reconcile]);
 
@@ -172,7 +172,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     let x = 0;
     const monitorWidth = monitorShown ? monitorLayout.width : 0;
     let monitorAt = 0;
-    // Every computer's folders, whichever card is being placed, so no card is drawn under a folder.
+    // Every computer's folders, whichever card is being placed, so no card overlaps a folder.
     const placedFolders = manual ? frames.flatMap(frame => Object.hasOwn(manualLayout.projects, frame.id) ? [manualLayout.projects[frame.id]] : []) : [];
     // Each computer gets its own cluster: its host node above the folders it shares, left to right.
     machines.forEach((machine, machineIndex) => {
@@ -199,11 +199,11 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
       });
       // With several computers, one without shown folders still has its own place beside the others.
       if (!entries.length && machines.length > 1) x += 256 + 36;
-      const frames = ns.filter(node => node.type === 'projectGroup' && entries.some(([path]) => node.id === graphProjectId(path)))
+      const ownFolders = ns.filter(node => node.type === 'projectGroup' && entries.some(([path]) => node.id === graphProjectId(path)))
         .map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }));
       const automatic = { x: Math.max(start, (start + x - 36) / 2 - 128), y: 0 };
       const saved = machine.node ? manualLayout.hosts?.[machine.node] : manualLayout.host;
-      const beside = frames.length ? hostAboveFolders(frames) : automatic;
+      const beside = ownFolders.length ? hostAboveFolders(ownFolders) : automatic;
       const hostPosition = manual ? clearHostPosition(saved ?? beside, placedFolders) : automatic;
       // An empty node id says "this computer" explicitly, unlike a shortcut that leaves the computer open.
       ns.push({ id: hostId, type: 'host', position: hostPosition, data: { name: machine.name, active: sessions.filter(s => s.status === 'working' && s.node === machine.node).length, providers: machine.providers, disabled, onAutoPrompt: () => onAutoPrompt(undefined, machine.node ?? ''),
@@ -217,18 +217,17 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
       // Hand-placed folders can be anywhere; then the monitor starts right of all of them.
       const right = manual ? ns.filter(node => node.type === 'projectGroup').reduce((max, node) => Math.max(max, node.position.x + Number(node.style?.width || 0) + 36), 0) : monitorAt;
       const remaining = monitorTotal - monitorEntries.length;
-      const layout = monitorLayout;
       const active = slackEvents.filter(slackWorkflowWorking).length + triggerEvents.filter(triggerEventWorking).length;
-      ns.push({ id: TRIGGER_MONITOR_ID, type: 'triggerMonitor', position: slackPosition || { x: right, y: HOST_HEIGHT + 40 }, style: { width: layout.width, height: layout.height }, zIndex: 1, draggable: true, dragHandle: '.slack-monitor-drag-handle', selectable: false, focusable: false,
+      ns.push({ id: TRIGGER_MONITOR_ID, type: 'triggerMonitor', position: slackPosition || { x: right, y: HOST_HEIGHT + 40 }, style: { width: monitorLayout.width, height: monitorLayout.height }, zIndex: 1, draggable: true, dragHandle: '.slack-monitor-drag-handle', selectable: false, focusable: false,
         data: { ...(slack?.connected ? { slack: { name: slack.account?.teamName || 'Slack', enabled: slack.enabled, status: slack.status, error: slack.error } } : {}),
           enabledTriggers: triggerOverview?.triggers.filter(item => item.kind !== 'slack' && item.kind !== 'public' && item.enabled).length ?? 0, count: monitorTotal, active, remaining, more: triggerHasMore, onMore: showMoreSlack, onSelect: () => onSelectSlack?.(null) } });
       monitorEntries.forEach((item, index) => ns.push(item.kind === 'slack'
-        ? { id: `slack:mention:${item.id}`, type: 'slackMention', parentId: TRIGGER_MONITOR_ID, extent: 'parent', style: { pointerEvents: 'all' }, position: layout.positions[index], zIndex: 3, draggable: false, selectable: false, focusable: false, data: { event: item.event, unread: slackUnreadIds?.has(item.id) || false, selected: item.id === selectedSlackId, onSelect: onSelectSlack } }
-        : { id: `trigger:event:${item.id}`, type: 'triggerEvent', parentId: TRIGGER_MONITOR_ID, extent: 'parent', style: { pointerEvents: 'all' }, position: layout.positions[index], zIndex: 3, draggable: false, selectable: false, focusable: false, data: { event: item.event, unread: triggerUnreadIds?.has(item.id) || false, selected: item.id === selectedTriggerEventId, onSelect: onSelectTriggerEvent } }));
+        ? { id: `slack:mention:${item.id}`, type: 'slackMention', parentId: TRIGGER_MONITOR_ID, extent: 'parent', style: { pointerEvents: 'all' }, position: monitorLayout.positions[index], zIndex: 3, draggable: false, selectable: false, focusable: false, data: { event: item.event, unread: slackUnreadIds?.has(item.id) || false, selected: item.id === selectedSlackId, onSelect: onSelectSlack } }
+        : { id: `trigger:event:${item.id}`, type: 'triggerEvent', parentId: TRIGGER_MONITOR_ID, extent: 'parent', style: { pointerEvents: 'all' }, position: monitorLayout.positions[index], zIndex: 3, draggable: false, selectable: false, focusable: false, data: { event: item.event, unread: triggerUnreadIds?.has(item.id) || false, selected: item.id === selectedTriggerEventId, onSelect: onSelectTriggerEvent } }));
       es.push({ id: 'host-monitor', source: 'host', target: TRIGGER_MONITOR_ID, type: 'smoothstep', animated: motion && active > 0, style: { stroke: '#675077', strokeWidth: 1.2 } });
     }
     return { modelNodes: ns, edges: es, shown: grouped.reduce((total, [, members]) => total + members.length, 0) };
-  }, [frames, monitorShown, monitorEntries, monitorLayout, slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, showMonitor, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, machines, language, motion, grouped, columns, changeColumns, manual, manualLayout, unreadIds, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt, repositoryByPath, onRepositoryAction, onIssue, todoBadges]);
+  }, [frames, monitorShown, monitorEntries, monitorLayout, slackUnreadIds, slack, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, machines, language, motion, grouped, columns, changeColumns, manual, manualLayout, unreadIds, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt, repositoryByPath, onRepositoryAction, onIssue, todoBadges]);
 
   const [nodes, setNodes] = useState(modelNodes);
   const visibleProjectKey = modelNodes.filter(node => node.type === 'projectGroup' || node.type === 'triggerMonitor').map(node => node.id).join('|');

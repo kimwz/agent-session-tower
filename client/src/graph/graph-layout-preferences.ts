@@ -161,7 +161,7 @@ function folderGroups(folders: ManualProject[]): ManualProject[][] {
 }
 
 /** The corner that centers a frame on the group holding the most sessions; area counts sessions, the first listed wins a tie. */
-function besideMainGroup(folders: ManualProject[], size: Pick<ManualProject, 'width' | 'height'>): GraphPosition {
+function centerOnMainGroup(folders: ManualProject[], size: Pick<ManualProject, 'width' | 'height'>): GraphPosition {
   const area = (group: ManualProject[]) => group.reduce((total, folder) => total + folder.width * folder.height, 0);
   const main = folderGroups(folders).reduce((best, group) => area(group) > area(best) ? group : best);
   const left = Math.min(...main.map(folder => folder.position.x)), top = Math.min(...main.map(folder => folder.position.y));
@@ -235,7 +235,7 @@ export function reconcileManualGraph(layout: ManualGraphLayout, frames: ProjectF
     }
     const nextInRow = { x: rowEnd, y: 145 };
     const position = emptyCanvas && clearOf(size, nextInRow, obstacles) ? nextInRow
-      : nearestFreeCorner(size, emptyCanvas ? nextInRow : besideMainGroup(peers.length ? peers : Object.values(projects), size), obstacles);
+      : nearestFreeCorner(size, emptyCanvas ? nextInRow : centerOnMainGroup(peers.length ? peers : Object.values(projects), size), obstacles);
     rowEnd = position.x + frame.width + PROJECT_GAP;
     projects = { ...projects, [frame.id]: { ...size, position } };
   }

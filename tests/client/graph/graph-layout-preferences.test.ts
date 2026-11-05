@@ -285,7 +285,7 @@ test('placement decides once and the same layout gives the same place, so the dr
 test('whatever the arrangement, a new folder touches nothing, moves nothing and lands by a group', () => {
   // A fixed sequence, so a failure repeats exactly.
   let state = 224;
-  const next = (limit: number) => { state = (state * 1103515245 + 12345) % 2147483648; return state % limit; };
+  const next = (limit: number) => { state = (Math.imul(state, 1664525) + 1013904223) >>> 0; return (state >>> 8) % limit; };
   for (let round = 0; round < 60; round++) {
     const places = Object.fromEntries(Array.from({ length: 1 + next(25) }, (_, index) => {
       const spread = next(2) ? 3000 : 12000;
