@@ -244,6 +244,17 @@ test('a joined computer\'s new folder goes with that computer\'s folders, and th
   assert.ok(first.projects[added].position.x < 1000, JSON.stringify(first.projects[added]));
 });
 
+test('a new folder keeps off the card of a joined computer nobody placed by hand', () => {
+  const a = 'a'.repeat(32), b = 'b'.repeat(32);
+  const folderOfA = graphProjectId(`@${a}//app`), folderOfB = graphProjectId(`@${b}//big`), added = graphProjectId(`@${b}//added`);
+  const wide = { width: 550, height: 336 };
+  const layout: ManualGraphLayout = { host: { x: 5000, y: 5000 }, projects: { [folderOfA]: placedAt(0, 0), [folderOfB]: { position: { x: 0, y: -744 }, ...wide } } };
+  const next = reconcileManualGraph(layout, [frame(folderOfA), { id: folderOfB, ...wide }, frame(added)]);
+  const cardOfA = { position: { x: 0, y: -HOST_HEIGHT - 40 }, width: HOST_WIDTH, height: HOST_HEIGHT };
+  assert.ok(clearance(next.projects[added], cardOfA) >= HOST_CLEARANCE, JSON.stringify(next.projects[added]));
+  assertClear(next.projects, [added]);
+});
+
 test('with only a hidden group saved, a new folder still joins it instead of starting over', () => {
   const layout = layoutOf({ far: placedAt(4000, 3000) });
   const next = reconcileManualGraph(layout, [frame(fresh)]);

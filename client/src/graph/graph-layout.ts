@@ -35,8 +35,14 @@ export const HOST_WIDTH = 256;
 export const HOST_HEIGHT = 169;
 /** The room a computer card keeps around folders. */
 export const HOST_CLEARANCE = 16;
+type PlacedBox = { position: { x: number; y: number }; width: number; height: number };
+/** Where the card of a computer nobody placed by hand sits: above its top-left folder. */
+export function hostAboveFolders(folders: PlacedBox[]) {
+  return { x: Math.min(...folders.map(folder => folder.position.x)), y: Math.min(...folders.map(folder => folder.position.y)) - HOST_HEIGHT - 40 };
+}
+
 /** Reserve room for account usage without rewriting saved folder or card positions. */
-export function clearHostPosition(host: { x: number; y: number }, projects: Array<{ position: { x: number; y: number }; width: number; height: number }>) {
+export function clearHostPosition(host: { x: number; y: number }, projects: PlacedBox[]) {
   let y = host.y;
   const gap = HOST_CLEARANCE;
   for (let pass = 0; pass <= projects.length; pass++) {

@@ -1,5 +1,5 @@
 import type { Session } from '../../../shared/types';
-import { clearHostPosition, graphProjectPath, graphSessionGroups, HOST_CLEARANCE, HOST_HEIGHT, HOST_WIDTH } from './graph-layout';
+import { clearHostPosition, graphProjectPath, graphSessionGroups, hostAboveFolders, HOST_CLEARANCE, HOST_HEIGHT, HOST_WIDTH } from './graph-layout';
 import { nodeOf } from '../remote/scope';
 
 // Storage keys keep the project's first name so saved user state survives the rename (shared/app-identity.ts LEGACY_APP_NAME).
@@ -218,14 +218,20 @@ export function reconcileManualGraph(layout: ManualGraphLayout, frames: ProjectF
     if (Object.hasOwn(projects, frame.id)) continue;
     const size = { width: frame.width, height: frame.height };
     const visible = frames.flatMap(other => other.id !== frame.id && Object.hasOwn(projects, other.id) ? [{ id: other.id, folder: projects[other.id] }] : []);
-    const computer = nodeOf(graphProjectPath(frame.id));
-    const own = visible.filter(other => nodeOf(graphProjectPath(other.id)) === computer);
-    const peers = (own.length ? own : visible).map(other => other.folder);
+    const byComputer = new Map<string | undefined, ManualProject[]>();
+    for (const { id, folder } of visible) {
+      const node = nodeOf(graphProjectPath(id));
+      byComputer.set(node, [...byComputer.get(node) ?? [], folder]);
+    }
+    const shownFolders = visible.map(other => other.folder);
+    const peers = byComputer.get(nodeOf(graphProjectPath(frame.id))) ?? shownFolders;
     const obstacles: Obstacle[] = [...Object.values(projects).map(box => ({ box, gap: PROJECT_GAP })), ...avoid.map(box => ({ box, gap: PROJECT_GAP }))];
-    for (const host of [layout.host, ...Object.values(layout.hosts ?? {})]) {
+    // A joined computer nobody placed by hand has its card above its folders.
+    const unplaced = [...byComputer].flatMap(([node, folders]) => node && !layout.hosts?.[node] ? [hostAboveFolders(folders)] : []);
+    for (const host of [layout.host, ...Object.values(layout.hosts ?? {}), ...unplaced]) {
       // A card nobody moved steps up over the first row by itself, as it always has.
       if (emptyCanvas && host.x === DEFAULT_HOST.x && host.y === DEFAULT_HOST.y) continue;
-      obstacles.push({ box: { position: clearHostPosition(host, visible.map(other => other.folder)), width: HOST_WIDTH, height: HOST_HEIGHT }, gap: HOST_CLEARANCE });
+      obstacles.push({ box: { position: clearHostPosition(host, shownFolders), width: HOST_WIDTH, height: HOST_HEIGHT }, gap: HOST_CLEARANCE });
     }
     const nextInRow = { x: rowEnd, y: 145 };
     const position = emptyCanvas && clearOf(size, nextInRow, obstacles) ? nextInRow

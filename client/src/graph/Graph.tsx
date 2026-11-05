@@ -18,7 +18,7 @@ import { slackWorkflowWorking } from '../slack/slack-monitor';
 import { monitorItems, monitorVisible, readMonitorPosition, TRIGGER_MONITOR_ID, TRIGGER_POSITION_KEY, triggerEventWorking } from '../triggers/trigger-monitor';
 const canvasEdgeTypes = { project: ProjectEdge };
 const canvasNodeTypes = { ...nodeTypes, triggerMonitor: TriggerMonitorNode, slackMention: SlackMentionNode, triggerEvent: TriggerEventNode };
-import { graphProjectId, graphProjectKey, graphProjectPath, graphSessionGroups, clearHostPosition, HOST_HEIGHT, HOST_WIDTH } from './graph-layout';
+import { graphProjectId, graphProjectKey, graphProjectPath, graphSessionGroups, clearHostPosition, hostAboveFolders, HOST_HEIGHT, HOST_WIDTH } from './graph-layout';
 import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, projectColumns, projectGrid, PROJECT_GAP, reconcileManualGraph, setGraphLayoutMode, setProjectColumns, type GraphLayoutMode, type GraphPreferences, type ManualProject, type ProjectFrame } from './graph-layout-preferences';
 import { includePinnedProjectGroups, projectGroupLabel } from '../project-groups/project-groups';
 import { publishCanvasControls } from './canvas-controls-store';
@@ -201,7 +201,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
         .map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }));
       const automatic = { x: Math.max(start, (start + x - 36) / 2 - 128), y: 0 };
       const saved = machine.node ? manualLayout.hosts?.[machine.node] : manualLayout.host;
-      const beside = frames.length ? { x: Math.min(...frames.map(frame => frame.position.x)), y: Math.min(...frames.map(frame => frame.position.y)) - HOST_HEIGHT - 40 } : automatic;
+      const beside = frames.length ? hostAboveFolders(frames) : automatic;
       const hostPosition = manual ? clearHostPosition(saved ?? beside, ns.filter(node => node.type === 'projectGroup').map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }))) : automatic;
       // An empty node id says "this computer" explicitly, unlike a shortcut that leaves the computer open.
       ns.push({ id: hostId, type: 'host', position: hostPosition, data: { name: machine.name, active: sessions.filter(s => s.status === 'working' && s.node === machine.node).length, providers: machine.providers, disabled, onAutoPrompt: () => onAutoPrompt(undefined, machine.node ?? ''),
