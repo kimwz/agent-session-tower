@@ -27,6 +27,8 @@ export interface MasterClientOptions {
   credentials: () => WebCredentials | undefined;
   hostEntry?: string;
   startupTimeoutMs?: number;
+  /** How often the web says hello to the host, and brings back one that is gone (15 s). */
+  helloMs?: number;
   /** Only talk to a running host, never start or replace one (the master session's tool server, of the worker's build). */
   attachOnly?: boolean;
   /** Whether the web knows an open issue master, which needs the host even before the host has seen it. */
@@ -47,6 +49,8 @@ export class MasterClient {
   private heartbeat?: ReturnType<typeof setInterval>;
   private expiring?: ReturnType<typeof setInterval>;
   private closed = false;
+  private resuming = false;
+  private resumeFailed = false;
 
   constructor(private readonly options: MasterClientOptions) {}
 
@@ -56,12 +60,18 @@ export class MasterClient {
    * still reported without waiting for someone to open a page.
    */
   start(): void {
-    const tell = () => { void this.exchange('hello').catch(() => {}); };
+    // A host that is gone (it could not start while an older one still held its lock, or it stopped) or of another build
+    // is brought back on the next hello: the heartbeat and reports live in the host, so a bound master must not wait for
+    // someone to open a page.
+    const tell = () => {
+      void this.exchange('hello').then(reply => { if (reply.version !== APP_VERSION) this.resume(); else this.resumeFailed = false; }, (error: unknown) => {
+        // Only a host that is not there: another refusal (an incompatible or stuck host) is not answered by starting one.
+        if ((error as { hostAbsent?: boolean } | undefined)?.hostAbsent) this.resume();
+      });
+    };
     tell();
-    void this.pendingWork().then(pending => pending && !this.closed ? this.ensureHost() : undefined).catch(error => {
-      console.error(`Master could not resume waiting work: ${(error as NodeJS.ErrnoException)?.code ?? (error === null || error === undefined ? undefined : statusOf(error)) ?? 'error'}`);
-    });
-    this.heartbeat = setInterval(tell, 15_000);
+    this.resume();
+    this.heartbeat = setInterval(tell, this.options.helloMs ?? 15_000);
     this.heartbeat.unref();
     // Only the host, which owns the issue masters, removes their data: one due to go brings it, and it idles out after.
     this.expiring = setInterval(() => {
@@ -70,6 +80,18 @@ export class MasterClient {
       });
     }, EXPIRED_MS);
     this.expiring.unref();
+  }
+
+  /** Starts or replaces the host when the master has work; a failure is logged once until the host answers again. */
+  private resume(): void {
+    if (this.closed || this.resuming) return;
+    this.resuming = true;
+    void this.pendingWork().then(pending => pending && !this.closed ? this.ensureHost() : undefined).then(() => { this.resumeFailed = false; }, error => {
+      // A web letting go has nothing to report.
+      if (this.resumeFailed || this.closed) return;
+      this.resumeFailed = true;
+      console.error(`Master could not resume waiting work: ${(error as NodeJS.ErrnoException)?.code ?? (error === null || error === undefined ? undefined : statusOf(error)) ?? 'error'}`);
+    }).finally(() => { this.resuming = false; });
   }
 
   /**
@@ -185,6 +207,8 @@ export class MasterClient {
         catch (error) { if (statusOf(error) === 503) break; throw error; }
       }
     } catch (error) { if (statusOf(error) !== 503) throw error; }
+    // A web that let go of the host never starts one.
+    if (this.closed) throw failure('Master connection is closed.', 'unavailable');
     const entry = this.options.hostEntry ?? fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../index.ts' : '../index.js', import.meta.url));
     const stateDir = (await this.hostPaths()).stateDir;
     const args = isSea() ? ['--master-host', stateDir] : [...process.execArgv.filter(arg => !/^--inspect(?:-brk|-port|-publish-uid)?(?:=|$)/.test(arg)), entry, '--master-host', stateDir];

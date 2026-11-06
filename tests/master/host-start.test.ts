@@ -37,10 +37,11 @@ async function hostStart(t: test.TestContext) {
     req.on('end', () => {
       methods.push((JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as { method?: string }).method ?? '');
       if (answer.status !== 200) { res.writeHead(answer.status).end(); return; }
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ protocol: MASTER_PROTOCOL, stateDir: paths.stateDir, version: APP_VERSION, result: { answered: true } }));
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ protocol: MASTER_PROTOCOL, stateDir: paths.stateDir, version: hostVersion, result: { answered: true } }));
     });
   });
   let stateDir: string | undefined;
+  let hostVersion = APP_VERSION;
   t.after(async () => {
     for (const client of clients) client.dispose();
     for (const { child } of spawned) child.emit('error', new Error('the fixture is closing'));
@@ -72,8 +73,8 @@ async function hostStart(t: test.TestContext) {
   /** Registers a promise the test started, with a handler at once; the test still awaits it for its outcome. */
   const pend = <T>(work: Promise<T>): Promise<T> => { pending.add(work); work.catch(() => {}); return work; };
   /** A client, registered when made, whose start work is registered whenever it begins. */
-  const client = (startupTimeoutMs: number) => {
-    const made = new MasterClient({ stateDir: paths.stateDir, credentials: () => undefined, hostEntry: '/fixture/master-host.js', startupTimeoutMs });
+  const client = (startupTimeoutMs: number, helloMs?: number) => {
+    const made = new MasterClient({ stateDir: paths.stateDir, credentials: () => undefined, hostEntry: '/fixture/master-host.js', startupTimeoutMs, ...(helloMs ? { helloMs } : {}) });
     clients.push(made);
     const inner = made as unknown as { ensureHost(): Promise<void>; pendingWork(): Promise<boolean> };
     const ensureHost = inner.ensureHost.bind(made); const pendingWork = inner.pendingWork.bind(made);
@@ -83,7 +84,8 @@ async function hostStart(t: test.TestContext) {
   };
   const credential = async () => { await mkdir(join(paths.token, '..'), { recursive: true }); await writeFile(paths.token, 'c'.repeat(64), { mode: 0o600 }); };
   const appear = async () => { await credential(); await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(paths.socket, resolve); }); };
-  return { stateDir: paths.stateDir, paths, spawned, methods, client, pend, appear, credential, answer: (status: number) => { answer = { status }; } };
+  const vanish = async () => { await rm(paths.token, { force: true }); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); };
+  return { stateDir: paths.stateDir, paths, spawned, methods, client, pend, appear, vanish, credential, answer: (status: number) => { answer = { status }; }, version: (value: string) => { hostVersion = value; } };
 }
 
 test('the web starts the master host when none answers and waits while it answers 503, but not past its deadline or on another failure', async t => {
@@ -144,4 +146,63 @@ test('when resuming waiting work fails, the log line names the errno code, else 
   await until(() => h.spawned.length === before + 1);
   h.spawned.at(-1)!.child.emit('error', new Error('cannot start'));
   assert.deepEqual(await failing, ['Master could not resume waiting work: error']);
+});
+
+test('a bound master whose host could not start is started again on a later hello, logged once, and left alone once it answers', async t => {
+  const logged: string[] = [];
+  t.mock.method(console, 'error', (line: string) => { logged.push(line); });
+  const h = await hostStart(t);
+  await mkdir(h.paths.data, { recursive: true, mode: 0o700 });
+  await writePrivateJson(join(h.paths.data, 'settings.json'), JSON.stringify({ session: { sessionId: 'claude:master', provider: 'claude', startedAt: new Date().toISOString() } }));
+  // The first start loses to an older host still holding the lock: the spawned host exits and nothing answers.
+  const client = h.client(100, 50);
+  client.start();
+  await until(() => logged.length === 1);
+  await until(() => h.spawned.length >= 3);
+  assert.deepEqual(logged, ['Master could not resume waiting work: 503'], 'one line for the whole failing streak');
+  // The lock is free now: the host the next hello starts comes up and answers.
+  await h.appear();
+  await until(() => h.methods.includes('hello'));
+  const started = h.spawned.length;
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(h.spawned.length, started, 'a host that answers is not started again');
+  assert.equal(logged.length, 1);
+});
+
+test('an idle host of another build is replaced on a later hello', async t => {
+  const logged: string[] = [];
+  t.mock.method(console, 'error', (line: string) => { logged.push(line); });
+  const h = await hostStart(t);
+  await mkdir(h.paths.data, { recursive: true, mode: 0o700 });
+  await writePrivateJson(join(h.paths.data, 'settings.json'), JSON.stringify({ session: { sessionId: 'claude:master', provider: 'claude', startedAt: new Date().toISOString() } }));
+  await h.appear();
+  const client = h.client(100, 50);
+  client.start();
+  await until(() => h.methods.filter(method => method === 'hello').length >= 2);
+  assert.ok(!h.methods.includes('shutdown'), 'a host of this build is kept');
+  // The host now running is an older build's (it took over while this web started): the next hello replaces it.
+  h.version('0.0.1-older');
+  await until(() => h.methods.includes('shutdown'));
+  // The web lets go while it waits for the old host to leave: it starts nothing and logs nothing.
+  const spawned = h.spawned.length;
+  client.dispose();
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(h.spawned.length, spawned); assert.deepEqual(logged, []);
+});
+
+test('after the host answers again, a later failing start is logged again', async t => {
+  const logged: string[] = [];
+  t.mock.method(console, 'error', (line: string) => { logged.push(line); });
+  const h = await hostStart(t);
+  await mkdir(h.paths.data, { recursive: true, mode: 0o700 });
+  await writePrivateJson(join(h.paths.data, 'settings.json'), JSON.stringify({ session: { sessionId: 'claude:master', provider: 'claude', startedAt: new Date().toISOString() } }));
+  const client = h.client(100, 50);
+  client.start();
+  await until(() => logged.length === 1);
+  await h.appear();
+  await until(() => h.methods.includes('hello'));
+  // The host goes away again and cannot be started: the new failure is reported.
+  await h.vanish();
+  await until(() => logged.length === 2);
+  assert.deepEqual(logged, ['Master could not resume waiting work: 503', 'Master could not resume waiting work: 503']);
 });
