@@ -44,7 +44,7 @@ async function fixture(t: test.TestContext) {
     return uncertain ? { state: 'uncertain', body: {} } : { state: 'succeeded', body: { run: { ...targetRun, id: 'correction-run' } } };
   } } as unknown as TowerClient;
   const master = { heartbeatTasks: () => [{ id: 'task', runId: targetRun.id, sessionId: target.id, node: remote }], heartbeatStopped: () => stopped, started: async (...args: unknown[]) => { followed.push(args); } } as unknown as MasterSession;
-  const options = { stateDir: dir, dataDir: dir, tower, settings, master, context, onSettled: (checkId: string, taskId: string, outcome: string) => { if (outcome === 'not-sent') undelivered.push(`${checkId}/${taskId}`); }, status: () => ({ actions: [{ checkId: heartbeat.checkId, runId: 'master-run', taskIds: ['task'], delivery: 'sent' as const, at, cause: '', evidence: '', recommendation: '' }] }) };
+  const options = { stateDir: dir, dataDir: dir, tower, settings, master, context, onUndelivered: (checkId: string, taskId: string) => { undelivered.push(`${checkId}/${taskId}`); }, status: () => ({ actions: [{ checkId: heartbeat.checkId, runId: 'master-run', taskIds: ['task'], delivery: 'sent' as const, at, cause: '', evidence: '', recommendation: '' }] }) };
   const tools = new HeartbeatTools(options); await tools.start(); t.after(() => tools.close());
   return { dir, run, extraRuns, refuse: (count: number) => { refusals = count; }, undelivered, checkId: heartbeat.checkId, onRead: (hook: typeof readHook) => { readHook = hook; }, target, targetRun, newer: () => { newer = true; }, native: () => { nativeRequest = 'Owner has started another task'; }, nativeId: () => { nativeId = 'new-u'; }, uncertain: () => { uncertain = true; }, registry, capability, context, settings, tools, options, posts, followed, denied: () => { denied = true; }, stopped: () => { stopped = true; }, untrusted: () => { untrusted = true; }, remote: () => { remote = 'a'.repeat(32); heartbeat.targets![0].node = remote; } };
 }
@@ -191,4 +191,19 @@ test('a gate failure before a resend is recorded as not delivered with its reaso
   assert.equal(h.tools.outcome(h.checkId, 'task'), 'not-sent'); assert.equal(reads, 3);
   const second = await h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue' }, h.capability) as { attempt: { delivery: string } };
   assert.equal(second.attempt.delivery, 'sent');
+});
+
+test('the outcome of a check whose attempts the bounded audit may have dropped is unknown, never none', async t => {
+  const h = await fixture(t); await h.tools.close();
+  const at = (minutes: number) => new Date(Date.UTC(2026, 10, 6, 5, minutes)).toISOString();
+  const intents = Array.from({ length: 120 }, (_, i) => ({ checkId: `check-${i}`, taskId: 'other', sessionId: 'codex:worker', at: at(10 + (i % 40)), delivery: 'sent' }));
+  await writeFile(join(h.dir, 'heartbeat-corrections.json'), JSON.stringify({ version: 1, intents }));
+  const full = new HeartbeatTools(h.options); await full.start(); t.after(() => full.close());
+  assert.equal(full.outcome('evicted', 'task', at(0)), 'unknown');
+  assert.equal(full.outcome('evicted', 'task'), 'unknown');
+  assert.equal(full.outcome('recent', 'task', at(30)), 'none');
+  assert.equal(full.outcome('check-5', 'other', at(0)), 'sent');
+  await writeFile(join(h.dir, 'heartbeat-corrections.json'), JSON.stringify({ version: 1, intents: intents.slice(0, 10) }));
+  const partial = new HeartbeatTools(h.options); await partial.start(); t.after(() => partial.close());
+  assert.equal(partial.outcome('evicted', 'task', at(0)), 'none');
 });
