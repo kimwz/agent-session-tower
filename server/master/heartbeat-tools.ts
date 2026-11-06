@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { remoteRequestId } from '../remote/request-id.js';
 import { join } from 'node:path';
 import type { HeartbeatAdmission, HeartbeatTarget, MasterHeartbeatStatus } from '../../shared/master.js';
 import type { PermissionRequest } from '../../shared/permissions.js';
@@ -130,24 +130,25 @@ export class HeartbeatTools {
     const prior = this.intents.filter(item => item.checkId === context.heartbeat.checkId && item.taskId === target.taskId);
     if (prior.some(item => item.delivery !== 'not-sent') || prior.length >= CORRECTION_ATTEMPTS) return { attempt: prior.find(item => item.delivery !== 'not-sent') ?? prior.at(-1), note: 'This check already attempted this target. Do not repeat it.' };
     // An active check remains running; old completed check credentials cannot replay evicted intents.
-    const intent: Intent = { checkId: context.heartbeat.checkId, ...target, at: new Date().toISOString(), requestId: randomUUID(), delivery: 'sending' };
+    const intent: Intent = { checkId: context.heartbeat.checkId, ...target, at: new Date().toISOString(), requestId: remoteRequestId(), delivery: 'sending' };
     this.intents.push(intent); this.intents = this.intents.slice(-KEPT);
     await this.save();
     const base = target.node ? `/api/nodes/${encodeURIComponent(target.node)}` : '/api';
     const prompt = args.prompt as string;
     const path = `${base}/sessions/${encodeURIComponent(target.sessionId)}/messages`;
     // Whatever stops the gate happens before anything is sent: proven not delivered, with its reason kept.
-    let refused: string | undefined;
+    let refused: string | undefined, gates = 0;
     try {
       // Not single-attempt: the client resends only what the server proved it never admitted, asking the gate again first.
       const response = await this.options.tower.call('POST', path, { prompt }, { write: true, beforeSend: signal,
         headers: target.node ? { 'X-Tower-Heartbeat-Corrective': '1', 'X-Tower-Request-Id': intent.requestId! } : { [CALLER_CAPABILITY_HEADER]: capability },
         gate: async () => {
           try {
+            gates++;
             await this.context(capability, target.taskId); await this.readTarget(target, signal);
             await this.context(capability, target.taskId);
             signal.throwIfAborted();
-          } catch (error) { refused = error instanceof Error ? error.message : String(error); return false; }
+          } catch (error) { refused = `${gates > 1 ? 'Not admitted, then before the resend: ' : ''}${error instanceof Error ? error.message : String(error)}`; return false; }
           return !this.closed && epoch === this.epoch && this.options.settings.current().heartbeat.enabled && this.options.settings.current().session?.sessionId === context.sessionId && !this.options.master.heartbeatStopped();
         },
       });

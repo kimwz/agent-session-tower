@@ -15,7 +15,7 @@ import { readModelSettingsState, resolveModel, saveModelSettings } from '../mode
 import { modelArgs } from '../../shared/models.js';
 import { currentTask } from '../../shared/session-tasks.js';
 import type { TriggerScope, TriggerService } from '../triggers/service.js';
-import { remoteRequestTime } from '../remote/request-ledger.js';
+import { remoteRequestTime } from '../remote/request-id.js';
 import { remoteJob, remoteJobVisible, type RemoteScope } from '../remote/visibility.js';
 import { eventPaths, handlerPaths, RemoteView, type KeptTriggers } from './remote-view.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';

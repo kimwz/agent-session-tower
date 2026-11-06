@@ -358,14 +358,15 @@ const retryOf = (prompt: string) => { const retry = (JSON.parse(prompt.slice(pro
 test('unchanged work whose correction was proven not delivered is recommended again, sooner, at most three times', async t => {
   const h = await harness(t); h.result(action); h.advance(); await h.heartbeat.tick();
   assert.equal(h.posts.length, 1); assert.equal(retryOf(h.posts[0].prompt), undefined);
-  h.correction('not-sent'); h.heartbeat.retrySoon();
+  h.correction('not-sent'); h.heartbeat.retrySoon('task-1');
   assert.equal(Date.parse(h.heartbeat.status().nextDueAt!), h.now() + 5 * 60_000);
   h.wait(5 * 60_000); await h.heartbeat.tick();
   assert.equal(h.posts.length, 2); assert.deepEqual(retryOf(h.posts[1].prompt), { attempt: 1, of: 3 });
   const previous = JSON.parse(h.captured()!.prompt).previousActions.at(-1);
   assert.deepEqual(previous.correction, { 'task-1': 'not-sent' });
+  assert.deepEqual(previous.retryable, { 'task-1': true }); assert.equal(previous.masterMessage, 'sent');
   assert.match(h.captured()!.systemPrompt, /not a completed goal/);
-  h.heartbeat.retrySoon(); assert.equal(Date.parse(h.heartbeat.status().nextDueAt!), h.now() + 15 * 60_000);
+  h.heartbeat.retrySoon('task-1'); assert.equal(Date.parse(h.heartbeat.status().nextDueAt!), h.now() + 15 * 60_000);
   for (let i = 0; i < 4; i++) { h.advance(); await h.heartbeat.tick(); }
   assert.equal(h.posts.length, 4); assert.deepEqual(retryOf(h.posts[3].prompt), { attempt: 3, of: 3 });
   assert.equal(h.heartbeat.status().lastCheck?.reason, 'Equivalent evidence already produced an action.');
@@ -428,4 +429,21 @@ test('an unknown correction outcome is never retried, even after a failed master
   h.runs.push({ ...h.accepted[0], status: 'error' });
   h.correction('unknown'); h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 1);
   h.correction('none'); h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 2);
+});
+test('the backoff after an undelivered correction counts only that task\'s retries', async t => {
+  const h = await harness(t); h.result(action); h.correction('not-sent');
+  for (let i = 0; i < 4; i++) { h.advance(); await h.heartbeat.tick(); }
+  assert.equal(h.posts.length, 4);
+  h.heartbeat.retrySoon('task-2'); assert.equal(Date.parse(h.heartbeat.status().nextDueAt!), h.now() + 5 * 60_000);
+});
+test('a not-delivered correction whose master turn the owner stopped is a stop, not a retry; a spent budget keeps the normal time', async t => {
+  const h = await harness(t); h.result(action); h.advance(); await h.heartbeat.tick();
+  h.correction('not-sent'); h.runs.push({ ...h.accepted[0], status: 'cancelled', ownerStopped: true });
+  // The owner then talks to the master again, which lifts the stop for new work.
+  h.runs.push({ id: 'owner-message', sessionId: h.masterNative.id, origin: { kind: 'owner' }, status: 'completed', prompt: 'Something else', output: '', createdAt: new Date(h.now() + 1000).toISOString() });
+  h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 1);
+  assert.deepEqual(JSON.parse(h.captured()!.prompt).previousActions.at(-1).retryable, { 'task-1': false });
+  const spent = await harness(t); spent.result(action); spent.correction('not-sent');
+  for (let i = 0; i < 4; i++) { spent.advance(); await spent.heartbeat.tick(); }
+  const due = spent.heartbeat.status().nextDueAt; spent.heartbeat.retrySoon('task-1'); assert.equal(spent.heartbeat.status().nextDueAt, due);
 });

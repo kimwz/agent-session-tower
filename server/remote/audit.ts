@@ -3,7 +3,8 @@ import { dirname, join } from 'node:path';
 import type { RemoteChange } from '../../shared/link.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { linkDirectory } from '../link/identity.js';
-import { REMOTE_REQUEST_RETENTION_MS, remoteRequestTime } from './request-ledger.js';
+import { REMOTE_REQUEST_RETENTION_MS } from './request-ledger.js';
+import { remoteRequestTime } from './request-id.js';
 
 /** How many changes are kept; the oldest go first. */
 const MAX_CHANGES = 1000;

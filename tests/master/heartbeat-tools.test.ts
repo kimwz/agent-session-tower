@@ -14,6 +14,7 @@ import { CapabilityRegistry, handleMcpRequest } from '../../server/api/mcp.js';
 import { runToolResolver } from '../../server/api/run-tools.js';
 import { inheritedRunFields } from '../../server/runs/continuations.js';
 import { CALLER_CAPABILITY_HEADER } from '../../server/runs/session-mcp.js';
+import { remoteRequestTime } from '../../server/remote/request-id.js';
 async function fixture(t: test.TestContext) {
   const dir = await mkdtemp(join(tmpdir(), 'tower-heartbeat-tools-')); t.after(() => rm(dir, { recursive: true, force: true }));
   const settings = new MasterSettingsStore(dir); await settings.start(); await settings.bind({ sessionId: 'codex:master', provider: 'codex', startedAt: new Date().toISOString() });
@@ -83,6 +84,8 @@ test('correction delegates once through the existing message/follow path and dur
 test('remote correction carries only an authority-reducing marker and its own durable request ID', async t => {
   const h = await fixture(t); h.remote(); await h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue existing work' }, h.capability);
   const headers = h.posts[0].headers as Record<string,string>; assert.equal(headers['X-Tower-Heartbeat-Corrective'], '1'); assert.equal(headers[CALLER_CAPABILITY_HEADER], undefined); assert.notEqual(headers['X-Tower-Request-Id'], h.run.heartbeat!.checkId);
+  // A joined computer runs a request only under a time-ordered ID; a random UUID is refused there as not admitted.
+  assert.ok(remoteRequestTime(headers['X-Tower-Request-Id']));
 });
 
 test('new unrelated Tower or native owner instructions prevent a correction to the reused assignee session', async t => {
