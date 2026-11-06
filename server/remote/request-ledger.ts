@@ -3,12 +3,12 @@ import { RemoteRepository } from './storage-repository.js';
 import { requireDomainAuthority } from '../storage/domain-authority.js';
 import type { RemoteEntry } from './storage-codec.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
+import { remoteRequestTime } from './request-id.js';
 
 /** How long a remote request ID is remembered. A retry older than this is refused instead of run again. */
 export const REMOTE_REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const FUTURE_SKEW_MS = 24 * 60 * 60 * 1000;
 const MAX_ENTRIES = 20_000;
-const UUID_V7 = /^[a-f\d]{8}-[a-f\d]{4}-7[a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/i;
 
 /** What a remote request produced; replays read it again under the current sharing rules. */
 export type RemoteResult =
@@ -33,11 +33,6 @@ const failure = (message: string, kind: ErrorKind, disposition?: 'uncertain' | '
 /** Identifies a request's content, so a retry can be told apart from a different request reusing its ID. */
 export function requestFingerprint(content: unknown): string { return createHash('sha256').update(JSON.stringify(content)).digest('hex'); }
 
-/** Remote request IDs are UUIDv7: their first 48 bits are the controller's clock in milliseconds. */
-export function remoteRequestTime(id: string): number | undefined {
-  if (!UUID_V7.test(id)) return undefined;
-  return parseInt(id.replace(/-/g, '').slice(0, 12), 16);
-}
 
 /**
  * Makes a remote controller's retry of the same request run once. The entry is written before the work

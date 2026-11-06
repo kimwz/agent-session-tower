@@ -4,6 +4,7 @@ import { apiTarget, type ApiTarget } from './api-target.js';
 import type { LiveState } from './live-state.js';
 import { READ_SCHEMA, tablesFrom, type ReadDatabase, type Table } from './read-db.js';
 import type { TowerClient, TowerResponse } from './tower-client.js';
+import { remoteRequestId } from '../remote/request-id.js';
 
 const MAX_TOOL_OUTPUT = 12_000;
 /** A tool call ends by then, before its caller (the relay and the CLI, five minutes) gives up on it. */
@@ -78,7 +79,7 @@ export class TowerTools {
     // Out of time before anything went out: nothing was sent.
     if (signal.aborted) return { error: '시간이 오래 걸려 보내지 않았습니다. 다시 시도하세요.' };
     // A joined computer runs a new request at most once by its ID; an Auto Prompt needs its own.
-    const headers: Record<string, string> = target.node ? { 'X-Tower-Request-Id': uuidv7() } : { ...local };
+    const headers: Record<string, string> = target.node ? { 'X-Tower-Request-Id': remoteRequestId() } : { ...local };
     if (target.local === '/api/auto-prompts' && body && !body.requestId) body.requestId = randomUUID();
     // Past the deadline a change still waiting for the web does not go; one on its way is not cut off.
     const response = await this.options.tower.call('POST', target.path, body, { write: true, headers, beforeSend: signal })
@@ -182,18 +183,6 @@ function answer(response: TowerResponse): Record<string, unknown> {
 }
 
 export function truncate(text: string, length: number): string { return text.length > length ? `${text.slice(0, length)}…` : text; }
-
-/** A time-ordered UUID, which a joined computer requires to run a new request at most once. */
-function uuidv7(now = Date.now()): string {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  let time = now;
-  for (let index = 5; index >= 0; index--) { bytes[index] = time % 256; time = Math.floor(time / 256); }
-  bytes[6] = (bytes[6] & 0x0f) | 0x70;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
 
 /** A terminal's output as plain text: escape sequences removed, carriage returns as line ends. */
 function plainTerminal(output: string): string {

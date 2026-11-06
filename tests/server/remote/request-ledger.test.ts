@@ -9,7 +9,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RunError } from '../../../server/runs/manager.js';
 import { remoteRows } from '../../../server/remote/storage-codec.js';
-import { RemoteRequestLedger, REMOTE_REQUEST_RETENTION_MS, remoteRequestTime, requestFingerprint, type RemoteResult } from '../../../server/remote/request-ledger.js';
+import { RemoteRequestLedger, REMOTE_REQUEST_RETENTION_MS, requestFingerprint, type RemoteResult } from '../../../server/remote/request-ledger.js';
+import { remoteRequestTime } from '../../../server/remote/request-id.js';
 
 const CONTROLLER = 'controllera1b2c3d4e5f6';
 /** A UUIDv7 whose timestamp is `at`. */
