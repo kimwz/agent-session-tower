@@ -447,3 +447,12 @@ test('a not-delivered correction whose master turn the owner stopped is a stop, 
   for (let i = 0; i < 4; i++) { spent.advance(); await spent.heartbeat.tick(); }
   const due = spent.heartbeat.status().nextDueAt; spent.heartbeat.retrySoon('task-1'); assert.equal(spent.heartbeat.status().nextDueAt, due);
 });
+test('after a delivered or possibly delivered correction, changed evidence is never presented to the inspector as retryable', async t => {
+  for (const outcome of ['sent', 'uncertain'] as const) {
+    const h = await harness(t); h.result(noop); h.invoke(async () => h.posts.length ? noop : action);
+    h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 1);
+    h.correction(outcome); h.target.lastMessage = 'working on the correction';
+    h.advance(); await h.heartbeat.tick();
+    assert.deepEqual(JSON.parse(h.captured()!.prompt).previousActions.at(-1).retryable, { 'task-1': false }, outcome);
+  }
+});

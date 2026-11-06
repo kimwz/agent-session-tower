@@ -145,6 +145,10 @@ export class MasterHeartbeat {
    * Whether this evidence may produce an action now: evidence already acted on only while that action never reached
    * its assignee; any evidence at most 1 + RETRIES times.
    */
+  /** A repeat of an action this same evidence already produced may still go: new evidence is not a retry of anything. */
+  private retryable(id: string, fingerprint: string, runs: readonly Run[]): boolean {
+    return this.ledger.attempts?.[id]?.fingerprint === fingerprint && this.mayAct(id, fingerprint, runs);
+  }
   private mayAct(id: string, fingerprint: string, runs: readonly Run[]): boolean {
     const last = this.ledger.attempts?.[id]?.fingerprint === fingerprint ? this.ledger.attempts[id] : undefined;
     if (last && last.count > RETRIES) return false;
@@ -301,7 +305,7 @@ export class MasterHeartbeat {
         previousObservations: this.ledger.observations.filter(item => candidates.some(candidate => candidate.id === item.id)),
         previousActions: this.ledger.actions.filter(action => action.taskIds.some(id => candidates.some(candidate => candidate.id === id))).slice(-4)
           .map(action => ({ taskIds: action.taskIds, at: action.at, masterMessage: action.delivery, correction: Object.fromEntries(action.taskIds.map(id => [id, this.correction(action.checkId, id, action.at)])),
-            retryable: Object.fromEntries(candidates.filter(candidate => action.taskIds.includes(candidate.id)).map(candidate => [candidate.id, this.mayAct(candidate.id, candidate.fingerprint, snapshot.runs)])), cause: clip(action.cause, 350), evidence: clip(action.evidence, 350), recommendation: clip(action.recommendation, 350) })) });
+            retryable: Object.fromEntries(candidates.filter(candidate => action.taskIds.includes(candidate.id)).map(candidate => [candidate.id, this.retryable(candidate.id, candidate.fingerprint, snapshot.runs)])), cause: clip(action.cause, 350), evidence: clip(action.evidence, 350), recommendation: clip(action.recommendation, 350) })) });
       let payload = input();
       while (Buffer.byteLength(payload) > 45_000 && candidates.length > 1) { candidates.pop(); payload = input(); }
       check.taskIds = candidates.map(item => item.id);
