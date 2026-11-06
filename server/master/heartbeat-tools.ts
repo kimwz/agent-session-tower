@@ -130,19 +130,23 @@ export class HeartbeatTools {
     const base = target.node ? `/api/nodes/${encodeURIComponent(target.node)}` : '/api';
     const prompt = args.prompt as string;
     const path = `${base}/sessions/${encodeURIComponent(target.sessionId)}/messages`;
+    // Whatever stops the gate happens before anything is sent: proven not delivered, with its reason kept.
+    let refused: string | undefined;
     try {
       // Not single-attempt: the client resends only what the server proved it never admitted, asking the gate again first.
       const response = await this.options.tower.call('POST', path, { prompt }, { write: true, beforeSend: signal,
         headers: target.node ? { 'X-Tower-Heartbeat-Corrective': '1', 'X-Tower-Request-Id': intent.requestId! } : { [CALLER_CAPABILITY_HEADER]: capability },
         gate: async () => {
-          await this.context(capability, target.taskId); await this.readTarget(target, signal);
-          await this.context(capability, target.taskId);
-          signal.throwIfAborted();
+          try {
+            await this.context(capability, target.taskId); await this.readTarget(target, signal);
+            await this.context(capability, target.taskId);
+            signal.throwIfAborted();
+          } catch (error) { refused = error instanceof Error ? error.message : String(error); return false; }
           return !this.closed && epoch === this.epoch && this.options.settings.current().heartbeat.enabled && this.options.settings.current().session?.sessionId === context.sessionId && !this.options.master.heartbeatStopped();
         },
       });
       intent.delivery = response.state === 'succeeded' ? 'sent' : response.state === 'uncertain' ? 'uncertain' : 'not-sent';
-      if (intent.delivery !== 'sent') intent.failure = failureOf(response.status, response.body);
+      if (intent.delivery !== 'sent') intent.failure = refused !== undefined && intent.delivery === 'not-sent' ? refused.slice(0, 300) : failureOf(response.status, response.body);
       const run = (response.body as { run?: Run } | undefined)?.run;
       if (run?.id && response.state === 'succeeded') {
         intent.runId = run.id;

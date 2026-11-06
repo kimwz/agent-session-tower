@@ -404,3 +404,22 @@ test('a delivered or possibly delivered correction, owner stop and real waits ar
     h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 1, block);
   }
 });
+test('master messages that keep failing to be admitted are bounded by the same per-evidence budget', async t => {
+  const h = await harness(t); h.result(action); h.delivery('not-admitted');
+  for (let i = 0; i < 8; i++) { h.advance(); await h.heartbeat.tick(); }
+  assert.equal(h.posts.length, 4); assert.deepEqual(retryOf(h.posts[3].prompt), { attempt: 3, of: 3 });
+});
+test('the retry decision survives the audit history leaving the ledger', async t => {
+  const h = await harness(t); h.result(action); h.advance(); await h.heartbeat.tick(); await h.heartbeat.close();
+  const path = join(h.dir, 'heartbeat.json'); const ledger = JSON.parse(await readFile(path, 'utf8')); ledger.actions = []; await writeFile(path, JSON.stringify(ledger));
+  const restarted = new MasterHeartbeat(h.options); await restarted.start(); t.after(() => restarted.close());
+  h.advance(); await restarted.tick(); assert.equal(h.posts.length, 1);
+  h.correction('not-sent'); h.advance(); await restarted.tick(); assert.equal(h.posts.length, 2); assert.deepEqual(retryOf(h.posts[1].prompt), { attempt: 1, of: 3 });
+});
+test('a ledger written before retries were kept loads, and its acted evidence stays acted on once', async t => {
+  const h = await harness(t); h.result(action); h.advance(); await h.heartbeat.tick(); await h.heartbeat.close();
+  const path = join(h.dir, 'heartbeat.json'); const ledger = JSON.parse(await readFile(path, 'utf8')); delete ledger.attempts; await writeFile(path, JSON.stringify(ledger));
+  const restarted = new MasterHeartbeat(h.options); await restarted.start(); t.after(() => restarted.close());
+  assert.equal(restarted.status().problem, undefined);
+  h.correction('not-sent'); h.advance(); await restarted.tick(); assert.equal(h.posts.length, 1);
+});

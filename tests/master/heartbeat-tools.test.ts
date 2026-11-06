@@ -37,7 +37,8 @@ async function fixture(t: test.TestContext) {
     if (path.includes('?limit=')) return { state: 'succeeded', body: { session: target, messages: [{ id: nativeId, role: 'user', timestamp: at, text: nativeRequest ?? targetRun.prompt }, { id: 'a', role: 'assistant', timestamp: at, text: 'x'.repeat(2000) }] } };
     if (path.endsWith('/heartbeat-protection')) return { state: 'succeeded', body: { protected: denied } };
     if (path.endsWith('/permissions.overview')) return { state: 'succeeded', body: { result: { requests: denied ? [{ sessionId: target.id, status: 'denied', decidedBy: 'owner' }] : [] } } };
-    if (options.gate) await options.gate();
+    // As TowerClient does: a gate that does not pass keeps the change unsent.
+    if (options.gate && !await options.gate()) return { state: 'not-admitted', status: 503, body: { error: 'gate' } };
     if (refusals > 0) { refusals--; return { state: 'not-admitted', status: 503, body: { error: 'node offline', disposition: 'not-admitted' } }; }
     posts.push({ method, path, body, headers: options.headers });
     return uncertain ? { state: 'uncertain', body: {} } : { state: 'succeeded', body: { run: { ...targetRun, id: 'correction-run' } } };
@@ -105,15 +106,15 @@ test('disable, release, close and owner stop during the final evidence read inva
     const entered = new Promise<void>(resolve => { enter = resolve; }), held = new Promise<void>(resolve => { release = resolve; });
     let reads = 0;
     h.onRead(async path => { if (path.endsWith('/permissions.overview') && ++reads === 2) { enter(); await held; } });
-    const correcting = h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue' }, h.capability);
-    const failure = assert.rejects(correcting);
+    const correcting = h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue' }, h.capability) as Promise<{ attempt: { delivery: string } }>;
     await entered;
     let closing: Promise<void> | undefined;
     if (change === 'disable') await h.settings.update({ heartbeat: { enabled: false } });
     if (change === 'release') await h.settings.bind(undefined);
     if (change === 'close') closing = h.tools.close();
     if (change === 'stop') h.run.ownerStopped = true;
-    release(); await failure; await closing;
+    // Invalidated before anything was sent: proven not delivered, never claimed as possibly delivered.
+    release(); assert.equal((await correcting).attempt.delivery, 'not-sent', change); await closing;
     assert.equal(h.posts.length, 0, change);
   }
 });
@@ -171,4 +172,23 @@ test('an uncertain correction is reported as uncertain and blocks later attempts
   const h = await fixture(t); h.uncertain();
   await h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue' }, h.capability);
   assert.equal(h.tools.outcome(h.checkId, 'task'), 'uncertain'); assert.deepEqual(h.undelivered, []);
+});
+
+test('a gate failure before a resend is recorded as not delivered with its reason, so a later attempt stays possible', async t => {
+  const h = await fixture(t);
+  let reads = 0;
+  h.onRead(async path => { if (path.endsWith('/snapshot') && ++reads === 3) throw new Error('evidence read failed'); });
+  const call = h.options.tower.call.bind(h.options.tower);
+  // As TowerClient does after a `not-admitted` answer: ask the gate again before the one resend.
+  (h.options.tower as unknown as { call: typeof call }).call = async (method, path, body, options) => {
+    if (method !== 'POST' || !options?.gate) return call(method, path, body, options);
+    if (!await options.gate()) return { status: 503, body: { error: 'gate' }, state: 'not-admitted' };
+    if (!await options.gate()) return { status: 503, body: { error: 'gate' }, state: 'not-admitted' };
+    return { status: 202, body: { run: { ...h.targetRun, id: 'correction-run' } }, state: 'succeeded' };
+  };
+  const first = await h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue' }, h.capability) as { attempt: { delivery: string; failure?: string } };
+  assert.equal(first.attempt.delivery, 'not-sent'); assert.match(first.attempt.failure ?? '', /evidence read failed/);
+  assert.equal(h.tools.outcome(h.checkId, 'task'), 'not-sent'); assert.equal(reads, 3);
+  const second = await h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue' }, h.capability) as { attempt: { delivery: string } };
+  assert.equal(second.attempt.delivery, 'sent');
 });
