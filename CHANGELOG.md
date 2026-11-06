@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.179.4] - 2026-11-06
+
+- **웹이 재시작된 뒤 마스터 호스트가 스스로 다시 뜹니다.** 배포나 재시작 때 새 웹이 이전 마스터 호스트를 내려보낸 직후 새 호스트를 띄우는데, 이전 호스트가 정리를 마치기 전이면 새 호스트가 상태 잠금을 얻지 못하고 바로 끝났습니다. 웹은 `Master could not resume waiting work: 503`만 남기고 다시 시도하지 않아서, 소유자가 마스터를 열 때까지 하트비트 점검과 결과 보고가 멈춰 있었습니다. 이제 마스터가 연결돼 있으면 웹이 15초마다 보내는 신호에서 호스트가 없으면 다시 띄우고, 쉬고 있는 이전 빌드의 호스트는 새 빌드로 바꿉니다. 실패 기록은 실패가 이어지는 동안 한 줄만 남깁니다.
+
 ## [1.179.3] - 2026-11-06
 
 - **전달되지 못한 하트비트 교정이 자동으로 다시 시도됩니다.** 위임한 작업이 필수 단계를 남긴 채 끝나면 하트비트가 이를 찾아 마스터에게 알리고, 마스터가 `heartbeat_correct`로 기존 담당 세션에 이어 가라고 보냅니다. 그런데 이 전달이 거절이나 일시 장애로 `not-sent`가 되면, 같은 점검에서는 다시 보낼 수 없었습니다. 증거가 그대로이니 다음 점검들도 "이미 조치함"으로 넘어가서, 소유자가 물어볼 때까지 작업이 멈춰 있었습니다. 이제 확실히 전달되지 않은 교정은 다음과 같이 다시 시도합니다.
