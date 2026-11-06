@@ -284,9 +284,9 @@ export async function startMasterHost(options: MasterHostOptions) {
     session.setVoice(voice);
     await voice.start();
     await session.start();
-    heartbeat = new MasterHeartbeat({ stateDir: paths.stateDir, dataDir: paths.data, settings, master: session, tower, onChange: broadcastOverview });
+    heartbeat = new MasterHeartbeat({ stateDir: paths.stateDir, dataDir: paths.data, settings, master: session, tower, onChange: broadcastOverview, corrections: (checkId, taskId) => heartbeatTools?.outcome(checkId, taskId) ?? 'none' });
     await heartbeat.start();
-    heartbeatTools = new HeartbeatTools({ stateDir: paths.stateDir, dataDir: paths.data, tower, settings, master: session, status: () => heartbeat!.status() });
+    heartbeatTools = new HeartbeatTools({ stateDir: paths.stateDir, dataDir: paths.data, tower, settings, master: session, status: () => heartbeat!.status(), onUndelivered: () => heartbeat?.retrySoon() });
     await heartbeatTools.start();
     issues.start();
     await unlink(paths.socket).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });

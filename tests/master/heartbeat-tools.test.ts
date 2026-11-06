@@ -23,7 +23,8 @@ async function fixture(t: test.TestContext) {
   const target: Session = { id: 'codex:worker', nativeId: 'worker', provider: 'codex', cwd: dir, project: 'fixture', title: 'worker', status: 'working', statusReason: '', createdAt: at, updatedAt: at, messageCount: 2, lastMessage: 'progress', isSubagent: false, resumable: true };
   const targetRun: Run = { id: 'worker-run', sessionId: target.id, createdAt: at, status: 'running', prompt: 'old work', output: '' };
   let denied = false, stopped = false, untrusted = false;
-  let newer = false, nativeRequest: string | undefined, uncertain = false, nativeId = 'u';
+  let newer = false, nativeRequest: string | undefined, uncertain = false, nativeId = 'u', refusals = 0;
+  const undelivered: string[] = [];
   const extraRuns: Run[] = [];
   let remote: string | undefined;
   let readHook: ((path: string) => Promise<void>) | undefined;
@@ -36,13 +37,15 @@ async function fixture(t: test.TestContext) {
     if (path.includes('?limit=')) return { state: 'succeeded', body: { session: target, messages: [{ id: nativeId, role: 'user', timestamp: at, text: nativeRequest ?? targetRun.prompt }, { id: 'a', role: 'assistant', timestamp: at, text: 'x'.repeat(2000) }] } };
     if (path.endsWith('/heartbeat-protection')) return { state: 'succeeded', body: { protected: denied } };
     if (path.endsWith('/permissions.overview')) return { state: 'succeeded', body: { result: { requests: denied ? [{ sessionId: target.id, status: 'denied', decidedBy: 'owner' }] : [] } } };
-    if (options.gate) await options.gate(); posts.push({ method, path, body, headers: options.headers });
+    if (options.gate) await options.gate();
+    if (refusals > 0) { refusals--; return { state: 'not-admitted', status: 503, body: { error: 'node offline', disposition: 'not-admitted' } }; }
+    posts.push({ method, path, body, headers: options.headers });
     return uncertain ? { state: 'uncertain', body: {} } : { state: 'succeeded', body: { run: { ...targetRun, id: 'correction-run' } } };
   } } as unknown as TowerClient;
   const master = { heartbeatTasks: () => [{ id: 'task', runId: targetRun.id, sessionId: target.id, node: remote }], heartbeatStopped: () => stopped, started: async (...args: unknown[]) => { followed.push(args); } } as unknown as MasterSession;
-  const options = { stateDir: dir, dataDir: dir, tower, settings, master, context, status: () => ({ actions: [{ checkId: heartbeat.checkId, runId: 'master-run', taskIds: ['task'], delivery: 'sent' as const, at, cause: '', evidence: '', recommendation: '' }] }) };
+  const options = { stateDir: dir, dataDir: dir, tower, settings, master, context, onUndelivered: (checkId: string, taskId: string) => { undelivered.push(`${checkId}/${taskId}`); }, status: () => ({ actions: [{ checkId: heartbeat.checkId, runId: 'master-run', taskIds: ['task'], delivery: 'sent' as const, at, cause: '', evidence: '', recommendation: '' }] }) };
   const tools = new HeartbeatTools(options); await tools.start(); t.after(() => tools.close());
-  return { dir, run, extraRuns, onRead: (hook: typeof readHook) => { readHook = hook; }, target, targetRun, newer: () => { newer = true; }, native: () => { nativeRequest = 'Owner has started another task'; }, nativeId: () => { nativeId = 'new-u'; }, uncertain: () => { uncertain = true; }, registry, capability, context, settings, tools, options, posts, followed, denied: () => { denied = true; }, stopped: () => { stopped = true; }, untrusted: () => { untrusted = true; }, remote: () => { remote = 'a'.repeat(32); heartbeat.targets![0].node = remote; } };
+  return { dir, run, extraRuns, refuse: (count: number) => { refusals = count; }, undelivered, checkId: heartbeat.checkId, onRead: (hook: typeof readHook) => { readHook = hook; }, target, targetRun, newer: () => { newer = true; }, native: () => { nativeRequest = 'Owner has started another task'; }, nativeId: () => { nativeId = 'new-u'; }, uncertain: () => { uncertain = true; }, registry, capability, context, settings, tools, options, posts, followed, denied: () => { denied = true; }, stopped: () => { stopped = true; }, untrusted: () => { untrusted = true; }, remote: () => { remote = 'a'.repeat(32); heartbeat.targets![0].node = remote; } };
 }
 test('only verified running local heartbeat provenance grants two narrow tools; generic agent, forged prompt, remote and untrusted turns do not', async t => {
   const h = await fixture(t); const session = { ...h.target, id: h.run.sessionId, cwd: join(h.dir, MASTER_FOLDER) };
@@ -148,4 +151,24 @@ test('corrupt corrective audit exposes a diagnostic and blocks an otherwise auth
   assert.match(restarted.diagnostic() ?? '', /교정 기록을 읽지 못해/);
   await assert.rejects(restarted.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue existing work' }, h.capability), /authority/);
   assert.equal(h.posts.length, 0); assert.equal(await readFile(path, 'utf8'), '{ corrupt');
+});
+
+test('a correction proven not delivered may be tried again in the same check, at most three times, and records why', async t => {
+  const h = await fixture(t); h.refuse(1);
+  const first = await h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue' }, h.capability) as { attempt: { delivery: string; failure?: string }; note: string };
+  assert.equal(first.attempt.delivery, 'not-sent'); assert.match(first.attempt.failure ?? '', /^503 node offline/); assert.match(first.note, /2 attempt\(s\) left/);
+  assert.deepEqual(h.undelivered, [`${h.checkId}/task`]); assert.equal(h.tools.outcome(h.checkId, 'task'), 'not-sent'); assert.equal(h.posts.length, 0);
+  const second = await h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue' }, h.capability) as { attempt: { delivery: string } };
+  assert.equal(second.attempt.delivery, 'sent'); assert.equal(h.posts.length, 1); assert.equal(h.followed.length, 1); assert.equal(h.tools.outcome(h.checkId, 'task'), 'sent');
+  await h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Once more' }, h.capability); assert.equal(h.posts.length, 1);
+  const capped = await fixture(t); capped.refuse(5);
+  for (let i = 0; i < 4; i++) await capped.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue' }, capped.capability);
+  const ledger = JSON.parse(await readFile(join(capped.dir, 'heartbeat-corrections.json'), 'utf8'));
+  assert.equal(ledger.intents.length, 3); assert.equal(capped.posts.length, 0); assert.equal(capped.undelivered.length, 3);
+  const restarted = new HeartbeatTools(capped.options); await restarted.start(); t.after(() => restarted.close()); assert.equal(restarted.outcome(capped.checkId, 'task'), 'not-sent'); assert.equal(restarted.outcome('other', 'task'), 'none');
+});
+test('an uncertain correction is reported as uncertain and blocks later attempts in the check', async t => {
+  const h = await fixture(t); h.uncertain();
+  await h.tools.call('heartbeat_correct', { taskId: 'task', prompt: 'Continue' }, h.capability);
+  assert.equal(h.tools.outcome(h.checkId, 'task'), 'uncertain'); assert.deepEqual(h.undelivered, []);
 });

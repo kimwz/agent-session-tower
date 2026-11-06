@@ -10,6 +10,7 @@ import type { TowerClient } from '../../server/tower-tools/tower-client.js';
 import type { AutoPromptModelRequest } from '../../server/auto-prompt/native.js';
 import type { Run, Session, Snapshot } from '../../shared/types.js';
 import { MASTER_HEARTBEAT_HEADER, MASTER_HEARTBEAT_MARK } from '../../shared/master.js';
+import type { CorrectionOutcome } from '../../server/master/heartbeat-tools.js';
 const noop = { kind: 'noop', taskIds: [], evidenceIds: [], cause: 'Healthy progress', recommendation: '' };
 const action = { kind: 'action', taskIds: ['task-1'], evidenceIds: ['task-1:transcript'], cause: 'Required deployment step was omitted after repeated review', recommendation: 'Ask existing assignee to use hosted CI and continue required deployment' };
 async function harness(t: test.TestContext) {
@@ -34,6 +35,7 @@ async function harness(t: test.TestContext) {
   let captured: AutoPromptModelRequest | undefined;
   let userId = '1', userText = 'Ship feature', skipped = 0, previousUserOnly = false;
   let delivery: 'succeeded' | 'uncertain' | 'not-admitted' = 'succeeded';
+  let correction: CorrectionOutcome = 'none';
   const snapshot = (): Snapshot => ({ sessions: [masterNative, target], runs, providers: [], hostname: 'fixture', version: 'fixture', scanning: false, updatedAt: new Date(now).toISOString() });
   const tower = { hasCredentials: () => online, call: async (method: string, path: string, body: { prompt: string } | undefined, options: { gate?: () => Promise<boolean>; headers?: Record<string,string>; signal?: AbortSignal }) => {
     if (options.signal) await readHook?.(path, options.signal);
@@ -57,10 +59,10 @@ async function harness(t: test.TestContext) {
     return { state: 'succeeded', body: { session: structuredClone(nativeDetail), skipped, ...(previous ? { previousUser: user } : {}), messages: [...(previous ? [] : [user]), { id: '2', role: 'assistant', timestamp: session.updatedAt, text: 'Review passed but deployment remains.' }] } };
   } } as unknown as TowerClient;
   const master = { heartbeatTasks: () => structuredClone(tasks), heartbeatStopped: () => stopped, heartbeatAccepted: async (run: Run) => { accepted.push(run); } } as unknown as MasterSession;
-  const options = { stateDir: dir, dataDir: dir, settings, tower, master, now: () => now, tickMs: 60_000, resolve: async () => ({ provider: 'codex' as const, model: modelName }), model: async (request: AutoPromptModelRequest) => { calls++; captured = request; return invoke ? invoke(request) : result; } };
+  const options = { stateDir: dir, dataDir: dir, settings, tower, master, now: () => now, tickMs: 60_000, corrections: () => correction, resolve: async () => ({ provider: 'codex' as const, model: modelName }), model: async (request: AutoPromptModelRequest) => { calls++; captured = request; return invoke ? invoke(request) : result; } };
   const heartbeat = new MasterHeartbeat(options); await heartbeat.start();
   t.after(async () => { await heartbeat.close(); await rm(dir, { recursive: true, force: true }); });
-  return { dir, heartbeat, options, nativeUser: (id: string, text: string, unread = 0, previous = false) => { userId = id; userText = text; skipped = unread; previousUserOnly = previous; }, onWrite: (hook: typeof writeHook) => { writeHook = hook; }, onRead: (hook: typeof readHook) => { readHook = hook; }, model: (value: string) => { modelName = value; }, permissions: (value: typeof requests) => { requests = value; }, permissionFail: () => { permissionFail = true; }, failPermissionFor: (cwd: string) => { permissionFailureTarget = cwd; }, remoteProtection: (value: boolean | undefined) => { remoteProtection = value; }, settings, tasks, target, masterNative, runs, posts, accepted, advance: () => { now += 30 * 60_000; }, calls: () => calls, captured: () => captured, result: (value: unknown) => { result = value; }, invoke: (value: typeof invoke) => { invoke = value; }, stop: () => { stopped = true; }, offline: () => { online = false; }, delivery: (value: typeof delivery) => { delivery = value; } };
+  return { dir, heartbeat, options, nativeUser: (id: string, text: string, unread = 0, previous = false) => { userId = id; userText = text; skipped = unread; previousUserOnly = previous; }, onWrite: (hook: typeof writeHook) => { writeHook = hook; }, onRead: (hook: typeof readHook) => { readHook = hook; }, model: (value: string) => { modelName = value; }, permissions: (value: typeof requests) => { requests = value; }, permissionFail: () => { permissionFail = true; }, failPermissionFor: (cwd: string) => { permissionFailureTarget = cwd; }, remoteProtection: (value: boolean | undefined) => { remoteProtection = value; }, settings, tasks, target, masterNative, runs, posts, accepted, advance: () => { now += 30 * 60_000; }, calls: () => calls, captured: () => captured, result: (value: unknown) => { result = value; }, invoke: (value: typeof invoke) => { invoke = value; }, stop: () => { stopped = true; }, offline: () => { online = false; }, delivery: (value: typeof delivery) => { delivery = value; }, correction: (value: CorrectionOutcome) => { correction = value; }, now: () => now, wait: (ms: number) => { now += ms; } };
 }
 test('default enabled 30 minute inspection has no chat/run/voice effect on noop and bounds untrusted evidence', async t => {
   const h = await harness(t);
@@ -350,4 +352,55 @@ test('a stopped ancestor behind a cancelled continuation is excluded; new indepe
   h.runs.push(newRun); h.tasks[0].runId = newRun.id; h.tasks[0].currentRunId = newRun.id;
   h.target.lastRequestAt = newRun.createdAt; h.nativeUser('independent-user', newRun.prompt);
   h.advance(); await h.heartbeat.tick(); assert.equal(h.calls(), 1); assert.equal(h.posts.length, 0);
+});
+
+const retryOf = (prompt: string) => { const retry = (JSON.parse(prompt.slice(prompt.indexOf('{'))) as { retry?: { attempt: number; of: number } }).retry; return retry && { attempt: retry.attempt, of: retry.of }; };
+test('unchanged work whose correction was proven not delivered is recommended again, sooner, at most three times', async t => {
+  const h = await harness(t); h.result(action); h.advance(); await h.heartbeat.tick();
+  assert.equal(h.posts.length, 1); assert.equal(retryOf(h.posts[0].prompt), undefined);
+  h.correction('not-sent'); h.heartbeat.retrySoon();
+  assert.equal(Date.parse(h.heartbeat.status().nextDueAt!), h.now() + 5 * 60_000);
+  h.wait(5 * 60_000); await h.heartbeat.tick();
+  assert.equal(h.posts.length, 2); assert.deepEqual(retryOf(h.posts[1].prompt), { attempt: 1, of: 3 });
+  const previous = JSON.parse(h.captured()!.prompt).previousActions.at(-1);
+  assert.deepEqual(previous.correction, { 'task-1': 'not-sent' });
+  assert.match(h.captured()!.systemPrompt, /not a completed goal/);
+  h.heartbeat.retrySoon(); assert.equal(Date.parse(h.heartbeat.status().nextDueAt!), h.now() + 15 * 60_000);
+  for (let i = 0; i < 4; i++) { h.advance(); await h.heartbeat.tick(); }
+  assert.equal(h.posts.length, 4); assert.deepEqual(retryOf(h.posts[3].prompt), { attempt: 3, of: 3 });
+  assert.equal(h.heartbeat.status().lastCheck?.reason, 'Equivalent evidence already produced an action.');
+  await h.heartbeat.close(); const restarted = new MasterHeartbeat(h.options); await restarted.start(); t.after(() => restarted.close());
+  h.advance(); await restarted.tick(); assert.equal(h.posts.length, 4);
+});
+test('new evidence after retries starts a fresh budget', async t => {
+  const h = await harness(t); h.result(action); h.correction('not-sent');
+  for (let i = 0; i < 5; i++) { h.advance(); await h.heartbeat.tick(); }
+  assert.equal(h.posts.length, 4);
+  h.target.lastMessage = 'still failing after restart'; h.advance(); await h.heartbeat.tick();
+  assert.equal(h.posts.length, 5); assert.equal(retryOf(h.posts[4].prompt), undefined);
+});
+test('a master turn that failed before correcting is retried; one that completed without correcting is its judgment', async t => {
+  for (const status of ['error', 'completed', 'running'] as const) {
+    const h = await harness(t); h.result(action); h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 1);
+    h.runs.push({ ...h.accepted[0], status });
+    h.advance(); await h.heartbeat.tick();
+    assert.equal(h.posts.length, status === 'error' ? 2 : 1, status);
+  }
+  const stopped = await harness(t); stopped.result(action); stopped.advance(); await stopped.heartbeat.tick();
+  stopped.runs.push({ ...stopped.accepted[0], status: 'error', ownerStopped: true });
+  stopped.advance(); await stopped.heartbeat.tick(); assert.equal(stopped.posts.length, 1);
+});
+test('a delivered or possibly delivered correction, owner stop and real waits are never retried', async t => {
+  for (const outcome of ['sent', 'uncertain'] as const) {
+    const h = await harness(t); h.result(action); h.advance(); await h.heartbeat.tick();
+    h.correction(outcome); h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 1, outcome);
+  }
+  for (const block of ['stop', 'needsOwner', 'approval', 'refusal'] as const) {
+    const h = await harness(t); h.result(action); h.advance(); await h.heartbeat.tick(); h.correction('not-sent');
+    if (block === 'stop') h.stop();
+    if (block === 'needsOwner') h.target.outcome = 'needsOwner';
+    if (block === 'approval') h.runs[0].approvals = [{ id: 'approval', toolName: 'approval', input: {} }];
+    if (block === 'refusal') h.permissions([{ sessionId: h.target.id, status: 'denied', decidedBy: 'owner' }]);
+    h.advance(); await h.heartbeat.tick(); assert.equal(h.posts.length, 1, block);
+  }
 });
