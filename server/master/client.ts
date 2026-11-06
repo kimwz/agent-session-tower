@@ -64,8 +64,9 @@ export class MasterClient {
     // is brought back on the next hello: the heartbeat and reports live in the host, so a bound master must not wait for
     // someone to open a page.
     const tell = () => {
-      void this.exchange('hello').then(reply => { if (reply.version !== APP_VERSION) this.resume(); }, (error: unknown) => {
-        if ((error as { hostAbsent?: boolean } | undefined)?.hostAbsent || statusOf(error) === 503) this.resume();
+      void this.exchange('hello').then(reply => { if (reply.version !== APP_VERSION) this.resume(); else this.resumeFailed = false; }, (error: unknown) => {
+        // Only a host that is not there: another refusal (an incompatible or stuck host) is not answered by starting one.
+        if ((error as { hostAbsent?: boolean } | undefined)?.hostAbsent) this.resume();
       });
     };
     tell();
@@ -81,22 +82,23 @@ export class MasterClient {
     this.expiring.unref();
   }
 
-  /**
-   * Whether the host should run: a master session exists to follow (the main master's, an issue master the web knows
-   * open, or one whose session was open when the host last looked), or a closed issue master's data is due to be
-   * cleared away, which the host does.
-   */
   /** Starts or replaces the host when the master has work; a failure is logged once until the host answers again. */
   private resume(): void {
     if (this.closed || this.resuming) return;
     this.resuming = true;
     void this.pendingWork().then(pending => pending && !this.closed ? this.ensureHost() : undefined).then(() => { this.resumeFailed = false; }, error => {
-      if (this.resumeFailed) return;
+      // A web letting go has nothing to report.
+      if (this.resumeFailed || this.closed) return;
       this.resumeFailed = true;
       console.error(`Master could not resume waiting work: ${(error as NodeJS.ErrnoException)?.code ?? (error === null || error === undefined ? undefined : statusOf(error)) ?? 'error'}`);
     }).finally(() => { this.resuming = false; });
   }
 
+  /**
+   * Whether the host should run: a master session exists to follow (the main master's, an issue master the web knows
+   * open, or one whose session was open when the host last looked), or a closed issue master's data is due to be
+   * cleared away, which the host does.
+   */
   private async pendingWork(): Promise<boolean> {
     const { data } = await this.hostPaths();
     const saved = await readPrivateJson(join(data, 'settings.json')).catch(() => undefined) as { session?: { sessionId?: unknown } } | undefined;
@@ -205,6 +207,8 @@ export class MasterClient {
         catch (error) { if (statusOf(error) === 503) break; throw error; }
       }
     } catch (error) { if (statusOf(error) !== 503) throw error; }
+    // A web that let go of the host never starts one.
+    if (this.closed) throw failure('Master connection is closed.', 'unavailable');
     const entry = this.options.hostEntry ?? fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../index.ts' : '../index.js', import.meta.url));
     const stateDir = (await this.hostPaths()).stateDir;
     const args = isSea() ? ['--master-host', stateDir] : [...process.execArgv.filter(arg => !/^--inspect(?:-brk|-port|-publish-uid)?(?:=|$)/.test(arg)), entry, '--master-host', stateDir];

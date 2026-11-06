@@ -84,7 +84,8 @@ async function hostStart(t: test.TestContext) {
   };
   const credential = async () => { await mkdir(join(paths.token, '..'), { recursive: true }); await writeFile(paths.token, 'c'.repeat(64), { mode: 0o600 }); };
   const appear = async () => { await credential(); await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(paths.socket, resolve); }); };
-  return { stateDir: paths.stateDir, paths, spawned, methods, client, pend, appear, credential, answer: (status: number) => { answer = { status }; }, version: (value: string) => { hostVersion = value; } };
+  const vanish = async () => { await rm(paths.token, { force: true }); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); };
+  return { stateDir: paths.stateDir, paths, spawned, methods, client, pend, appear, vanish, credential, answer: (status: number) => { answer = { status }; }, version: (value: string) => { hostVersion = value; } };
 }
 
 test('the web starts the master host when none answers and waits while it answers 503, but not past its deadline or on another failure', async t => {
@@ -169,6 +170,8 @@ test('a bound master whose host could not start is started again on a later hell
 });
 
 test('an idle host of another build is replaced on a later hello', async t => {
+  const logged: string[] = [];
+  t.mock.method(console, 'error', (line: string) => { logged.push(line); });
   const h = await hostStart(t);
   await mkdir(h.paths.data, { recursive: true, mode: 0o700 });
   await writePrivateJson(join(h.paths.data, 'settings.json'), JSON.stringify({ session: { sessionId: 'claude:master', provider: 'claude', startedAt: new Date().toISOString() } }));
@@ -180,4 +183,26 @@ test('an idle host of another build is replaced on a later hello', async t => {
   // The host now running is an older build's (it took over while this web started): the next hello replaces it.
   h.version('0.0.1-older');
   await until(() => h.methods.includes('shutdown'));
+  // The web lets go while it waits for the old host to leave: it starts nothing and logs nothing.
+  const spawned = h.spawned.length;
+  client.dispose();
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(h.spawned.length, spawned); assert.deepEqual(logged, []);
+});
+
+test('after the host answers again, a later failing start is logged again', async t => {
+  const logged: string[] = [];
+  t.mock.method(console, 'error', (line: string) => { logged.push(line); });
+  const h = await hostStart(t);
+  await mkdir(h.paths.data, { recursive: true, mode: 0o700 });
+  await writePrivateJson(join(h.paths.data, 'settings.json'), JSON.stringify({ session: { sessionId: 'claude:master', provider: 'claude', startedAt: new Date().toISOString() } }));
+  const client = h.client(100, 50);
+  client.start();
+  await until(() => logged.length === 1);
+  await h.appear();
+  await until(() => h.methods.includes('hello'));
+  // The host goes away again and cannot be started: the new failure is reported.
+  await h.vanish();
+  await until(() => logged.length === 2);
+  assert.deepEqual(logged, ['Master could not resume waiting work: 503', 'Master could not resume waiting work: 503']);
 });
