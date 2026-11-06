@@ -358,14 +358,14 @@ const retryOf = (prompt: string) => { const retry = (JSON.parse(prompt.slice(pro
 test('unchanged work whose correction was proven not delivered is recommended again, sooner, at most three times', async t => {
   const h = await harness(t); h.result(action); h.advance(); await h.heartbeat.tick();
   assert.equal(h.posts.length, 1); assert.equal(retryOf(h.posts[0].prompt), undefined);
-  h.correction('not-sent'); h.heartbeat.retrySoon();
+  h.correction('not-sent'); h.heartbeat.correctionSettled(h.heartbeat.status().actions.at(-1)!.checkId, 'task-1', 'not-sent');
   assert.equal(Date.parse(h.heartbeat.status().nextDueAt!), h.now() + 5 * 60_000);
   h.wait(5 * 60_000); await h.heartbeat.tick();
   assert.equal(h.posts.length, 2); assert.deepEqual(retryOf(h.posts[1].prompt), { attempt: 1, of: 3 });
   const previous = JSON.parse(h.captured()!.prompt).previousActions.at(-1);
   assert.deepEqual(previous.correction, { 'task-1': 'not-sent' });
   assert.match(h.captured()!.systemPrompt, /not a completed goal/);
-  h.heartbeat.retrySoon(); assert.equal(Date.parse(h.heartbeat.status().nextDueAt!), h.now() + 15 * 60_000);
+  h.heartbeat.correctionSettled(h.heartbeat.status().actions.at(-1)!.checkId, 'task-1', 'not-sent'); assert.equal(Date.parse(h.heartbeat.status().nextDueAt!), h.now() + 15 * 60_000);
   for (let i = 0; i < 4; i++) { h.advance(); await h.heartbeat.tick(); }
   assert.equal(h.posts.length, 4); assert.deepEqual(retryOf(h.posts[3].prompt), { attempt: 3, of: 3 });
   assert.equal(h.heartbeat.status().lastCheck?.reason, 'Equivalent evidence already produced an action.');
@@ -422,4 +422,14 @@ test('a ledger written before retries were kept loads, and its acted evidence st
   const restarted = new MasterHeartbeat(h.options); await restarted.start(); t.after(() => restarted.close());
   assert.equal(restarted.status().problem, undefined);
   h.correction('not-sent'); h.advance(); await restarted.tick(); assert.equal(h.posts.length, 1);
+});
+test('a settled correction outcome kept on the task decides the retry after the corrective audit forgot it', async t => {
+  for (const [settled, posts] of [['not-sent', 2], ['sent', 1], ['uncertain', 1]] as const) {
+    const h = await harness(t); h.result(action); h.advance(); await h.heartbeat.tick();
+    h.heartbeat.correctionSettled(h.heartbeat.status().actions.at(-1)!.checkId, 'task-1', settled);
+    h.runs.push({ ...h.accepted[0], status: 'error' });
+    // The corrective audit no longer has this check: only the outcome kept on the attempt can decide.
+    h.correction('none'); h.advance(); await h.heartbeat.tick();
+    assert.equal(h.posts.length, posts, settled);
+  }
 });

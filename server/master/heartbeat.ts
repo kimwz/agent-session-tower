@@ -30,7 +30,7 @@ interface Evidence { id: string; text: string }
 interface Candidate { id: string; sessionId?: string; node?: string; nativeRequestId?: string; runId?: string; latestRunId?: string; lastRequestAt?: string; nativeFingerprint: string; state: string; evidence: Evidence[]; fingerprint: string }
 interface Ledger { version: 1; acted: Record<string, string>; nextDue: number; checks: MasterHeartbeatCheck[]; actions: Array<MasterHeartbeatAction & { fingerprint: string }>; observations: Array<{ id: string; fingerprint: string; at: string; summary?: string; nativeRequestId?: string; runId?: string }>; attempts?: Record<string, Attempt> }
 /** The latest action per task, kept apart from the bounded audit history: how many actions this evidence produced and how the last went. */
-interface Attempt { fingerprint: string; count: number; checkId: string; delivery: MasterHeartbeatAction['delivery']; runId?: string }
+interface Attempt { fingerprint: string; count: number; checkId: string; delivery: MasterHeartbeatAction['delivery']; runId?: string; correction?: CorrectionOutcome }
 interface Decision { kind: 'noop' | 'action'; taskIds: string[]; evidenceIds: string[]; cause: string; recommendation: string }
 export interface HeartbeatOptions {
   stateDir: string; dataDir: string; settings: MasterSettingsStore; master: MasterSession; tower: TowerClient;
@@ -119,8 +119,17 @@ export class MasterHeartbeat {
     this.unsubscribe = this.options.settings.subscribe(() => { this.epoch++; this.controller?.abort(); this.ledger.nextDue = this.now() + this.interval(); });
     this.timer = setInterval(() => { void this.tick(); }, this.options.tickMs ?? 5000); this.timer.unref();
   }
+  /**
+   * The master's correction for a check settled. Kept on the task's latest attempt (saved with the next ledger write), so
+   * the retry decision does not depend on the corrective audit's bounded history.
+   */
+  correctionSettled(checkId: string, taskId: string, outcome: CorrectionOutcome): void {
+    const attempt = this.ledger.attempts?.[taskId];
+    if (attempt?.checkId === checkId) attempt.correction = outcome;
+    if (outcome === 'not-sent') this.retrySoon();
+  }
   /** A correction was proven not delivered: look again after the backoff for the retries already used, not a whole interval. */
-  retrySoon(): void {
+  private retrySoon(): void {
     if (this.closed || this.problem) return;
     const used = Math.max(0, ...Object.values(this.ledger.attempts ?? {}).map(item => item.count - 1));
     this.ledger.nextDue = Math.min(this.ledger.nextDue, this.now() + Math.min(RETRY_DELAYS[Math.min(used, RETRY_DELAYS.length - 1)], this.interval()));
@@ -129,7 +138,7 @@ export class MasterHeartbeat {
   /** The master took up the action, but no correction reached the assignee for a reason other than its own judgment. */
   private undelivered(attempt: Attempt, taskId: string, runs: readonly Run[]): boolean {
     if (attempt.delivery !== 'sent') return false;
-    const outcome = this.correction(attempt.checkId, taskId);
+    const outcome = attempt.correction ?? this.correction(attempt.checkId, taskId);
     if (outcome === 'not-sent') return true;
     if (outcome !== 'none' || !attempt.runId) return false;
     const turn = continuedRunById(runs, attempt.runId);
@@ -362,7 +371,7 @@ function validLedger(value: unknown): value is Ledger {
     && value.actions.every(item => record(item) && typeof item.checkId === 'string' && typeof item.at === 'string' && typeof item.fingerprint === 'string' && typeof item.cause === 'string' && typeof item.evidence === 'string' && typeof item.recommendation === 'string' && Array.isArray(item.taskIds) && ['sending','sent','not-sent','uncertain'].includes(String(item.delivery)))
     && value.observations.every(item => record(item) && typeof item.id === 'string' && typeof item.fingerprint === 'string' && typeof item.at === 'string')
     && (value.attempts === undefined || (record(value.attempts) && Object.keys(value.attempts).length <= 300 && Object.values(value.attempts).every(item => record(item) && typeof item.fingerprint === 'string' && typeof item.checkId === 'string'
-      && Number.isInteger(item.count) && (item.count as number) >= 1 && ['sending','sent','not-sent','uncertain'].includes(String(item.delivery)) && (item.runId === undefined || typeof item.runId === 'string'))));
+      && Number.isInteger(item.count) && (item.count as number) >= 1 && ['sending','sent','not-sent','uncertain'].includes(String(item.delivery)) && (item.runId === undefined || typeof item.runId === 'string') && (item.correction === undefined || ['sent','uncertain','not-sent','none'].includes(String(item.correction))))));
 }
 
 function bounded<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
