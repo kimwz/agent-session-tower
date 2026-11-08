@@ -11,19 +11,18 @@ import { awaitToolServers } from './session-mcp.js';
 import { turnEnv } from './turn-env.js';
 import type { Prepared, TurnHost, TurnExit } from './turn-host.js';
 
+/** A first line of exactly `/goal resume` asks to lift a blocked or paused goal; the rest is the turn's message. */
+export function goalResumption(prompt: string): string | undefined {
+  const match = /^\/goal resume[ \t]*(?:\r?\n|$)/.exec(prompt);
+  return match ? prompt.slice(match[0].length).trim() || 'Continue the goal.' : undefined;
+}
+
 /**
  * Prepares a turn of Tower's own Codex (its app server over stdio): the program, folder, attachments, notes, tools and
  * environment, then the adapter, which does not spawn until it starts. It checks again after each step that is
  * followed by another; the last look is the manager's. `start` marks the run running once the manager registered the
  * handle; the adapter's end is reported once, through `host.exited`, and only for a registered turn.
  */
-/** A first line of exactly `/goal resume` asks to lift a blocked or paused goal; the rest is the turn's message. */
-export function goalResumption(prompt: string): { prompt: string } | undefined {
-  const match = /^\/goal resume[ \t]*(?:\r?\n|$)/.exec(prompt);
-  if (!match) return undefined;
-  return { prompt: prompt.slice(match[0].length).trim() || 'Continue the goal.' };
-}
-
 export async function prepareCodexTurn(host: TurnHost, run: Run, session: Session, creating: boolean): Promise<Prepared<CodexStdioRun>> {
   const executable = await host.executable('codex');
   if (!executable) throw new Error('Codex CLI is no longer available in PATH.');
@@ -60,9 +59,9 @@ export async function prepareCodexTurn(host: TurnHost, run: Run, session: Sessio
     ...(!creating ? { threadId: session.nativeId } : {}),
     ...codexReviewer(run, creating, Boolean(mcpServers?.tower_slack)),
     ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
-    prompt: attachmentPrompt(resumption?.prompt ?? run.prompt, attachments),
-    ...(!master ? { continueGoal: () => !host.stopping() && !host.updating() } : {}),
-    ...(resumption ? { resumeGoal: true } : {}),
+    prompt: attachmentPrompt(resumption ?? run.prompt, attachments),
+    ...(!master ? { continueGoal: () => host.goalMayContinue(run) } : {}),
+    ...(resumption !== undefined ? { resumeGoal: true } : {}),
     ...(run.instructions?.text ? { instructions: run.instructions.text } : {}),
     imagePaths: imagePaths(attachments),
     onSession: async id => {

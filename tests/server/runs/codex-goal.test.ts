@@ -50,7 +50,7 @@ async function fixture(t: TestContext, turns: Turn[], overrides: Partial<CodexSt
   await writeFile(script, PROVIDER);
   const sent: Array<{ method?: string; params?: Record<string, unknown> }> = [], output: string[] = [], finished: CodexStdioResult[] = [];
   const { resumedGoal, startDelay, setDelay, ...options } = overrides;
-  const run = await openCodexStdioRun({ executable: '/fixture/codex', cwd: directory, threadId: ID, prompt: 'go', continueGoal: () => true, goalFollowMs: 40,
+  const run = await openCodexStdioRun({ executable: '/fixture/codex', cwd: directory, threadId: ID, prompt: 'go', continueGoal: () => true, goalFollowMs: 60_000,
     env: { ...process.env, TURNS: JSON.stringify(turns), RESUMED_GOAL: resumedGoal ?? 'none', START_DELAY: String(startDelay ?? 0), SET_DELAY: String(setDelay ?? 0) },
     spawnProcess(_executable, args, spawned) {
       const child = spawn(process.execPath, [script, ...args], spawned);
@@ -84,7 +84,7 @@ test('the goal reported on resume alone is enough, and a goal the agent marks bl
   await ended(blocked); assert.equal(blocked.text().includes('reply 1'), false);
 });
 test('no next turn within the wait ends the run as completed', async t => {
-  const f = await fixture(t, [{ work: true, goal: 'active' }]);
+  const f = await fixture(t, [{ work: true, goal: 'active' }], { goalFollowMs: 1 });
   assert.equal((await ended(f)).status, 'completed');
 });
 test('a failed or interrupted continuation ends the run with that outcome', async t => {
@@ -140,8 +140,13 @@ test('/goal resume lifts a blocked or paused goal inside the submitted turn and 
     assert.ok(start >= 0 && set > start); assert.equal(f.sent[set].params?.status, 'active');
   }
   // The turn can end before Codex confirms the goal is active: the answer still decides what the run does.
-  const fast = await fixture(t, [{ work: true, goal: 'active', next: true }, { work: true, goal: 'complete' }], { resumedGoal: 'blocked', resumeGoal: true, setDelay: 30 });
-  await ended(fast); assert.equal(fast.finished[0].status, 'completed'); assert.match(fast.text(), /reply 1/);
+  // Everything Codex sends before it confirms is judged afterwards, and a status from before the change no longer holds.
+  for (const first of [undefined, 'blocked']) {
+    const fast = await fixture(t, [{ work: true, goal: first, next: true }, { work: true, goal: 'complete' }], { resumedGoal: 'blocked', resumeGoal: true, setDelay: 30 });
+    await ended(fast); assert.match(fast.text(), /reply 1/, String(first));
+  }
+  const already = await fixture(t, [{ work: true, goal: 'complete' }], { resumedGoal: 'active', resumeGoal: true });
+  await ended(already); assert.equal(already.sent.some(frame => frame.method === 'turn/start'), true); assert.equal(already.sent.some(frame => frame.method === 'thread/goal/set'), false);
   for (const [goal, seen] of [['complete', /it is complete/], ['none', /No goal to resume/]] as const) {
     const f = await fixture(t, [{ work: true }], { resumedGoal: goal, resumeGoal: true });
     assert.equal((await ended(f)).status, 'completed');
@@ -151,8 +156,8 @@ test('/goal resume lifts a blocked or paused goal inside the submitted turn and 
   await ended(plain); assert.equal(plain.sent.some(frame => String(frame.method).startsWith('thread/goal')), false);
 });
 test('only a first line of exactly /goal resume asks for it', () => {
-  assert.deepEqual(goalResumption('/goal resume'), { prompt: 'Continue the goal.' });
-  assert.deepEqual(goalResumption('/goal resume  \nFinish it'), { prompt: 'Finish it' });
+  assert.equal(goalResumption('/goal resume'), 'Continue the goal.');
+  assert.equal(goalResumption('/goal resume  \nFinish it'), 'Finish it');
   for (const text of ['please /goal resume', '/goal resumes', '/goal 게임 완료', ' /goal resume']) assert.equal(goalResumption(text), undefined, text);
 });
 

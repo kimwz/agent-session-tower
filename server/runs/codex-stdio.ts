@@ -79,6 +79,7 @@ const GOAL_IDLE_TURNS = 3;
 const GOAL_MAX_TURNS = 100;
 const NOT_WORK = new Set(['agentMessage', 'reasoning', 'userMessage', 'plan', 'contextCompaction']);
 const RESUMABLE_GOAL = new Set(['blocked', 'paused']);
+const THREADS_KEPT = 256;
 const approvalError = () => new TowerError('conflict', 'This approval is no longer pending. Refresh the conversation.');
 
 /** A dedicated stdio process owns only this run. Never connect it to the desktop daemon. */
@@ -238,9 +239,9 @@ class StdioRun implements CodexStdioRun {
     this.threadId = id;
     await this.options.onSession(id);
     if (this.result || this.cancelRequested) { if (!this.result) this.finish({ status: 'cancelled' }); return; }
-    const resumable = this.options.resumeGoal ? await this.resumableGoal(id) : false;
+    const resumption = this.options.resumeGoal ? await this.goalToResume(id) : undefined;
     if (this.result) return;
-    if (this.options.resumeGoal && !resumable) { this.finish({ status: 'completed' }); return; }
+    if (resumption === 'none') { this.finish({ status: 'completed' }); return; }
     this.submitted = true;
     const started = await this.request('turn/start', {
       threadId: id,
@@ -253,8 +254,8 @@ class StdioRun implements CodexStdioRun {
     if (typeof started?.turn?.id !== 'string' || !started.turn.id) throw new Error('Codex did not confirm the submitted turn ID. The request was not resent.');
     const turnId: string = started.turn.id;
     // Inside the submitted turn, so an idle thread starts no continuation of its own first. Until `turnId` is set,
-    // whatever Codex sends waits in `early`, in order, and is judged knowing the answer.
-    if (resumable) await this.activateGoal(id);
+    // whatever Codex sends waits in `early`, in order; a status it reported before this took effect no longer holds.
+    if (resumption === 'activate' && await this.activateGoal(id)) this.early = this.early.filter(frame => !(frame.method === 'thread/goal/updated' && RESUMABLE_GOAL.has(String((frame.params as RecordValue | undefined)?.goal?.status))));
     if (this.result) return;
     this.turnId = turnId;
     this.rootStartedAt = typeof started.turn.startedAt === 'number' ? started.turn.startedAt : undefined;
@@ -411,7 +412,7 @@ class StdioRun implements CodexStdioRun {
 
   private rememberThread(thread: RecordValue): void {
     if (typeof thread.id !== 'string' || !UUID.test(thread.id)) return;
-    if (this.threads.size >= 256 && !this.threads.has(thread.id)) throw new Error('Codex sent too many thread identities.');
+    if (this.threads.size >= THREADS_KEPT && !this.threads.has(thread.id)) throw new Error('Codex sent too many thread identities.');
     const prior = this.threads.get(thread.id);
     if (prior && prior.parentThreadId !== thread.parentThreadId) throw new Error('Codex changed a thread parent identity.');
     this.threads.set(thread.id, thread);
@@ -567,37 +568,36 @@ class StdioRun implements CodexStdioRun {
   }
 
   private stopFollowing(status: 'completed' | 'cancelled' = 'completed'): void {
-    const following = this.following;
-    if (!following) return;
-    clearTimeout(following.timer);
-    this.following = undefined;
-    this.finish({ status, finishedAt: following.finishedAt });
+    if (this.following) this.finish({ status, finishedAt: this.following.finishedAt });
   }
 
   private adoptContinuation(turnId: string, turn: RecordValue): void {
-    if (this.cancelRequested || !this.options.continueGoal?.()) { this.stopFollowing(); return; }
+    if (!this.options.continueGoal?.()) { this.stopFollowing(); return; }
     clearTimeout(this.following!.timer);
     this.following = undefined;
     this.retireTurn(this.threadId!, this.turnId);
     this.turnId = turnId;
+    // The identities are a per-turn cache (read again when needed), and a long goal meets many children.
+    for (const id of this.threads.keys()) if (!this.liveTurns.has(id)) this.threads.delete(id);
     this.goalTurns++;
     this.turnWorked = false;
     this.liveTurns.set(this.threadId!, { id: turnId, startedAt: typeof turn.startedAt === 'number' ? turn.startedAt : undefined, observed: true });
   }
 
   /** The owner's explicit `/goal resume`: what stopped the goal is theirs to lift. Nothing to lift means no turn at all. */
-  private async resumableGoal(threadId: string): Promise<boolean> {
+  private async goalToResume(threadId: string): Promise<'activate' | 'keep' | 'none'> {
     let status: unknown;
     try { const found = await this.request('thread/goal/get', { threadId }, false); status = record(found?.goal) ? found.goal.status : undefined; }
-    catch (error) { this.options.onOutput(`[Tower] The goal could not be read: ${message(error)}\n`); return false; }
-    if (typeof status === 'string' && RESUMABLE_GOAL.has(status)) return true;
+    catch (error) { this.options.onOutput(`[Tower] The goal could not be read: ${message(error)}\n`); return 'none'; }
+    if (status === 'active') return 'keep';
+    if (typeof status === 'string' && RESUMABLE_GOAL.has(status)) return 'activate';
     this.options.onOutput(`[Tower] No goal to resume${typeof status === 'string' ? ` (it is ${status})` : ''}. Nothing was sent.\n`);
-    return false;
+    return 'none';
   }
 
-  private async activateGoal(threadId: string): Promise<void> {
-    try { await this.request('thread/goal/set', { threadId, status: 'active' }, false); this.goalStatus = 'active'; }
-    catch (error) { this.options.onOutput(`[Tower] The goal could not be resumed: ${message(error)}\n`); }
+  private async activateGoal(threadId: string): Promise<boolean> {
+    try { await this.request('thread/goal/set', { threadId, status: 'active' }, false); this.goalStatus = 'active'; return true; }
+    catch (error) { this.options.onOutput(`[Tower] The goal could not be resumed: ${message(error)}\n`); return false; }
   }
 
   private approval(rpcId: RequestId, method: string, params: RecordValue, turnId: string): void {

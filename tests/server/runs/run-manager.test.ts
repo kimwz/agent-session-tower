@@ -1332,6 +1332,48 @@ test('a Codex turn cancelled right after it is registered, before its start comp
   assert.equal((await finished(f.manager, run.id)).status, 'cancelled');
 });
 
+/** A Codex adapter that stays running until `complete`, and hands its options to the test. */
+function holdingStdio(seen: StdioOptions[]) {
+  const ends: Array<() => void> = [];
+  const open = async (options: StdioOptions) => {
+    seen.push(options);
+    const end = () => options.onFinished({ status: 'completed' });
+    ends.push(end);
+    return { done: Promise.resolve(), respondToApproval: async () => {}, start: async () => { await options.onSession(options.threadId!); options.onStarted?.('turn'); }, cancel: async () => { end(); }, close: () => {} } as never;
+  };
+  return { open, complete: () => ends.shift()!() };
+}
+
+test('a goal gives way at a turn end to what waits for its conversation, to a new worker, and is not followed by automation', async t => {
+  const seen: StdioOptions[] = []; const stdio = holdingStdio(seen);
+  const f = await adapters(t, { stdio: stdio.open });
+  const run = await f.manager.enqueue(f.first, 'Work', {}, { origin: { kind: 'owner' } });
+  await until(() => seen.length === 1 && f.read(run.id)?.status === 'running');
+  const allowed = () => seen[0].continueGoal!();
+  assert.equal(allowed(), true);
+  f.manager.holdGoalFollowing(true); assert.equal(allowed(), false);
+  f.manager.holdGoalFollowing(false); assert.equal(allowed(), true);
+  const other = await f.manager.enqueue(f.second, 'Elsewhere', {}, { origin: { kind: 'owner' } });
+  await until(() => seen.length === 2 && f.read(other.id)?.status === 'running');
+  assert.equal(allowed(), true, 'another conversation does not matter');
+  await f.manager.enqueue(f.first, 'Next', {}, { origin: { kind: 'owner' } });
+  assert.equal(allowed(), false);
+  const automatic = await f.manager.enqueue(f.second, 'From a trigger', {}, { origin: { kind: 'trigger', triggerId: 'x', eventId: 'e' } });
+  stdio.complete(); stdio.complete(); await until(() => f.read(automatic.id)?.status === 'running' && seen.some(item => item.prompt === 'From a trigger'));
+  assert.equal(seen.find(item => item.prompt === 'From a trigger')!.continueGoal!(), false);
+});
+
+test('/goal resume is honoured only from the owner, and a run that sends no turn settles', async t => {
+  const seen: StdioOptions[] = []; const stdio = holdingStdio(seen);
+  const f = await adapters(t, { stdio: stdio.open });
+  await f.manager.enqueue(f.first, '/goal resume\nGo on', {}, { origin: { kind: 'owner' } });
+  await until(() => seen.length === 1);
+  assert.equal(seen[0].resumeGoal, true); assert.equal(seen[0].prompt, 'Go on');
+  const agent = await f.manager.enqueue(f.second, '/goal resume\nGo on', {}, { origin: { kind: 'agent' } });
+  await until(() => seen.length === 2 && f.read(agent.id)?.status === 'running');
+  assert.equal(seen[1].resumeGoal, undefined); assert.equal(seen[1].prompt, '/goal resume\nGo on');
+});
+
 for (const kind of ['codex', 'bridge'] as const) {
   test(`a ${kind} turn refused at its last check leaves no handle and releases the conversation for the next queued run`, async t => {
     const log: string[] = [];
