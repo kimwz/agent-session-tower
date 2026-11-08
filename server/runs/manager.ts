@@ -277,6 +277,7 @@ export class RunManager extends EventEmitter {
   private launchPrepare?: (run: Run) => Promise<void>;
   private started = false;
   private stopping = false;
+  private goalFollowingHeld = false;
   private attachmentCleanupPaused = true;
   private attachmentCleanupTimer?: ReturnType<typeof setInterval>;
   private attachmentCleanup?: Promise<void>;
@@ -296,7 +297,7 @@ export class RunManager extends EventEmitter {
     this.turnHost = {
       get options() { return manager.options; }, registry: this.registry, attachments: this.attachments, notes: this.notes,
       changed: (...runs) => this.changed(...runs), touch: run => this.touch(run.id), append: (run, text) => this.append(run, text), notifyOutput: run => { this.touch(run.id); this.notifyOutput(); }, flush: () => this.flush(), persistNativeIdentity: run => this.persistNativeIdentity(run),
-      stopping: () => this.stopping, updating: () => this.updating, stop: (id, owned) => this.stopOwned(id, owned),
+      stopping: () => this.stopping, updating: () => this.updating, goalMayContinue: run => this.goalMayContinue(run), stop: (id, owned) => this.stopOwned(id, owned),
       prepareLaunch: run => this.prepareLaunch(run), refusedAtLaunch: (run, session) => this.refusedAtLaunch(run, session),
       release: sessionId => { this.reservedSessions.delete(sessionId); }, exited: exit => this.exited(exit),
       runTools: (run, session) => this.runTools(run, session), executable: provider => this.executable(provider),
@@ -1199,8 +1200,10 @@ export class RunManager extends EventEmitter {
     } else if (exit.kind === 'codex') {
       const { result, started } = exit;
       this.stdio.delete(run.id); this.reservedSessions.delete(session.id); delete run.approvals;
+      // A run that completes without a turn (`/goal resume` with nothing to lift) has settled too.
+      if (started || result.status === 'completed') this.settledRuns.add(run.id);
       if (started) {
-        this.settledRuns.add(run.id); this.locallySettled.delete(session.id); this.locallySettled.set(session.id, Date.now());
+        this.locallySettled.delete(session.id); this.locallySettled.set(session.id, Date.now());
         if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
       }
       if (!FINISHED.has(run.status)) {
@@ -1262,6 +1265,18 @@ export class RunManager extends EventEmitter {
   }
 
   /** The owner asked Tower to switch to its new version now (see UpdateDrain). */
+  /**
+   * A goal's turns can go on for hours; each turn end is where they give way. Whatever is waiting for this conversation
+   * runs next and, being a Codex run on the same goal, carries it on.
+   */
+  private goalMayContinue(run: Run): boolean {
+    return !this.stopping && !this.updating && !this.goalFollowingHeld && !automated(run)
+      && ![...this.runs.values()].some(other => other.id !== run.id && other.sessionId === run.sessionId && other.status === 'queued' && due(other) && !other.steering && !other.permissionNotice);
+  }
+
+  /** While a new worker has waited too long for a quiet moment, goals end at their next turn so it can take over. */
+  holdGoalFollowing(held: boolean): void { this.goalFollowingHeld = held; }
+
   beginUpdateDrain(deadline: number, delegated: (run: Run) => boolean): void { this.drain.begin(deadline, delegated); }
 
   /** While a forced update holds new turns back. */

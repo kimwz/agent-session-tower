@@ -11,6 +11,12 @@ import { awaitToolServers } from './session-mcp.js';
 import { turnEnv } from './turn-env.js';
 import type { Prepared, TurnHost, TurnExit } from './turn-host.js';
 
+/** A first line of exactly `/goal resume` asks to lift a blocked or paused goal; the rest is the turn's message. */
+export function goalResumption(prompt: string): string | undefined {
+  const match = /^\/goal resume[ \t]*(?:\r?\n|$)/.exec(prompt);
+  return match ? prompt.slice(match[0].length).trim() || 'Continue the goal.' : undefined;
+}
+
 /**
  * Prepares a turn of Tower's own Codex (its app server over stdio): the program, folder, attachments, notes, tools and
  * environment, then the adapter, which does not spawn until it starts. It checks again after each step that is
@@ -45,6 +51,7 @@ export async function prepareCodexTurn(host: TurnHost, run: Run, session: Sessio
   const env = turnEnv(host.options.env, master, tools, host.options.launchMarks);
   const mcpServers = codexMcpServers(tools.servers, Boolean(master));
   if (tools.towerTools) run.towerTools = tools.towerTools;
+  const resumption = !master && run.origin?.kind === 'owner' ? goalResumption(run.prompt) : undefined;
   const codexReplies = master ? new ReplyLog(run, Date.now) : undefined;
   const handle = await (host.options.openCodexStdio ?? openCodexStdioRun)({
     executable, cwd: session.cwd, env, spawnProcess: host.options.spawnProcess,
@@ -52,7 +59,9 @@ export async function prepareCodexTurn(host: TurnHost, run: Run, session: Sessio
     ...(!creating ? { threadId: session.nativeId } : {}),
     ...codexReviewer(run, creating, Boolean(mcpServers?.tower_slack)),
     ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
-    prompt: attachmentPrompt(run.prompt, attachments),
+    prompt: attachmentPrompt(resumption ?? run.prompt, attachments),
+    ...(!master ? { continueGoal: () => host.goalMayContinue(run) } : {}),
+    ...(resumption !== undefined ? { resumeGoal: true } : {}),
     ...(run.instructions?.text ? { instructions: run.instructions.text } : {}),
     imagePaths: imagePaths(attachments),
     onSession: async id => {

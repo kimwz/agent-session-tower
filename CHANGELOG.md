@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.180.0] - 2026-11-08
+
+- **Goal이 active인 Codex 대화가 Tower 실행 안에서 끝까지 이어집니다.** Codex는 Goal이 active이면 한 턴이 끝나자마자 다음 턴을 스스로 시작하는데, Tower는 첫 턴이 끝나면 곧바로 Codex 프로세스를 닫았습니다. 그래서 Goal이 있어도 턴마다 멈췄고 마스터나 소유자가 "계속하세요"를 다시 보내야 했습니다. 이제 Goal이 active인 동안 같은 실행이 다음 턴을 따라가며, 그동안 Tower 도구(일회성 승인, 브라우저, 세션 조회)도 그대로 쓸 수 있습니다.
+- **멈출 때는 멈춥니다.** Goal이 완료·차단(blocked)·일시정지·한도 도달이면, 턴이 실패하거나 소유자가 멈추면 실행은 지금처럼 끝납니다. 도구도 파일 변경도 없이 답만 하는 턴이 3번 이어지거나 한 실행이 100턴에 이르면 끝내고 그 이유를 대화에 남깁니다. 같은 대화에 기다리는 메시지가 있으면 턴이 끝날 때 먼저 양보하고, 새 워커가 6시간을 기다렸거나 업데이트 준비 중이면 다음 턴을 따라가지 않습니다. Slack·트리거 실행은 따라가지 않습니다.
+- **`/goal resume`으로 멈춘 Goal을 다시 시작합니다.** 메시지 첫 줄이 정확히 `/goal resume`이면, 소유자가 보낸 메시지에 한해 차단되거나 일시정지된 Goal을 다시 active로 돌리고 나머지 내용을 그 턴에 전합니다. 재개할 Goal이 없거나 이미 완료됐으면 안내만 남기고 턴을 보내지 않습니다.
+
 ## [1.179.4] - 2026-11-06
 
 - **웹이 재시작된 뒤 마스터 호스트가 스스로 다시 뜹니다.** 배포나 재시작 때 새 웹이 이전 마스터 호스트를 내려보낸 직후 새 호스트를 띄우는데, 이전 호스트가 정리를 마치기 전이면 새 호스트가 상태 잠금을 얻지 못하고 바로 끝났습니다. 웹은 `Master could not resume waiting work: 503`만 남기고 다시 시도하지 않아서, 소유자가 마스터를 열 때까지 하트비트 점검과 결과 보고가 멈춰 있었습니다. 이제 마스터가 연결돼 있으면 웹이 15초마다 보내는 신호에서 호스트가 없으면 다시 띄우고, 쉬고 있는 이전 빌드의 호스트는 새 빌드로 바꿉니다. 실패 기록은 실패가 이어지는 동안 한 줄만 남깁니다.

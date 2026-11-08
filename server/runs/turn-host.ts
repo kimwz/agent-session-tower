@@ -52,6 +52,8 @@ export interface TurnHost {
   persistNativeIdentity(run: Run): Promise<boolean>;
   stopping(): boolean;
   updating(): boolean;
+  /** Whether this run may take the goal's next turn, or should end at this turn so something else can go first. */
+  goalMayContinue(run: Run): boolean;
   /** Signals a Claude process to stop (then kills it if it does not). */
   stop(runId: string, owned: OwnedProcess): void;
   /** The launch gate's look and a permission continuation's check, taken again (may supersede the run). */
