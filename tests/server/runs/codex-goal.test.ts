@@ -29,7 +29,8 @@ const play = () => {
   if (turn.hold) return;
   if (turn.goal !== undefined) { if (turn.goal) notice('thread/goal/updated', { turnId, goal: { status: turn.goal } }); else notice('thread/goal/cleared', {}); }
   notice('turn/completed', { turn: { id: turnId, status: turn.status || 'completed', completedAt: 1789516801 + index, items: [] } });
-  if (turn.next) { notice('turn/started', { turn: { id: 't' + (index + 1), status: 'inProgress', startedAt: 1789516900, items: [] } }); play(); }
+  // Past the run's own turn cap nothing more can be needed; each turn gets its own tick so output is never lost to the stack.
+  if (turn.next && index < 150) { notice('turn/started', { turn: { id: 't' + (index + 1), status: 'inProgress', startedAt: 1789516900, items: [] } }); setImmediate(play); }
 };
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const request = JSON.parse(line); const reply = result => send({ id: request.id, result });
