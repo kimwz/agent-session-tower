@@ -17,6 +17,13 @@ import type { Prepared, TurnHost, TurnExit } from './turn-host.js';
  * followed by another; the last look is the manager's. `start` marks the run running once the manager registered the
  * handle; the adapter's end is reported once, through `host.exited`, and only for a registered turn.
  */
+/** A first line of exactly `/goal resume` asks to lift a blocked or paused goal; the rest is the turn's message. */
+export function goalResumption(prompt: string): { prompt: string } | undefined {
+  const match = /^\/goal resume[ \t]*(?:\r?\n|$)/.exec(prompt);
+  if (!match) return undefined;
+  return { prompt: prompt.slice(match[0].length).trim() || 'Continue the goal.' };
+}
+
 export async function prepareCodexTurn(host: TurnHost, run: Run, session: Session, creating: boolean): Promise<Prepared<CodexStdioRun>> {
   const executable = await host.executable('codex');
   if (!executable) throw new Error('Codex CLI is no longer available in PATH.');
@@ -45,6 +52,7 @@ export async function prepareCodexTurn(host: TurnHost, run: Run, session: Sessio
   const env = turnEnv(host.options.env, master, tools, host.options.launchMarks);
   const mcpServers = codexMcpServers(tools.servers, Boolean(master));
   if (tools.towerTools) run.towerTools = tools.towerTools;
+  const resumption = !master && run.origin?.kind === 'owner' ? goalResumption(run.prompt) : undefined;
   const codexReplies = master ? new ReplyLog(run, Date.now) : undefined;
   const handle = await (host.options.openCodexStdio ?? openCodexStdioRun)({
     executable, cwd: session.cwd, env, spawnProcess: host.options.spawnProcess,
@@ -52,7 +60,9 @@ export async function prepareCodexTurn(host: TurnHost, run: Run, session: Sessio
     ...(!creating ? { threadId: session.nativeId } : {}),
     ...codexReviewer(run, creating, Boolean(mcpServers?.tower_slack)),
     ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
-    prompt: attachmentPrompt(run.prompt, attachments),
+    prompt: attachmentPrompt(resumption?.prompt ?? run.prompt, attachments),
+    ...(!master ? { continueGoal: () => !host.stopping() && !host.updating() } : {}),
+    ...(resumption ? { resumeGoal: true } : {}),
     ...(run.instructions?.text ? { instructions: run.instructions.text } : {}),
     imagePaths: imagePaths(attachments),
     onSession: async id => {

@@ -38,6 +38,11 @@ export interface CodexStdioOptions {
   prompt: string;
   imagePaths?: readonly string[];
   spawnProcess?: SpawnProcess;
+  /** Asked when a turn ends with the thread's goal active: true keeps the run for the turn Codex starts next. */
+  continueGoal?(): boolean;
+  goalFollowMs?: number;
+  /** The owner asked for the thread's blocked or paused goal to go on. */
+  resumeGoal?: boolean;
   onSession(id: string): void | Promise<void>;
   onStarted?(turnId: string, startedAt?: string): void;
   onOutput(text: string): void;
@@ -67,6 +72,13 @@ const requestId = (value: unknown): value is RequestId => typeof value === 'stri
 const timestamp = (seconds: unknown): string | undefined => typeof seconds === 'number' && Number.isFinite(seconds) && Math.abs(seconds) < 8_640_000_000_000 ? new Date(seconds * 1000).toISOString() : undefined;
 /** How Codex names the setting when it refuses a reviewer it does not know. */
 const REVIEWER_REFUSAL = /approvals_?reviewer|auto_review/i;
+/** How long a finished turn waits for Codex to start the next turn of an active goal; it starts at once when it does. */
+const GOAL_FOLLOW_MS = 5000;
+/** Codex keeps an active goal going even when a turn only talks: this many such turns in a row end the run. */
+const GOAL_IDLE_TURNS = 3;
+const GOAL_MAX_TURNS = 100;
+const NOT_WORK = new Set(['agentMessage', 'reasoning', 'userMessage', 'plan', 'contextCompaction']);
+const RESUMABLE_GOAL = new Set(['blocked', 'paused']);
 const approvalError = () => new TowerError('conflict', 'This approval is no longer pending. Refresh the conversation.');
 
 /** A dedicated stdio process owns only this run. Never connect it to the desktop daemon. */
@@ -120,6 +132,12 @@ class StdioRun implements CodexStdioRun {
   private seenRequests = new Set<string>();
   private rootStartedAt?: number;
   private closedThreads = new Set<string>();
+  /** The root thread's goal as Codex last reported it; Codex reports it on resume and before each turn ends. */
+  private goalStatus?: string;
+  private goalTurns = 1;
+  private idleTurns = 0;
+  private turnWorked = false;
+  private following?: { timer: ReturnType<typeof setTimeout>; finishedAt?: string };
 
   constructor(private readonly options: CodexStdioOptions) {
     this.done = new Promise(resolve => { this.resolveDone = resolve; });
@@ -134,7 +152,7 @@ class StdioRun implements CodexStdioRun {
   }
 
   canSteer(): boolean {
-    return !this.result && !this.cancelRequested && !this.steeringPending && !!this.turnId;
+    return !this.result && !this.cancelRequested && !this.steeringPending && !!this.turnId && !this.following;
   }
 
   async steer(input: SteeringInput): Promise<void> {
@@ -237,6 +255,8 @@ class StdioRun implements CodexStdioRun {
     this.options.onStarted?.(turnId, timestamp(started.turn.startedAt));
     const early = this.early;
     this.early = []; this.earlyBytes = 0;
+    // Inside the submitted turn, so that an idle thread does not start a continuation of its own first.
+    if (this.options.resumeGoal) void this.resumeGoal(id).catch(error => this.options.onOutput(`[Tower] The goal could not be resumed: ${message(error)}\n`));
     for (const frame of early) { if (this.result) break; this.dispatch(frame); }
     if (!this.result && ['completed', 'failed', 'interrupted'].includes(started.turn.status)) this.finishTurn(started.turn);
   }
@@ -337,8 +357,17 @@ class StdioRun implements CodexStdioRun {
       }
       return;
     }
+    if ((value.method === 'thread/goal/updated' || value.method === 'thread/goal/cleared') && threadId === (this.threadId ?? this.options.threadId)) {
+      this.goalStatus = value.method === 'thread/goal/updated' && typeof params.goal?.status === 'string' ? params.goal.status : undefined;
+      if (this.following && this.goalStatus !== 'active') this.stopFollowing();
+      return;
+    }
     const turnId = params.turnId || params.turn?.id;
     if (typeof turnId !== 'string' || !turnId) return;
+    if (this.following && threadId === this.threadId && value.method === 'turn/started' && record(params.turn) && params.turn.status === 'inProgress' && turnId !== this.turnId) {
+      this.adoptContinuation(turnId, params.turn);
+      return;
+    }
     if (threadId === this.threadId && turnId !== this.turnId) return;
     if (value.method === 'turn/started' && record(params.turn) && threadId !== this.threadId) {
       if (params.turn.status !== 'inProgress' || this.retiredTurns.has(scoped(threadId, turnId))) return;
@@ -361,6 +390,7 @@ class StdioRun implements CodexStdioRun {
       // Cache exact identities even when a descendant's metadata has not arrived yet.
       if (this.items.size >= 256 && !this.items.has(key)) throw new Error('Codex sent too many unfinished items.');
       this.items.set(key, params.item);
+      if (threadId === this.threadId && !NOT_WORK.has(String(params.item.type))) this.turnWorked = true;
     } else if (threadId === this.threadId && value.method === 'item/agentMessage/delta' && typeof params.itemId === 'string' && typeof params.delta === 'string') {
       const streamed = (this.streamedText.get(key) || '') + params.delta;
       if (streamed.length > MAX_FRAME || this.streamedText.size >= 256 && !this.streamedText.has(key)) throw new Error('Codex sent too much unfinished message output.');
@@ -510,10 +540,51 @@ class StdioRun implements CodexStdioRun {
   private finishTurn(turn: RecordValue): void {
     if (Array.isArray(turn.items)) for (const item of turn.items) if (record(item)) this.completeItem(item);
     const finishedAt = timestamp(turn.completedAt);
-    if (turn.status === 'completed') this.finish({ status: 'completed', finishedAt });
+    if (turn.status === 'completed') { if (!this.followGoal(finishedAt)) this.finish({ status: 'completed', finishedAt }); }
     else if (turn.status === 'interrupted') this.finish({ status: 'cancelled', finishedAt });
     else if (turn.status === 'failed') this.finish({ status: 'error', error: String(turn.error?.message || 'The Codex task failed.'), finishedAt });
     else this.finish({ status: 'error', error: 'Codex did not confirm a terminal turn status.' });
+  }
+
+  /** With an active goal Codex starts the next turn by itself; the run stays, with its tools, for as long as that goes on. */
+  private followGoal(finishedAt?: string): boolean {
+    if (this.goalStatus !== 'active' || this.cancelRequested || !this.options.continueGoal?.()) return false;
+    this.idleTurns = this.turnWorked ? 0 : this.idleTurns + 1;
+    if (this.idleTurns >= GOAL_IDLE_TURNS || this.goalTurns >= GOAL_MAX_TURNS) {
+      this.options.onOutput(`\n[Tower] The goal is still active, but Tower ended this run after ${this.idleTurns >= GOAL_IDLE_TURNS ? `${GOAL_IDLE_TURNS} turns in a row without any work` : `${GOAL_MAX_TURNS} turns`}.\n`);
+      return false;
+    }
+    const timer = setTimeout(() => this.stopFollowing(), this.options.goalFollowMs ?? GOAL_FOLLOW_MS);
+    timer.unref();
+    this.following = { timer, finishedAt };
+    return true;
+  }
+
+  private stopFollowing(status: 'completed' | 'cancelled' = 'completed'): void {
+    const following = this.following;
+    if (!following) return;
+    clearTimeout(following.timer);
+    this.following = undefined;
+    this.finish({ status, finishedAt: following.finishedAt });
+  }
+
+  private adoptContinuation(turnId: string, turn: RecordValue): void {
+    clearTimeout(this.following!.timer);
+    this.following = undefined;
+    this.retireTurn(this.threadId!, this.turnId);
+    this.turnId = turnId;
+    this.goalTurns++;
+    this.turnWorked = false;
+    this.liveTurns.set(this.threadId!, { id: turnId, startedAt: typeof turn.startedAt === 'number' ? turn.startedAt : undefined, observed: true });
+  }
+
+  /** The owner's explicit `/goal resume`: what stopped the goal is theirs to lift. A finished goal stays finished. */
+  private async resumeGoal(threadId: string): Promise<void> {
+    const found = await this.request('thread/goal/get', { threadId }, false);
+    if (this.result) return;
+    const status = record(found?.goal) ? found.goal.status : undefined;
+    if (typeof status === 'string' && RESUMABLE_GOAL.has(status)) await this.request('thread/goal/set', { threadId, status: 'active' }, false);
+    else this.options.onOutput(`[Tower] No goal to resume${typeof status === 'string' ? ` (it is ${status})` : ''}.\n`);
   }
 
   private approval(rpcId: RequestId, method: string, params: RecordValue, turnId: string): void {
@@ -622,6 +693,7 @@ class StdioRun implements CodexStdioRun {
       this.cancelTimer = setTimeout(() => this.finish({ status: 'error', error: 'Could not confirm Codex cancellation. The owned process was stopped; check the native conversation before retrying.' }), 12_000);
       this.cancelTimer.unref();
       if (!this.submitted) this.finish({ status: 'cancelled' });
+      else if (this.following) this.stopFollowing('cancelled');
       else {
         await this.startPromise?.catch(() => {});
         if (!this.result && this.turnId && this.threadId) {
@@ -646,6 +718,7 @@ class StdioRun implements CodexStdioRun {
   private finish(result: CodexStdioResult): void {
     if (this.result) return;
     this.result = result;
+    if (this.following) { clearTimeout(this.following.timer); this.following = undefined; }
     if (this.cancelTimer) clearTimeout(this.cancelTimer);
     if (this.exitTimer) clearTimeout(this.exitTimer);
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error(result.error || 'The Codex run ended.')); }
