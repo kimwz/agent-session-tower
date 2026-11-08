@@ -1199,8 +1199,10 @@ export class RunManager extends EventEmitter {
     } else if (exit.kind === 'codex') {
       const { result, started } = exit;
       this.stdio.delete(run.id); this.reservedSessions.delete(session.id); delete run.approvals;
+      // A run that completes without a turn (`/goal resume` with nothing to lift) has settled too.
+      if (started || result.status === 'completed') this.settledRuns.add(run.id);
       if (started) {
-        this.settledRuns.add(run.id); this.locallySettled.delete(session.id); this.locallySettled.set(session.id, Date.now());
+        this.locallySettled.delete(session.id); this.locallySettled.set(session.id, Date.now());
         if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
       }
       if (!FINISHED.has(run.status)) {

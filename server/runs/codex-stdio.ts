@@ -137,8 +137,6 @@ class StdioRun implements CodexStdioRun {
   private goalTurns = 1;
   private idleTurns = 0;
   private turnWorked = false;
-  private activating = false;
-  private endedWhileActivating?: RecordValue;
   private following?: { timer: ReturnType<typeof setTimeout>; finishedAt?: string };
 
   constructor(private readonly options: CodexStdioOptions) {
@@ -254,13 +252,17 @@ class StdioRun implements CodexStdioRun {
     if (this.result) return;
     if (typeof started?.turn?.id !== 'string' || !started.turn.id) throw new Error('Codex did not confirm the submitted turn ID. The request was not resent.');
     const turnId: string = started.turn.id;
+    // Inside the submitted turn, so an idle thread starts no continuation of its own first. Until `turnId` is set,
+    // whatever Codex sends waits in `early`, in order, and is judged knowing the answer.
+    if (resumable) await this.activateGoal(id);
+    if (this.result) return;
     this.turnId = turnId;
     this.rootStartedAt = typeof started.turn.startedAt === 'number' ? started.turn.startedAt : undefined;
     this.liveTurns.set(id, { id: turnId, startedAt: this.rootStartedAt, observed: true });
     this.options.onStarted?.(turnId, timestamp(started.turn.startedAt));
     const early = this.early;
     this.early = []; this.earlyBytes = 0;
-    if (resumable) await this.activateGoal(id);
+
     for (const frame of early) { if (this.result) break; this.dispatch(frame); }
     if (!this.result && ['completed', 'failed', 'interrupted'].includes(started.turn.status)) this.finishTurn(started.turn);
   }
@@ -544,8 +546,6 @@ class StdioRun implements CodexStdioRun {
   private finishTurn(turn: RecordValue): void {
     if (Array.isArray(turn.items)) for (const item of turn.items) if (record(item)) this.completeItem(item);
     const finishedAt = timestamp(turn.completedAt);
-    // What the turn ended with is decided once the goal it was to resume is settled.
-    if (this.activating) { this.endedWhileActivating = turn; return; }
     if (turn.status === 'completed') { if (!this.followGoal(finishedAt)) this.finish({ status: 'completed', finishedAt }); }
     else if (turn.status === 'interrupted') this.finish({ status: 'cancelled', finishedAt });
     else if (turn.status === 'failed') this.finish({ status: 'error', error: String(turn.error?.message || 'The Codex task failed.'), finishedAt });
@@ -595,15 +595,9 @@ class StdioRun implements CodexStdioRun {
     return false;
   }
 
-  /** Inside the submitted turn, so that an idle thread does not start a continuation of its own first. */
   private async activateGoal(threadId: string): Promise<void> {
-    this.activating = true;
     try { await this.request('thread/goal/set', { threadId, status: 'active' }, false); this.goalStatus = 'active'; }
     catch (error) { this.options.onOutput(`[Tower] The goal could not be resumed: ${message(error)}\n`); }
-    this.activating = false;
-    const ended = this.endedWhileActivating;
-    this.endedWhileActivating = undefined;
-    if (ended && !this.result) this.finishTurn(ended);
   }
 
   private approval(rpcId: RequestId, method: string, params: RecordValue, turnId: string): void {

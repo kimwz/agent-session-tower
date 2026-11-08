@@ -4,9 +4,11 @@ import { evaluate, type HttpOutcome } from './http.js';
 const MAX_PAYLOAD_BODY = 16_000;
 /** The line an open-issues run ends its report with to keep its issue open. */
 export const KEEP_OPEN = 'TOWER_KEEP_ISSUE_OPEN';
-/** Whether a report ends with the line asking Tower to keep its issue open; a mention elsewhere does not count. */
+/** Whether a report ends with the line asking Tower to keep its issue open; a mention elsewhere does not count, and Tower's own closing note is not the report. */
 export function asksToKeepOpen(output: string): boolean {
-  return output.trimEnd().split('\n').at(-1)?.trim() === KEEP_OPEN;
+  const lines = output.trimEnd().split('\n');
+  while (lines.length > 1 && (lines.at(-1)!.startsWith('[Tower] ') || !lines.at(-1)!.trim())) lines.pop();
+  return lines.at(-1)?.trim() === KEEP_OPEN;
 }
 /** The issue an open-issues event is about, as the check recorded it. */
 export function issueRef(event: TriggerEvent): { repository: string; number: number } | undefined {

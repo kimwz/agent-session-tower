@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioResult } from '../../../server/runs/codex-stdio.js';
 import { goalResumption } from '../../../server/runs/codex-turn.js';
+import { asksToKeepOpen, KEEP_OPEN } from '../../../server/triggers/text.js';
 import { until } from '../../helpers/until.ts';
 
 const ID = '10000000-0000-4000-8000-000000000001';
@@ -139,8 +140,8 @@ test('/goal resume lifts a blocked or paused goal inside the submitted turn and 
     assert.ok(start >= 0 && set > start); assert.equal(f.sent[set].params?.status, 'active');
   }
   // The turn can end before Codex confirms the goal is active: the answer still decides what the run does.
-  const fast = await fixture(t, [{ work: true }], { resumedGoal: 'blocked', resumeGoal: true, setDelay: 30, goalFollowMs: 20 });
-  await ended(fast); assert.equal(fast.sent.some(frame => frame.method === 'thread/goal/set'), true); assert.equal(fast.finished[0].status, 'completed');
+  const fast = await fixture(t, [{ work: true, goal: 'active', next: true }, { work: true, goal: 'complete' }], { resumedGoal: 'blocked', resumeGoal: true, setDelay: 30 });
+  await ended(fast); assert.equal(fast.finished[0].status, 'completed'); assert.match(fast.text(), /reply 1/);
   for (const [goal, seen] of [['complete', /it is complete/], ['none', /No goal to resume/]] as const) {
     const f = await fixture(t, [{ work: true }], { resumedGoal: goal, resumeGoal: true });
     assert.equal((await ended(f)).status, 'completed');
@@ -153,4 +154,10 @@ test('only a first line of exactly /goal resume asks for it', () => {
   assert.deepEqual(goalResumption('/goal resume'), { prompt: 'Continue the goal.' });
   assert.deepEqual(goalResumption('/goal resume  \nFinish it'), { prompt: 'Finish it' });
   for (const text of ['please /goal resume', '/goal resumes', '/goal 게임 완료', ' /goal resume']) assert.equal(goalResumption(text), undefined, text);
+});
+
+test('Tower\'s closing note does not hide the line a report keeps its issue open with', () => {
+  assert.equal(asksToKeepOpen(`Blocked.\n${KEEP_OPEN}\n\n[Tower] The goal is still active, but Tower ended this run after 100 turns.\n`), true);
+  assert.equal(asksToKeepOpen('Done.\n[Tower] note\n'), false);
+  assert.equal(asksToKeepOpen(`${KEEP_OPEN} mentioned\nDone.`), false);
 });
