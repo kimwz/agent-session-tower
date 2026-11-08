@@ -137,6 +137,8 @@ class StdioRun implements CodexStdioRun {
   private goalTurns = 1;
   private idleTurns = 0;
   private turnWorked = false;
+  private activating = false;
+  private endedWhileActivating?: RecordValue;
   private following?: { timer: ReturnType<typeof setTimeout>; finishedAt?: string };
 
   constructor(private readonly options: CodexStdioOptions) {
@@ -238,6 +240,9 @@ class StdioRun implements CodexStdioRun {
     this.threadId = id;
     await this.options.onSession(id);
     if (this.result || this.cancelRequested) { if (!this.result) this.finish({ status: 'cancelled' }); return; }
+    const resumable = this.options.resumeGoal ? await this.resumableGoal(id) : false;
+    if (this.result) return;
+    if (this.options.resumeGoal && !resumable) { this.finish({ status: 'completed' }); return; }
     this.submitted = true;
     const started = await this.request('turn/start', {
       threadId: id,
@@ -255,8 +260,7 @@ class StdioRun implements CodexStdioRun {
     this.options.onStarted?.(turnId, timestamp(started.turn.startedAt));
     const early = this.early;
     this.early = []; this.earlyBytes = 0;
-    // Inside the submitted turn, so that an idle thread does not start a continuation of its own first.
-    if (this.options.resumeGoal) void this.resumeGoal(id).catch(error => this.options.onOutput(`[Tower] The goal could not be resumed: ${message(error)}\n`));
+    if (resumable) await this.activateGoal(id);
     for (const frame of early) { if (this.result) break; this.dispatch(frame); }
     if (!this.result && ['completed', 'failed', 'interrupted'].includes(started.turn.status)) this.finishTurn(started.turn);
   }
@@ -540,6 +544,8 @@ class StdioRun implements CodexStdioRun {
   private finishTurn(turn: RecordValue): void {
     if (Array.isArray(turn.items)) for (const item of turn.items) if (record(item)) this.completeItem(item);
     const finishedAt = timestamp(turn.completedAt);
+    // What the turn ended with is decided once the goal it was to resume is settled.
+    if (this.activating) { this.endedWhileActivating = turn; return; }
     if (turn.status === 'completed') { if (!this.followGoal(finishedAt)) this.finish({ status: 'completed', finishedAt }); }
     else if (turn.status === 'interrupted') this.finish({ status: 'cancelled', finishedAt });
     else if (turn.status === 'failed') this.finish({ status: 'error', error: String(turn.error?.message || 'The Codex task failed.'), finishedAt });
@@ -569,6 +575,7 @@ class StdioRun implements CodexStdioRun {
   }
 
   private adoptContinuation(turnId: string, turn: RecordValue): void {
+    if (this.cancelRequested || !this.options.continueGoal?.()) { this.stopFollowing(); return; }
     clearTimeout(this.following!.timer);
     this.following = undefined;
     this.retireTurn(this.threadId!, this.turnId);
@@ -578,13 +585,25 @@ class StdioRun implements CodexStdioRun {
     this.liveTurns.set(this.threadId!, { id: turnId, startedAt: typeof turn.startedAt === 'number' ? turn.startedAt : undefined, observed: true });
   }
 
-  /** The owner's explicit `/goal resume`: what stopped the goal is theirs to lift. A finished goal stays finished. */
-  private async resumeGoal(threadId: string): Promise<void> {
-    const found = await this.request('thread/goal/get', { threadId }, false);
-    if (this.result) return;
-    const status = record(found?.goal) ? found.goal.status : undefined;
-    if (typeof status === 'string' && RESUMABLE_GOAL.has(status)) await this.request('thread/goal/set', { threadId, status: 'active' }, false);
-    else this.options.onOutput(`[Tower] No goal to resume${typeof status === 'string' ? ` (it is ${status})` : ''}.\n`);
+  /** The owner's explicit `/goal resume`: what stopped the goal is theirs to lift. Nothing to lift means no turn at all. */
+  private async resumableGoal(threadId: string): Promise<boolean> {
+    let status: unknown;
+    try { const found = await this.request('thread/goal/get', { threadId }, false); status = record(found?.goal) ? found.goal.status : undefined; }
+    catch (error) { this.options.onOutput(`[Tower] The goal could not be read: ${message(error)}\n`); return false; }
+    if (typeof status === 'string' && RESUMABLE_GOAL.has(status)) return true;
+    this.options.onOutput(`[Tower] No goal to resume${typeof status === 'string' ? ` (it is ${status})` : ''}. Nothing was sent.\n`);
+    return false;
+  }
+
+  /** Inside the submitted turn, so that an idle thread does not start a continuation of its own first. */
+  private async activateGoal(threadId: string): Promise<void> {
+    this.activating = true;
+    try { await this.request('thread/goal/set', { threadId, status: 'active' }, false); this.goalStatus = 'active'; }
+    catch (error) { this.options.onOutput(`[Tower] The goal could not be resumed: ${message(error)}\n`); }
+    this.activating = false;
+    const ended = this.endedWhileActivating;
+    this.endedWhileActivating = undefined;
+    if (ended && !this.result) this.finishTurn(ended);
   }
 
   private approval(rpcId: RequestId, method: string, params: RecordValue, turnId: string): void {

@@ -36,21 +36,21 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   if (request.method === 'thread/resume') { reply({ thread: { id: threadId, status: { type: 'idle' } }, approvalPolicy: 'on-request' }); if (goal) notice('thread/goal/updated', { turnId: null, goal: { status: goal } }); return; }
   if (request.method === 'turn/start') { reply({ turn: { id: 't0', status: 'inProgress', startedAt: 1789516800, items: [] } }); index = -1; setTimeout(play, Number(process.env.START_DELAY || 0)); return; }
   if (request.method === 'thread/goal/get') return reply({ goal: goal ? { status: goal } : null });
-  if (request.method === 'thread/goal/set') { goal = request.params.status; reply({ goal: { status: goal } }); notice('thread/goal/updated', { turnId: null, goal: { status: goal } }); return; }
+  if (request.method === 'thread/goal/set') { goal = request.params.status; setTimeout(() => { reply({ goal: { status: goal } }); notice('thread/goal/updated', { turnId: null, goal: { status: goal } }); }, Number(process.env.SET_DELAY || 0)); return; }
   if (request.method === 'turn/steer') return reply({ turnId: request.params.expectedTurnId });
   if (request.method === 'turn/interrupt') { reply({}); setTimeout(() => notice('turn/completed', { turn: { id: request.params.turnId, status: 'interrupted', items: [] } }), 10); }
 });
 `;
 
-async function fixture(t: TestContext, turns: Turn[], overrides: Partial<CodexStdioOptions> & { resumedGoal?: string; startDelay?: number } = {}) {
+async function fixture(t: TestContext, turns: Turn[], overrides: Partial<CodexStdioOptions> & { resumedGoal?: string; startDelay?: number; setDelay?: number } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-codex-goal-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const script = join(directory, 'provider.mjs');
   await writeFile(script, PROVIDER);
   const sent: Array<{ method?: string; params?: Record<string, unknown> }> = [], output: string[] = [], finished: CodexStdioResult[] = [];
-  const { resumedGoal, startDelay, ...options } = overrides;
+  const { resumedGoal, startDelay, setDelay, ...options } = overrides;
   const run = await openCodexStdioRun({ executable: '/fixture/codex', cwd: directory, threadId: ID, prompt: 'go', continueGoal: () => true, goalFollowMs: 40,
-    env: { ...process.env, TURNS: JSON.stringify(turns), RESUMED_GOAL: resumedGoal ?? 'none', START_DELAY: String(startDelay ?? 0) },
+    env: { ...process.env, TURNS: JSON.stringify(turns), RESUMED_GOAL: resumedGoal ?? 'none', START_DELAY: String(startDelay ?? 0), SET_DELAY: String(setDelay ?? 0) },
     spawnProcess(_executable, args, spawned) {
       const child = spawn(process.execPath, [script, ...args], spawned);
       const write = child.stdin.write.bind(child.stdin);
@@ -111,6 +111,11 @@ test('update drain or a stopping worker ends following at the turn end', async t
   const absent = await fixture(t, [{ work: true, goal: 'active', next: true }, { work: true, goal: 'active' }], { continueGoal: undefined });
   await ended(absent); assert.equal(absent.text().includes('reply 1'), false);
 });
+test('a drain that starts while waiting for the next turn is honoured when that turn starts', async t => {
+  let allowed = true;
+  const f = await fixture(t, [{ work: true, goal: 'active', next: true }, { work: true, hold: true }], { continueGoal: () => { const now = allowed; allowed = false; return now; } });
+  assert.equal((await ended(f)).status, 'completed');
+});
 test('steering and cancelling reach the continuation turn; between turns steering waits and cancel ends the run', async t => {
   const f = await fixture(t, [{ work: true, goal: 'active', next: true }, { work: true, hold: true }]);
   await until(() => f.text().includes('reply 1'));
@@ -133,10 +138,13 @@ test('/goal resume lifts a blocked or paused goal inside the submitted turn and 
     const start = f.sent.findIndex(frame => frame.method === 'turn/start'), set = f.sent.findIndex(frame => frame.method === 'thread/goal/set');
     assert.ok(start >= 0 && set > start); assert.equal(f.sent[set].params?.status, 'active');
   }
+  // The turn can end before Codex confirms the goal is active: the answer still decides what the run does.
+  const fast = await fixture(t, [{ work: true }], { resumedGoal: 'blocked', resumeGoal: true, setDelay: 30, goalFollowMs: 20 });
+  await ended(fast); assert.equal(fast.sent.some(frame => frame.method === 'thread/goal/set'), true); assert.equal(fast.finished[0].status, 'completed');
   for (const [goal, seen] of [['complete', /it is complete/], ['none', /No goal to resume/]] as const) {
-    const f = await fixture(t, [{ work: true }], { resumedGoal: goal, resumeGoal: true, startDelay: 30 });
-    await until(() => f.text().includes('reply 0') && f.finished.length === 1);
-    assert.equal(f.sent.some(frame => frame.method === 'thread/goal/set'), false); assert.match(f.text(), seen);
+    const f = await fixture(t, [{ work: true }], { resumedGoal: goal, resumeGoal: true });
+    assert.equal((await ended(f)).status, 'completed');
+    assert.equal(f.sent.some(frame => frame.method === 'thread/goal/set' || frame.method === 'turn/start'), false); assert.match(f.text(), seen);
   }
   const plain = await fixture(t, [{ work: true }], { resumedGoal: 'blocked' });
   await ended(plain); assert.equal(plain.sent.some(frame => String(frame.method).startsWith('thread/goal')), false);
