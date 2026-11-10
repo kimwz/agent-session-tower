@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { MASTER_FOLDER, TODO_MASTER_TASK_ID, TODO_MASTERS_FOLDER } from '../../shared/master.js';
+import { MASTER_FOLDER, TODO_MASTER_TASK_ID, TODO_MASTERS_FOLDER, type MasterRef } from '../../shared/master.js';
 import type { Session } from '../../shared/types.js';
 
 /**
@@ -26,15 +26,17 @@ export const MASTER_TOOL_TIMEOUT_SECONDS = 300;
 /** The master tools that hand work to a session: each is exactly one tower_api call (see MasterTools). */
 export const SESSION_START_TOOL = 'session_start';
 export const SESSION_MESSAGE_TOOL = 'session_message';
+/** How a master answers another master's request: Tower reports the result to that master (MasterSession.reply). */
+export const MASTER_REPLY_TOOL = 'master_reply';
 
 /**
  * Tools a master turn (the main master's and an issue master's) calls without the provider's approval review, by the
  * server that offers them. Handing work out does nothing by itself: the receiving session's own turn runs under its own
  * permission mode, where what the work actually does is reviewed. Judging the handed-out text instead stopped the
- * master's delegations (#217). The rest of tower_api reaches every route the owner's pages can and keeps the review.
+ * master's delegations (#217). Answering another master's request only hands its text to Tower to report. The rest of tower_api reaches every route the owner's pages can and keeps the review.
  */
 export const MASTER_APPROVED_TOOLS: Readonly<Record<string, readonly string[]>> = {
-  tower_master: [SESSION_START_TOOL, SESSION_MESSAGE_TOOL],
+  tower_master: [SESSION_START_TOOL, SESSION_MESSAGE_TOOL, MASTER_REPLY_TOOL],
   tower: ['autoPrompt_submit'],
 };
 
@@ -51,9 +53,13 @@ function canonical(path: string): string {
  * Whether a session is the master's: it runs in the master's folder under Tower's state directory. Both sides are
  * compared with links followed, so a state directory reached through a link (as /var is on macOS) still matches.
  */
-export function subscriptionOnly(stateDir: string, cwd: string): boolean {
-  if (resolve(cwd) === join(resolve(stateDir), MASTER_FOLDER)) return true;
-  return canonical(cwd) === masterFolder(stateDir) || todoMasterTaskId(stateDir, cwd) !== undefined;
+export function subscriptionOnly(stateDir: string, cwd: string): boolean { return masterRefOf(stateDir, cwd) !== undefined; }
+/** The master whose conversation runs in this folder: the main master's, an issue master's, or none. */
+export function masterRefOf(stateDir: string, cwd: string): MasterRef | undefined {
+  if (resolve(cwd) === join(resolve(stateDir), MASTER_FOLDER)) return 'main';
+  const task = todoMasterTaskId(stateDir, cwd);
+  if (task) return `todo:${task}`;
+  return canonical(cwd) === masterFolder(stateDir) ? 'main' : undefined;
 }
 /**
  * The todo whose issue master runs in this folder: `<state>/todo-masters/<taskId>` exactly, as written or under the

@@ -83,7 +83,7 @@ test('the master session\'s tool server lists the tools and relays each call to 
     return until(() => lines.find(line => line.id === id));
   };
   const list = await ask(1, 'tools/list');
-  assert.deepEqual(list.result.tools.map((tool: { name: string }) => tool.name), ['tower_api', 'tower_query', 'session_read', 'session_start', 'session_message', 'ui', 'terminal_read']);
+  assert.deepEqual(list.result.tools.map((tool: { name: string }) => tool.name), ['tower_api', 'tower_query', 'session_read', 'session_start', 'session_message', 'ui', 'master_reply', 'terminal_read']);
   // No host runs: the call says so, and none is started.
   const absent = await ask(2, 'tools/call', { name: 'tower_api', arguments: { method: 'GET', path: '/api/snapshot' } });
   assert.equal(absent.result.isError, true);

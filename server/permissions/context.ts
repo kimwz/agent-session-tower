@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { autoReviewBlock, claudeRule, codexRule, MAX_RUN_SECONDS, type PermissionRequest, type PermissionRule } from '../../shared/permissions.js';
 import type { ChatMessage, Run, SessionDetail } from '../../shared/types.js';
 import { readFile } from 'node:fs/promises';
-import { REPORT_MARK, TOWER_NOTICE } from '../../shared/task-notification.js';
+import { MASTER_MESSAGE_MARK, REPORT_MARK, TOWER_NOTICE } from '../../shared/task-notification.js';
 import { TOWER_INSTRUCTIONS } from '../sessions/parser.js';
 import { join } from 'node:path';
 
@@ -88,7 +88,11 @@ function ownerWords(messages: ChatMessage[], runs: Run[], answers: { at: string;
   // A message whose run is gone is the owner's only as far as anyone knows: it says so, since agents send messages too.
   const sentBy = (text: string) => {
     if (text.startsWith(REPORT_MARK)) return 'tower report';
+    // Another master's message keeps saying so in its text after its run left the history (marking down only).
+    if (text.startsWith(MASTER_MESSAGE_MARK)) return 'another master';
     const found = [...runs].reverse().find(item => { const prompt = item.prompt.trim(); return Boolean(prompt) && (text === prompt || text.startsWith(`${prompt}\n\n첨부 파일 (`)); });
+    // Another master's message into a master's conversation was sent with the owner's authority but is not their word.
+    if (found?.senderMaster) return 'another master';
     return found?.origin?.kind ?? (outside ? 'unknown sender' : 'unrecorded');
   };
   for (const message of messages) {
@@ -103,7 +107,7 @@ function ownerWords(messages: ChatMessage[], runs: Run[], answers: { at: string;
     if (asked) owner.push({ at: message.timestamp, text: `Question: ${asked.text}\nAnswer: ${message.text}`, kind: 'answer' });
   }
   // Only a message history already shows word for word is left out; anything else may add to it (or limit it).
-  for (const item of runs.filter(entry => (entry.status === 'queued' || entry.status === 'running') && entry.origin?.kind === 'owner' && !entry.prompt.startsWith(TOWER_NOTICE) && !entry.prompt.startsWith(REPORT_MARK))) {
+  for (const item of runs.filter(entry => (entry.status === 'queued' || entry.status === 'running') && entry.origin?.kind === 'owner' && !entry.senderMaster && !entry.prompt.startsWith(TOWER_NOTICE) && !entry.prompt.startsWith(REPORT_MARK))) {
     if (!owner.some(word => word.kind === 'message' && word.text.trim() === item.prompt.trim())) owner.push({ at: item.createdAt, text: item.prompt, kind: 'sent, not in history yet' });
   }
   // Also in history once written there; kept anyway, since it may not be yet.

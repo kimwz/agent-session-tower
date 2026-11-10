@@ -1,4 +1,4 @@
-import type { RunDelegation, RunOrigin } from '../../shared/types.js';
+import type { RunDelegation, RunOrigin, RunSenderMaster } from '../../shared/types.js';
 import { UUID } from './saved-state.js';
 
 /** The provenance Tower keeps for a session it created. External content never leaves it. */
@@ -85,4 +85,9 @@ export function sameOrigin(a: RunOrigin | undefined, b: RunOrigin | undefined): 
   const right = b ?? { kind: 'unknown' as const };
   return left.kind === right.kind && left.workflowId === right.workflowId && left.triggerId === right.triggerId && left.eventId === right.eventId
     && left.runId === right.runId && left.controllerId === right.controllerId;
+}
+
+/** A sending master as the master host names it (`main`, or `todo:<todo id>` in the todo id grammar); anything else is none. */
+export function parseRunSenderMaster(value: unknown): RunSenderMaster | undefined {
+  return typeof value === 'string' && /^(?:main|todo:[A-Za-z0-9_-]{1,64})$/.test(value) ? value as RunSenderMaster : undefined;
 }

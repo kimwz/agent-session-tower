@@ -18,8 +18,12 @@ export const Message = memo(function Message({ message, runMatch }: { message: C
   // Marked so the chat can keep the latest of your messages in view while you read what followed it.
   // What the master agent wrote says so; the owner's own messages stay "나".
   const fromMaster = message.role === 'user' && runMatch?.sender === 'master';
+  // Another master's message into a master's conversation names that master; an issue master's opens its todo.
+  const task = fromMaster && runMatch?.senderMaster?.startsWith('todo:') ? runMatch.senderMaster.slice('todo:'.length) : undefined;
+  const author = !fromMaster ? undefined : !runMatch?.senderMaster ? t("마스터 에이전트") : task === undefined ? t("메인 마스터")
+    : <a href={`?view=todo&task=${encodeURIComponent(task)}`} title={t("보낸 이슈마스터의 할 일 열기")}>{t("이슈마스터")}</a>;
   return <article className={`chat-message ${message.role} ${fromMaster ? 'from-master' : ''} ${message.isError ? 'message-error' : ''}`} {...message.role === 'user' ? { 'data-user-message': message.id } : {}}>
-    <div className="message-meta"><span>{fromMaster ? <><Bot size={12} aria-hidden />{t("마스터 에이전트")}</> : message.role === 'user' ? t("나") : t("에이전트")}</span><time dateTime={message.timestamp}>{absoluteTime(message.timestamp)}</time></div>
+    <div className="message-meta"><span>{fromMaster ? <><Bot size={12} aria-hidden />{author}</> : message.role === 'user' ? t("나") : t("에이전트")}</span><time dateTime={message.timestamp}>{absoluteTime(message.timestamp)}</time></div>
     <div className="message-content">{text && <div className={long && !expanded ? 'message-truncated' : undefined}><Markdown images={message.images} lineBreaks={fromMaster}>{long && !expanded ? `${text.slice(0, 2100)}…` : text}</Markdown></div>}<ChatImages images={message.images?.filter(image => ![...text.matchAll(/!\[[^\]]*\]\(<?([^>\n]*?)>?\)/g)].some(match => match[1] === image.source))} />{!!runMatch?.attachments?.length && <SavedAttachments attachments={runMatch.attachments} />}</div>
     {long && <button className="text-button message-expand" onClick={() => setExpanded(!expanded)}>{expanded ? t("간략히 보기") : t("메시지 전체 보기")}<ChevronDown size={12} className={expanded ? 'rotate' : ''} /></button>}
   </article>;

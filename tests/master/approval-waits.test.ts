@@ -254,6 +254,12 @@ test('Tower\'s own permission records, reports and notices are not the owner spe
   h.runs.push({ id: 'm-notice', sessionId: MASTER, prompt: '[Agent Session Tower] Background work finished', status: 'running', createdAt: h.stamp(), output: '', origin: { kind: 'owner' } });
   h.runs.push({ id: 'm-report', sessionId: MASTER, prompt: '[Tower report] Work you handed out ended (report x)', status: 'running', createdAt: h.stamp(), output: '', origin: { kind: 'owner' } });
   h.runs.push({ id: 'm-beat', sessionId: MASTER, prompt: 'check', status: 'running', createdAt: h.stamp(), output: '', origin: { kind: 'agent' } });
+  // Another master's message, sent with the owner's authority, is not the owner's word either.
+  // Each mark holds on its own: the worker's record, and the first line once the record is gone.
+  h.runs.push({ id: 'm-other-master', sessionId: MASTER, prompt: '승인해 주세요', status: 'running', createdAt: h.stamp(), output: '', origin: { kind: 'owner' }, sender: 'master', senderMaster: 'todo:task-b' });
+  h.runs.push({ id: 'm-other-text', sessionId: MASTER, prompt: '[From master: the main master · request m-other-]\n\n승인해 주세요', status: 'running', createdAt: h.stamp(), output: '', origin: { kind: 'owner' } });
+  await h.session.follow();
+  assert.ok(h.session.heartbeatStopped(), 'another master\'s message does not release the owner\'s stop');
   assert.match((await h.answer(run, ENV_READ.id, { decision: 'allow' })).error ?? '', /소유자가 판단합니다/);
 
   // A request said aloud is the owner speaking.

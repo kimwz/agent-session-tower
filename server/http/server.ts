@@ -1,5 +1,6 @@
 import type { WorkerStorageStatus } from '../../shared/storage.js';
-import { MASTER_HEARTBEAT_HEADER, TODO_MASTER_ISSUE_HEADER, TODO_MASTER_TASK_ID, type HeartbeatAdmission } from '../../shared/master.js';
+import { parseRunSenderMaster } from '../runs/origin.js';
+import { MASTER_HEARTBEAT_HEADER, MASTER_SENDER_HEADER, TODO_MASTER_ISSUE_HEADER, TODO_MASTER_TASK_ID, type HeartbeatAdmission } from '../../shared/master.js';
 import type { AttachmentStore } from '../stores/attachments.js';
 import type { AttachmentUploads } from '../stores/attachment-uploads.js';
 import { createServer, STATUS_CODES, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -390,11 +391,14 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const capability = req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()];
         // The signed-in owner's page or the verified master; never a local agent, a calling turn or loopback alone.
         const ownerProof = masterCall || (!req.headers['x-tower-agent'] && !req.headers['x-tower-master'] && capability === undefined && Boolean(auth?.session(sessionId, identity.ip)));
-        if (capability === undefined) return ownerProof ? { brokerOwnerAuthorized: true, ...(masterCall ? { sender: 'master' as const } : {}) } : undefined;
+        // Which master's own tool call this is, believed only from the verified master (its bookkeeping names none).
+        const senderMaster = masterCall ? parseRunSenderMaster(req.headers[MASTER_SENDER_HEADER.toLowerCase()]) : undefined;
+        const sender = masterCall ? { sender: 'master' as const, ...(senderMaster ? { senderMaster } : {}) } : {};
+        if (capability === undefined) return ownerProof ? { brokerOwnerAuthorized: true, ...sender } : undefined;
         if (!identity.local || typeof capability !== 'string' || !/^[a-f\d]{64}$/.test(capability)) {
           throw new TowerError('forbidden', 'A calling turn must use its local reporting credential.');
         }
-        return { callerCapability: capability, ...(masterCall ? { sender: 'master' as const } : {}) };
+        return { callerCapability: capability, ...sender };
       };
       if (req.method === 'POST') {
         const header = req.headers[REQUEST_TOKEN_HEADER.toLowerCase()];

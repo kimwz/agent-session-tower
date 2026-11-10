@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { TODO_MASTER_ISSUE_HEADER, TODO_MASTERS_FOLDER, type MasterBinding } from '../../shared/master.js';
+import { MASTER_SENDER_HEADER, masterRefTask, TODO_MASTER_ISSUE_HEADER, TODO_MASTERS_FOLDER, type MasterBinding, type MasterRef } from '../../shared/master.js';
 import type { Session, Snapshot } from '../../shared/types.js';
 import { newestIssueMaster, todoMasterTaskId } from '../runs/subscription.js';
 import { clearClosedIssueFiles } from './issue-files.js';
@@ -31,8 +31,8 @@ export interface IssueMastersOptions {
   readDb?: ReadDatabase;
   /** The owner's screen, shared with the main master. */
   screen: MasterScreen;
-  /** The main master's session. */
-  main: { binding(): MasterBinding | undefined };
+  /** The main master's session, and the main master itself (once it is made). */
+  main: { binding(): MasterBinding | undefined; session?(): MasterSession | undefined };
   followMs?: number;
   /** Tests shorten the wait before a refused report goes again. */
   reportRetryMs?: number;
@@ -60,6 +60,8 @@ export class IssueMasters {
   /** The sessions the issue masters are bound to. */
   private bound = new Set<string>();
   private readonly parents = new Map<string, string>();
+  /** Each todo's master in the last snapshot looked at between refreshes (`bindingNow`). */
+  private newest?: { snapshot: Snapshot; masters: Map<string, Session> };
 
   constructor(private readonly options: IssueMastersOptions) {}
 
@@ -95,6 +97,11 @@ export class IssueMasters {
   masterSession(id: string): boolean {
     return id === this.options.main.binding()?.sessionId || this.bound.has(id) || this.folderSessions().has(id);
   }
+  /** A master open now, by its ref: the main master, or the issue master followed for that todo. */
+  master(ref: MasterRef): MasterSession | undefined {
+    const task = masterRefTask(ref);
+    return task === undefined ? this.options.main.session?.() : this.instances.get(task)?.session;
+  }
   masterRun(id: string, self = ''): boolean {
     const owner = this.turns.get(id);
     return owner !== undefined && owner !== self;
@@ -117,7 +124,7 @@ export class IssueMasters {
     if (!this.instances.has(taskId)) await this.refresh();
     const tools = this.instances.get(taskId)?.tools ?? (this.untracked ??= new MasterTools({ tower: this.options.tower, live: this.options.live, ...(this.options.readDb ? { readDb: this.options.readDb } : {}),
       scope: 'untracked', screen: this.options.screen, started: async () => {}, delegated: () => ({ name: 'delegated', columns: ['id', 'title', 'state', 'session_id', 'node', 'created_at', 'report', 'outcome'], rows: [] }) }));
-    return tools.call(name, args, { [TODO_MASTER_ISSUE_HEADER]: taskId });
+    return tools.call(name, args, { [TODO_MASTER_ISSUE_HEADER]: taskId, [MASTER_SENDER_HEADER]: `todo:${taskId}` });
   }
 
   /** One look at Tower's sessions: issue masters to follow, to let go of, and old files to clear away. */
@@ -134,18 +141,7 @@ export class IssueMasters {
     const snapshot = await this.options.live.fresh();
     // While Tower is still reading sessions, one missing from it may only not be read yet.
     if (!snapshot || snapshot.scanning) return;
-    // Each todo's master is chosen by the rule the web uses (`newestIssueMaster`), among its open sessions; a folder
-    // named through a link is given as the state directory names it.
-    const folders = new Map<string, Session[]>();
-    for (const session of snapshot.sessions) {
-      const taskId = session.closed ? undefined : this.issueOf(session.cwd);
-      if (taskId) folders.set(taskId, [...folders.get(taskId) ?? [], { ...session, cwd: join(this.options.stateDir, TODO_MASTERS_FOLDER, taskId) }]);
-    }
-    const open = new Map<string, Session>();
-    for (const [taskId, sessions] of folders) {
-      const master = newestIssueMaster(this.options.stateDir, taskId, sessions);
-      if (master) open.set(taskId, master);
-    }
+    const open = this.mastersIn(snapshot);
     for (const [taskId, entry] of [...this.instances]) {
       if (open.has(taskId) || this.closed) continue;
       this.forget(entry);
@@ -164,17 +160,50 @@ export class IssueMasters {
     }
   }
 
+  /**
+   * Each todo's master in a snapshot, chosen by the rule the web uses (`newestIssueMaster`) among its open sessions; a
+   * folder named through a link is given as the state directory names it.
+   */
+  private mastersIn(snapshot: Snapshot): Map<string, Session> {
+    const folders = new Map<string, Session[]>();
+    for (const session of snapshot.sessions) {
+      const taskId = session.closed ? undefined : this.issueOf(session.cwd);
+      if (taskId) folders.set(taskId, [...folders.get(taskId) ?? [], { ...session, cwd: join(this.options.stateDir, TODO_MASTERS_FOLDER, taskId) }]);
+    }
+    const open = new Map<string, Session>();
+    for (const [taskId, sessions] of folders) {
+      const master = newestIssueMaster(this.options.stateDir, taskId, sessions);
+      if (master) open.set(taskId, master);
+    }
+    return open;
+  }
+
+  /**
+   * An issue master's session as Tower's state shows it now, by the rule `refresh` uses: a newer session of its todo (a
+   * compaction just made one) is taken at once, and with none of its sessions open it has none (its reports wait), so a
+   * report or reply never goes to a session it left, even between two looks.
+   */
+  private bindingNow(entry: IssueMaster): MasterBinding | undefined {
+    const snapshot = this.options.live.snapshot();
+    if (!entry.followed || !snapshot || snapshot.scanning) return entry.binding;
+    if (this.newest?.snapshot !== snapshot) this.newest = { snapshot, masters: this.mastersIn(snapshot) };
+    const session = this.newest.masters.get(entry.taskId);
+    if (!session) return undefined;
+    if (session.id !== entry.binding.sessionId) { entry.binding = bindingOf(session); this.rebind(); }
+    return entry.binding;
+  }
+
   private async open(taskId: string, session: Session, snapshot: Snapshot): Promise<void> {
     // Work it handed out before the host first saw it (a host just started) is still its own.
     const times = [session.createdAt, ...(snapshot.runs ?? []).filter(run => run.sessionId === session.id).map(run => run.createdAt)].map(Date.parse).filter(Number.isFinite);
     const baselineAt = times.length ? new Date(Math.min(...times) - 60_000).toISOString() : undefined;
     const entry = { taskId, binding: bindingOf(session), followed: true } as IssueMaster;
     const { tower, live, readDb, screen, followMs, reportRetryMs } = this.options;
-    entry.session = new MasterSession({ stateDir: this.options.stateDir, dataDir: issueDataDir(this.options.dataDir, taskId), binding: () => entry.binding,
+    entry.session = new MasterSession({ stateDir: this.options.stateDir, dataDir: issueDataDir(this.options.dataDir, taskId), binding: () => this.bindingNow(entry),
       folder: join(this.options.stateDir, TODO_MASTERS_FOLDER, taskId), writeGuide: folder => writeTodoMasterGuide(folder, taskId), ...(baselineAt ? { baselineAt } : {}),
-      otherMaster: { session: id => this.masterSession(id), run: id => this.masterRun(id, taskId) }, turns: this.turnsOf(taskId, entry), tower, live, ...(followMs ? { followMs } : {}), ...(reportRetryMs ? { reportRetryMs } : {}),
+      otherMaster: { session: id => this.masterSession(id), run: id => this.masterRun(id, taskId) }, turns: this.turnsOf(taskId, entry), ref: `todo:${taskId}`, peer: ref => this.master(ref), tower, live, ...(followMs ? { followMs } : {}), ...(reportRetryMs ? { reportRetryMs } : {}),
       onChange: () => { if (entry.followed) this.notify(); } });
-    entry.tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), scope: `todo:${taskId}`, screen, started: (target, body, answer) => entry.session.started(target, body, answer), delegated: () => entry.session.delegatedTable(), approvalGate: input => entry.session.approvalGate(input) });
+    entry.tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), scope: `todo:${taskId}`, screen, started: (target, body, answer) => entry.session.started(target, body, answer), delegated: () => entry.session.delegatedTable(), approvalGate: input => entry.session.approvalGate(input), reply: args => entry.session.reply(args) });
     try { await mkdir(issueDataDir(this.options.dataDir, taskId), { recursive: true, mode: 0o700 }); await entry.session.start(); }
     catch (error) {
       entry.followed = false;

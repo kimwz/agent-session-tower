@@ -1,5 +1,5 @@
 import type { StorageClient } from '../storage/client.js';
-import { MASTER_HEARTBEAT_MARK, type HeartbeatAdmission } from '../../shared/master.js';
+import { MASTER_HEARTBEAT_MARK, masterMessageHeader, type HeartbeatAdmission } from '../../shared/master.js';
 import { resolveRetentionLineage } from '../sessions/retention/ancestry.js';
 import type { RetentionMember } from '../../shared/retention.js';
 import { MAX_ATTACHMENTS } from '../../shared/attachments.js';
@@ -22,7 +22,7 @@ import { withNativeContext } from '../sessions/context.js';
 import { defaultStateDir } from '../state-dir.js';
 import { findExecutable, PROVIDERS } from '../providers/discovery.js';
 import { UUID } from './saved-state.js';
-import { checkClaudeSubscription, markMaster, subscriptionOnly } from './subscription.js';
+import { checkClaudeSubscription, markMaster, masterRefOf, subscriptionOnly } from './subscription.js';
 import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { automatedOrigin, sameDelegation, sameOrigin, type SessionOrigin } from './origin.js';
 import type { Wakeup } from './wakeup.js';
@@ -111,6 +111,8 @@ export interface RunAdmission {
   delegation?: Run['delegation'];
   /** Display only (see RunSender); saved on the run. */
   sender?: Run['sender'];
+  /** Which master's own tool call sent it (verified by the web); marks a message into another master's conversation. */
+  senderMaster?: Run['senderMaster'];
   /** Transient credential forwarded to the worker, never saved on a run. */
   callerCapability?: string;
   /** The prompt carries Slack, GitHub or HTTP content. Only a session Tower creates for it may receive it. */
@@ -569,15 +571,17 @@ export class RunManager extends EventEmitter {
       const uuid = randomUUID();
       const id = `${input.provider}:${input.provider === 'codex' ? 'monitor-' : ''}${uuid}`;
       const prepared = await this.prepareAttachments(id, input, internal.autoPromptId);
+      const runId = randomUUID();
+      const marked = this.masterSender(internal, input.cwd, runId, input.prompt);
       try {
         await internal.refresh?.();
-        this.validateAdmission(input.prompt, prepared.attachments.length > 0);
+        this.validateAdmission(marked.prompt, prepared.attachments.length > 0);
         this.validateCorrelation(internal.autoPromptId);
         internal.validate?.();
       } catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
       const createdAt = new Date().toISOString();
       const origin = internal.origin ?? { kind: 'unknown' as const };
-      const run: Run = { id: randomUUID(), sessionId: id, origin, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), ...(this.fromMaster(internal, input.cwd) ? { sender: 'master' as const } : {}), prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+      const run: Run = { id: runId, sessionId: id, origin, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), ...marked.fields, prompt: marked.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
         ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
         ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
         ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
@@ -685,18 +689,20 @@ export class RunManager extends EventEmitter {
       const effort = requestedEffort(request.effort, session.provider);
       if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 'unavailable');
       const prepared = await this.prepareAttachments(sessionId, request, internal.autoPromptId);
+      const runId = randomUUID();
+      const marked = this.masterSender(internal, session.cwd, runId, prompt);
       // File writes yield; recheck admission immediately before inserting the run.
       try {
         // Maintenance may have started while executable/attachment preparation yielded.
         while (this.retentionHeld(sessionId) || this.coldSessionIds.has(this.nativeSessionId(sessionId))) await this.awaitRetentionAdmission(sessionId);
-        this.assertRetentionAdmission(sessionId); this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.();
+        this.assertRetentionAdmission(sessionId); this.validateAdmission(marked.prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.();
         if (internal.heartbeat) this.validateHeartbeat(sessionId, prompt, internal.heartbeat); }
       catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
       if (internal.untrustedInput) {
         // Recorded before the run exists: once external content is queued, the session stays marked.
         this.registry.markUntrusted(sessionId);
       }
-      const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), ...(this.fromMaster(internal, session.cwd) ? { sender: 'master' as const } : {}), ...(internal.heartbeat ? { heartbeat: structuredClone(internal.heartbeat) } : {}), prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
+      const run: Run = { id: runId, sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), ...marked.fields, ...(internal.heartbeat ? { heartbeat: structuredClone(internal.heartbeat) } : {}), prompt: marked.prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
         ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
         ...(model ? { model } : {}), ...(effort ? { effort } : {}),
         ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
@@ -1113,8 +1119,20 @@ export class RunManager extends EventEmitter {
 
   /** The master's session talks only through a subscription sign-in (see subscription.ts). */
   private masterSession(session: Session): boolean { return subscriptionOnly(this.options.stateDir ?? defaultStateDir(), session.cwd); }
-  /** The master's mark is for its requests in other conversations; what reaches its own conversation is the owner's or Tower's. */
-  private fromMaster(internal: RunAdmission, cwd: string): boolean { return internal.sender === 'master' && !subscriptionOnly(this.options.stateDir ?? defaultStateDir(), cwd); }
+  /**
+   * How a request the master host sent is marked. In an ordinary conversation the master's mark is for display. What
+   * reaches a master's own conversation through the host is the owner's (spoken words it relays) or Tower's (reports),
+   * unmarked; only another master's own tool call is marked there, with which master it was, and its words start with
+   * a line saying so (and the request id `master_reply` answers it by), so that master's model knows too. Never the
+   * owner's word (server/master/session.ts `ownerMessage`).
+   */
+  private masterSender(internal: RunAdmission, cwd: string, runId: string, prompt: string): { fields: Pick<Run, 'sender' | 'senderMaster'>; prompt: string } {
+    if (internal.sender !== 'master') return { fields: {}, prompt };
+    const target = masterRefOf(this.options.stateDir ?? defaultStateDir(), cwd);
+    if (!target) return { fields: { sender: 'master' }, prompt };
+    if (!internal.senderMaster || internal.senderMaster === target) return { fields: {}, prompt };
+    return { fields: { sender: 'master', senderMaster: internal.senderMaster }, prompt: `${masterMessageHeader(internal.senderMaster, runId)}\n\n${prompt}` };
+  }
 
   private async launchCodex(run: Run, session: Session, creating: boolean): Promise<void> {
     const prepared = await prepareCodexTurn(this.turnHost, run, session, creating);

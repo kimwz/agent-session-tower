@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { RunManager } from './sql-fixture.js';
 import type { Session } from '../../../shared/types.js';
-import { MASTER_FOLDER } from '../../../shared/master.js';
+import { MASTER_FOLDER, MASTER_SENDER_HEADER, TODO_MASTERS_FOLDER } from '../../../shared/master.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import { startRunnerHost } from '../../../server/runs/worker.js';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
@@ -50,6 +50,15 @@ test('only a request that proves it is the master is marked as sent by the maste
   // A heartbeat correction carries its calling turn's credential with the master's.
   assert.equal((await post('/api/sessions/codex:fixture/messages', { prompt: 'Correct course' }, { ...master, [CALLER_CAPABILITY_HEADER]: 'e'.repeat(64) })).status, 202);
   assert.equal(contexts.enqueue.at(-1)?.sender, 'master'); assert.equal(contexts.enqueue.at(-1)?.callerCapability, 'e'.repeat(64));
+  // A master's own tool call names which master it is; the host's bookkeeping names none. Believed only from the master.
+  assert.equal((await post('/api/sessions/codex:fixture/messages', { prompt: 'Next step' }, { ...master, [MASTER_SENDER_HEADER]: 'todo:task-1' })).status, 202);
+  assert.equal(contexts.enqueue.at(-1)?.senderMaster, 'todo:task-1');
+  assert.equal((await post('/api/auto-prompts', prompt(), { ...master, [MASTER_SENDER_HEADER]: 'main' })).status, 202);
+  assert.equal(contexts.autoPrompt.at(-1)?.senderMaster, 'main');
+  assert.equal((await post('/api/sessions/codex:fixture/messages', { prompt: 'Next step' }, { ...master, [MASTER_SENDER_HEADER]: 'todo:../x' })).status, 202);
+  assert.equal(contexts.enqueue.at(-1)?.senderMaster, undefined, 'a malformed name is no master');
+  assert.equal((await post('/api/sessions/codex:fixture/messages', { prompt: 'Next step' }, { cookie, [MASTER_SENDER_HEADER]: 'main' })).status, 202);
+  assert.equal(contexts.enqueue.at(-1)?.senderMaster, undefined, 'the owner\'s page cannot claim to be a master');
   // The owner's own page, a body field, a wrong credential or a local agent are never the master.
   for (const headers of [{ cookie }, {}, { cookie, 'X-Tower-Master': 'invalid' }, { cookie, 'X-Tower-Agent': 'local' }] as Record<string, string>[]) {
     assert.equal((await post('/api/sessions/codex:fixture/messages', { prompt: 'Next step', sender: 'master' }, headers)).status, 202);
@@ -69,6 +78,23 @@ test('the web passes the master mark to the worker with every admission', async 
   await manager.api('autoPrompt.submit', { requestId: randomUUID(), provider: 'codex', prompt: 'Work' }, internal); assert.equal(admission('api')?.sender, 'master');
   await manager.submitAutoPrompt({ requestId: randomUUID(), provider: 'codex', prompt: 'Work' }, internal); assert.equal(admission('submitAutoPrompt')?.sender, 'master');
   await manager.enqueue('codex:fixture', 'Follow-up', {}, { origin: { kind: 'owner' } }); assert.equal(admission('enqueue')?.sender, undefined);
+  const named = { ...internal, senderMaster: 'todo:task-1' as const };
+  await manager.create({ provider: 'codex', cwd: '/fixture', prompt: 'New work' }, named); assert.equal(admission('create')?.senderMaster, 'todo:task-1');
+  await manager.enqueue('codex:fixture', 'Follow-up', {}, named); assert.equal(admission('enqueue')?.senderMaster, 'todo:task-1');
+  await manager.api('autoPrompt.submit', { requestId: randomUUID(), provider: 'codex', prompt: 'Work' }, named); assert.equal(admission('api')?.senderMaster, 'todo:task-1');
+  await manager.submitAutoPrompt({ requestId: randomUUID(), provider: 'codex', prompt: 'Work' }, named); assert.equal(admission('submitAutoPrompt')?.senderMaster, 'todo:task-1');
+  // A worker that would drop which master sent it, and file it as the owner's there, is not sent a message into a master's conversation.
+  const stateDir = (manager as unknown as { options: { stateDir: string } }).options.stateDir;
+  const snapshot = (manager as unknown as { snapshot: { capabilities: string[]; sessions: Array<Partial<Session>> } }).snapshot;
+  snapshot.capabilities.push('subscriptionOnly');
+  snapshot.sessions.push({ id: 'claude:issue-b', cwd: join(stateDir, TODO_MASTERS_FOLDER, 'task-b') });
+  const sent = calls.length;
+  await assert.rejects(manager.enqueue('claude:issue-b', 'Check', {}, named), (error: { disposition?: string }) => error.disposition === 'not-admitted');
+  await assert.rejects(manager.create({ provider: 'claude', cwd: join(stateDir, MASTER_FOLDER), prompt: 'Check' }, named), (error: { disposition?: string }) => error.disposition === 'not-admitted');
+  assert.equal(calls.length, sent, 'nothing reached the worker');
+  await manager.enqueue('claude:issue-b', '[voice] 상태?', {}, internal); assert.equal(admission('enqueue')?.sender, 'master', 'the host\'s own relay still goes');
+  snapshot.capabilities.push('masterOrigin');
+  await manager.enqueue('claude:issue-b', 'Check', {}, named); assert.equal(admission('enqueue')?.senderMaster, 'todo:task-1');
 });
 
 test('the worker saves the master mark on the turn it admits and refuses any other value', async t => {
@@ -95,4 +121,43 @@ test('the worker saves the master mark on the turn it admits and refuses any oth
   // The owner's words reach the master's own conversation through the master host; they stay the owner's.
   assert.equal((await client.enqueue(master.id, 'From the owner to the master', {}, { origin: { kind: 'owner' }, sender: 'master' })).sender, undefined);
   await assert.rejects(client.enqueue(id, 'Forged', {}, { origin: { kind: 'owner' }, sender: 'owner' as never }), /Invalid sender/);
+  await assert.rejects(client.enqueue(id, 'Forged', {}, { origin: { kind: 'owner' }, senderMaster: 'main' }), /Invalid sender master/);
+  await assert.rejects(client.enqueue(id, 'Forged', {}, { origin: { kind: 'owner' }, sender: 'master', senderMaster: 'todo:a/b' as never }), /Invalid sender master/);
+});
+
+test('a message one master sends into another master\'s conversation names that master, and only there', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'tower-master-origin-worker-'));
+  const session = (n: number, cwd: string, title: string): Session => ({ id: `codex:10000000-0000-4000-8000-00000000001${n}`, nativeId: `10000000-0000-4000-8000-00000000001${n}`, provider: 'codex', title, cwd, project: 'fixture', status: 'idle', statusReason: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true });
+  const work = session(0, join(root, 'work'), 'work'), main = session(1, join(root, MASTER_FOLDER), 'master');
+  const issueA = session(2, join(root, TODO_MASTERS_FOLDER, 'task-a'), 'A'), issueB = session(3, join(root, TODO_MASTERS_FOLDER, 'task-b'), 'B');
+  const known = [work, main, issueA, issueB];
+  const runs = new RunManager({ stateDir: root, getSession: requested => known.find(item => item.id === requested), refreshSessions: async () => {}, holdUntilReady: true, findExecutable: async () => '/fixture/codex' });
+  await runs.start();
+  const sessions = new SessionService({ codexHome: join(root, 'fixture-codex'), claudeHome: join(root, 'fixture-claude') });
+  sessions.list = () => known;
+  sessions.get = requested => sessions.list().find(item => item.id === requested);
+  const host = await startRunnerHost({ stateDir: root, sessions, runs, capabilities: new CapabilityRegistry() });
+  const client = new DurableRunManager({ stateDir: root });
+  t.after(async () => { await client.close(); await host.close(); sessions.stop(); await runs.close(); await rm(root, { recursive: true, force: true }); });
+  await client.start();
+  const owner = { kind: 'owner' as const };
+  // Issue master A to issue master B: marked as A's, and B's model reads which master and which request it is.
+  const toB = await client.enqueue(issueB.id, 'Check the build', {}, { origin: owner, sender: 'master', senderMaster: 'todo:task-a' });
+  assert.equal(toB.sender, 'master');
+  assert.equal(toB.senderMaster, 'todo:task-a');
+  assert.deepEqual(toB.origin, owner, 'the mark changes no authority');
+  assert.equal(toB.prompt, `[From master: the issue master of todo task-a · request ${toB.id.slice(0, 8)}]\n\nCheck the build`);
+  assert.equal(runs.list().find(run => run.id === toB.id)?.senderMaster, 'todo:task-a', 'the worker keeps it');
+  // The main master to an issue master, and an issue master to the main master.
+  const toA = await client.enqueue(issueA.id, 'Status?', {}, { origin: owner, sender: 'master', senderMaster: 'main' });
+  assert.equal(toA.senderMaster, 'main'); assert.ok(toA.prompt.startsWith('[From master: the main master · request '));
+  assert.equal((await client.enqueue(main.id, 'Done', {}, { origin: owner, sender: 'master', senderMaster: 'todo:task-b' })).senderMaster, 'todo:task-b');
+  // A master writing into its own conversation, or the host's bookkeeping (no master named), stays unmarked.
+  const own = await client.enqueue(issueA.id, 'Note to self', {}, { origin: owner, sender: 'master', senderMaster: 'todo:task-a' });
+  assert.equal(own.sender, undefined); assert.equal(own.senderMaster, undefined); assert.equal(own.prompt, 'Note to self');
+  const relayed = await client.enqueue(issueB.id, '[voice] 진행 상황', {}, { origin: owner, sender: 'master' });
+  assert.equal(relayed.sender, undefined); assert.equal(relayed.senderMaster, undefined);
+  // In an ordinary conversation the master's mark stays display only, without a name or a header.
+  const delegated = await client.enqueue(work.id, 'Build it', {}, { origin: owner, sender: 'master', senderMaster: 'todo:task-a' });
+  assert.equal(delegated.sender, 'master'); assert.equal(delegated.senderMaster, undefined); assert.equal(delegated.prompt, 'Build it');
 });

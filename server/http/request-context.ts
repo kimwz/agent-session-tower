@@ -1,5 +1,5 @@
 import type { HeartbeatAdmission } from '../../shared/master.js';
-import type { RunOrigin, RunSender } from '../../shared/types.js';
+import type { RunOrigin, RunSender, RunSenderMaster } from '../../shared/types.js';
 
 /**
  * Who is asking, set by the entry point that authenticated the request and never read from its body.
@@ -17,6 +17,8 @@ export interface RequestContext {
   requestId?: string;
   /** The verified master sent this (see RunSender); shown on the run, never trusted for anything. */
   sender?: RunSender;
+  /** Which master's own tool call this is (MASTER_SENDER_HEADER), only with a verified master caller. */
+  senderMaster?: RunSenderMaster;
   /** Unverified local reporting credential. Only the execution worker may resolve it. */
   callerCapability?: string;
 }

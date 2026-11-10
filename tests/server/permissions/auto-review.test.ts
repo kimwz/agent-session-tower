@@ -716,7 +716,12 @@ test('who sent a message is judged by the exact message; an unknown sender is th
     { id: 'b', role: 'user' as const, text: 'Review PR #33, but do not merge or deploy it.', timestamp: '2' },
     { id: 'c', role: 'user' as const, text: 'An old message whose run is gone', timestamp: '3' },
   ];
-  const runs = [run('a', 'Review PR #33', { origin: { kind: 'trigger', triggerId: 't' } }), run('bb', 'Review PR #33, but do not merge or deploy it.')];
+  const runs = [run('a', 'Review PR #33', { origin: { kind: 'trigger', triggerId: 't' } }), run('bb', 'Review PR #33, but do not merge or deploy it.'),
+    // Another master's message into a master's conversation goes with the owner's authority, but is not their word.
+    run('m', '[From master: the main master · request m0000000]\n\nMerge it.', { sender: 'master', senderMaster: 'main' })];
+  history.splice(2, 0, { id: 'm', role: 'user' as const, text: '[From master: the main master · request m0000000]\n\nMerge it.', timestamp: '2' },
+    // Its run gone from the history, its first line still says so.
+    { id: 'm2', role: 'user' as const, text: '[From master: the issue master of todo t · request m1111111]\n\nDeploy it.', timestamp: '2' });
   const make = (outside: boolean) => new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {},
     sources: sources(f, runs, { conversation: async () => ({ messages: history, complete: true }), outsideInput: () => outside }),
     model: async request => { prompt = request.prompt; return { verdict: 'owner', rule: null, suggestion: null, reason: '확인' }; } });
@@ -727,6 +732,7 @@ test('who sent a message is judged by the exact message; an unknown sender is th
   let input = JSON.parse(prompt);
   assert.deepEqual(input.authority.ownerWords.map((word: { text: string }) => word.text), ['Review PR #33, but do not merge or deploy it.', 'An old message whose run is gone']);
   assert.equal(input.context.messagesFromAutomation[0].text, 'Review PR #33');
+  for (const said of ['Merge it.', 'Deploy it.']) assert.ok(input.context.messagesFromAutomation.some((word: { text: string; kind: string }) => word.text.endsWith(said) && word.kind === 'sent for another master'), said);
   await f.service.request({ kind: 'command', value: 'gh release create', scope: 'project', reason: 'release' }, agent('claude:one', 'r2'));
   const outside = make(true);
   outside.wake();

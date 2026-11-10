@@ -4,7 +4,7 @@ import { NODE_ID, TOWER_TOOLS, TowerTools, truncate, type TowerToolsOptions } fr
 import { apiTarget } from '../tower-tools/api-target.js';
 import { masterWorkerModel, parseModelSettings } from '../../shared/models.js';
 import { TowerError } from '../../shared/errors.js';
-import { SESSION_MESSAGE_TOOL, SESSION_START_TOOL } from '../runs/subscription.js';
+import { MASTER_REPLY_TOOL, SESSION_MESSAGE_TOOL, SESSION_START_TOOL } from '../runs/subscription.js';
 
 /** How long a screen command waits for the page to say it was done. */
 const ACK_MS = 5_000;
@@ -43,6 +43,11 @@ export const MASTER_TOOLS = [
       language: { type: 'string', enum: ['ko', 'en'] },
       chatFontSize: { type: 'integer', minimum: 11, maximum: 22 },
     }, required: ['action'], additionalProperties: false } },
+  { name: MASTER_REPLY_TOOL, description: 'Answer a request another master sent you (its message starts with "[From master: … · request <id>]"): your final result, once the request is done including the work you handed out for it. Tower reports it to that master\'s current session. Once per request.',
+    inputSchema: { type: 'object', properties: {
+      requestId: { type: 'string', description: 'The request id from the first line of that master\'s message.' },
+      text: { type: 'string', description: 'The result, written for that master: what was done, where, what remains.' },
+    }, required: ['requestId', 'text'], additionalProperties: false } },
   ...TOWER_TOOLS.filter(tool => tool.name === 'terminal_read'),
 ];
 
@@ -92,6 +97,8 @@ export class MasterScreen {
 export type MasterToolsOptions = TowerToolsOptions & (MasterScreenOptions | { screen: MasterScreen }) & {
   /** Whatever stands in the way of answering an approval (see MasterSession.approvalGate). Without one, nothing is answered. */
   approvalGate?(input: { node?: string; runId: string; approvalId: string; body: unknown }): Promise<string | undefined>;
+  /** Answers another master's request (MasterSession.reply). Without one, there is nothing to answer yet. */
+  reply?(args: Record<string, unknown>): Promise<unknown>;
 };
 
 /**
@@ -108,6 +115,7 @@ export class MasterTools extends TowerTools {
 
   /** `headers` go with the call's changes on this computer: an issue master's turn sends its reporting credential. */
   override async call(name: string, args: Record<string, unknown>, headers?: Record<string, string>): Promise<unknown> {
+    if (name === MASTER_REPLY_TOOL) return this.master.reply ? this.master.reply(args) : { error: '이 마스터를 아직 찾지 못해 회신하지 않았습니다. 잠시 뒤 다시 시도하세요.' };
     // The delegation tools are their tower_api call, so they are followed, reported and given master.worker the same way.
     if (name === SESSION_START_TOOL || name === SESSION_MESSAGE_TOOL) {
       const delegation = delegationCall(name, args);
