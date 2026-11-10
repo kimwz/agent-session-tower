@@ -7,9 +7,20 @@ test('the worker restores in order: files before services, the Vault before trig
   const source = await readFile(new URL('../../../server/runs/worker.ts', import.meta.url), 'utf8');
   const at = (text: string) => { const index = source.indexOf(text); assert.notEqual(index, -1, text); return index; };
   assert.ok(at('openWorkerStorage(') < at("database.gate('core')"));
-  assert.ok(at("database.gate('core')") < at('runs.useStorage(database!)'));
-  assert.ok(at('runs.useStorage(database!)') < at('takeWorkerRestore('));
+  assert.ok(at("database.gate('core')") < at('runs.useStorage(database!, { afterRetiredStage: runsRetirements.length > 0 })'));
+  assert.ok(at('runs.useStorage(database!, { afterRetiredStage: runsRetirements.length > 0 })') < at('takeWorkerRestore('));
   assert.ok(at('takeWorkerRestore(') < at('sessions.start()'));
+  // A retired runs stage: restore cancels queued runs before anything can start them; the mark goes only after that restore was saved.
+  assert.ok(at('await unsettledRunsRetirements(stateDir).catch(') < at('runs.useStorage(database!, { afterRetiredStage: runsRetirements.length > 0 })'));
+  assert.ok(at('    await runs.start();') < at('settleRunsRetirements(runsRetirements.filter('));
+  assert.ok(at('settleRunsRetirements(runsRetirements.filter(') < at('runs.markReady()'));
+  // A storage retry while running retired this worker's own runs stage: settled once its live runs were saved again.
+  const retry = source.slice(at('retryNormal = retryRuntime = '), at('    const settingsBackup = async'));
+  // The marks are fixed before the save and settled inside this retry, never ones a later retry makes.
+  const marks = retry.indexOf('const marks = await unsettledRunsRetirements(stateDir);');
+  assert.ok(retry.indexOf('runs.releaseStorage()') !== -1 && retry.indexOf('runs.releaseStorage()') < marks);
+  assert.ok(marks < retry.indexOf('await runs.flushState(); await settleRunsRetirements(marks);'));
+  assert.ok(retry.indexOf('await settleRunsRetirements(marks)') < retry.indexOf('} finally { retrying = undefined; }'));
   assert.ok(at('await sessions.quiesce()') < at('takeWorkerRestore('));
   assert.ok(at('new SecretService(') < at('new TriggerService('));
   assert.ok(at('triggers.start(restoring') < at('runs.markReady()'));
@@ -26,7 +37,7 @@ test('all seven authorities precede restore and effects; the storage opens with 
   assert.match(opening, /openWorkerStorage\(\{[^\n]*onUnavailable: unavailable/);
   assert.ok(at('  const unavailable =') < at('  const attempt = async'));
   assert.ok(at('  let storageStatus:') < at('  const attempt = async'));
-  assert.ok(at('openWorkerStorage(') < at('runs.useStorage(database!)'));
+  assert.ok(at('openWorkerStorage(') < at('runs.useStorage(database!, { afterRetiredStage: runsRetirements.length > 0 })'));
   assert.ok(at('permissionRepository.load()') < at('domainsReady = true'));
   assert.ok(at('domainsReady = true') < at('await takeWorkerRestore'));
   const skills = source.slice(at('const skills = new SkillService'), at('// Skills never keep'));

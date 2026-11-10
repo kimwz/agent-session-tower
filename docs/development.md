@@ -254,6 +254,8 @@ The execution worker is the only writer of `<state-dir>/state.sqlite`; the web a
 
 The store therefore opens only at the current schema. Adding a schema version (a new migration in any domain or the core) would make every existing installation refuse to start; it needs a deliberate change of this refuse-behind policy, with its own migration, recovery and downgrade design, in the same pull request. Released migration SQL is pinned byte for byte by `tests/server/storage/migration-checksums.test.ts`.
 
+A staged write (`begin`, chunks, `commit`) leaves a `<domain>_stages` row only until its commit, which removes it in the same transaction; `stage` and `commit` accept only the epoch that began it, and every worker start claims a higher one. A stage row from an earlier epoch therefore never took effect and never can. A worker start retires such rows before the domain checks (`retireStrandedStages`, `server/storage/stranded-stages.ts`): one verified snapshot (`storage-snapshots/<id>/`) and an evidence document (`storage-recovery/stranded-stages/<id>.json`) keep them, then `discardStranded` removes exactly the named rows. If either cannot be written nothing is removed and the start stays held as `stages-held`. A stage of the current epoch is a write in progress and is never touched.
+
 Inspect `agent-session-tower storage status` and preserve the reported failure, identity and recovery evidence before any update or recovery action; `agent-session-tower storage retry` asks the worker to try again. Do not delete a database, sidecar, identity or recovery barrier to make a gate open, and do not start a second writer against the same state.
 
 #### Going back from 1.138 to 1.137.x

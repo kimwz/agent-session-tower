@@ -21,8 +21,8 @@ export class StorageInitializationError extends Error {
 }
 
 /** Domains whose staged (multi-part) writes leave rows a crash can strand; permissions commits in one command. */
-const STAGED: ReadonlySet<StorageDomainScope> = new Set(['runs', 'retention', 'triggers', 'remote', 'auto-prompt', 'automation-workflows']);
-export const stagesOf = async (storage: StorageClient, scope: StorageDomainScope) => STAGED.has(scope) ? (await storage.read<{ stages: number }>(scope, 'bootstrapHistory', {})).stages : 0;
+export const STAGED_DOMAINS: ReadonlySet<StorageDomainScope> = new Set(['runs', 'retention', 'triggers', 'remote', 'auto-prompt', 'automation-workflows']);
+export const stagesOf = async (storage: StorageClient, scope: StorageDomainScope) => STAGED_DOMAINS.has(scope) ? (await storage.read<{ stages: number }>(scope, 'bootstrapHistory', {})).stages : 0;
 
 /** Throws unless the database holds `scope` (authority `database`) with no stranded stages. */
 export async function requireDomainAuthority(storage: StorageClient, scope: StorageDomainScope): Promise<void> {

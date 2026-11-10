@@ -9,6 +9,7 @@ import { OPERATIONS, type OperationName } from '../../shared/api/operations.js';
 import type { WorkerStorageStatus } from '../../shared/storage.js';
 import { captureStorageBundle, storageBuildContext, preflightStorage, adoptSnapshot, reconcileRecovery, readRecoveryBarrier, StorageCommandError, type StorageClient } from '../storage/index.js';
 import { openWorkerStorage, type StorageRefusal } from '../storage/initialize.js';
+import { settleRunsRetirements, unsettledRunsRetirements } from '../storage/stranded-stages.js';
 import type { HeartbeatAdmission } from '../../shared/master.js';
 import { newWorkerSession } from '../models/worker.js';
 import { latestNativeUserMessage } from './native-user-message.js';
@@ -1040,7 +1041,12 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
   };
   // Gate(core), not prepare's claim, precedes every restore and startup effect.
   await startupGate();
-  runs.useStorage(database!);
+  // A retired runs write (this start or an earlier one whose restore was not saved) may have started a queued run.
+  const runsRetirements = await unsettledRunsRetirements(stateDir).catch((error: unknown) => {
+    console.error(`Stranded stage evidence could not be listed; runs restore starts no queued run: ${error instanceof Error ? error.message : String(error)}`);
+    return ['(unlisted)'];
+  });
+  runs.useStorage(database!, { afterRetiredStage: runsRetirements.length > 0 });
   await startupGate();
   const externalRemote = new RemoteRepository(database!);
   const externalPrompts = new AutoPromptRepository(database!);
@@ -1169,6 +1175,8 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
     await tools?.start(autoUpdateEnabled());
     await startupGate();
     await runs.start();
+    // runs.start() saved the restore (its flush throws otherwise): the queued runs it cancelled stay cancelled.
+    if (runsRetirements.length) await settleRunsRetirements(runsRetirements.filter(path => path !== '(unlisted)')).catch(error => console.error(`Retired runs stage evidence stays unsettled: ${error instanceof Error ? error.message : String(error)}`));
     // The web process saves the remote-sharing exclusion list; this copy follows it on every refresh.
     const exclusions = new RemoteExclusionStore(stateDir);
     await exclusions.start();
@@ -1616,6 +1624,12 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
         storageStatus.admissionOpen = true; runs.releaseStorage(); autoPrompts.releaseStorage();
         paused = false; initializedRetention?.resume(); temporary.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup();
         slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); tasks.resume(); compactions.release(); worktrees.resume(); permissions.resume(); if (startupComplete) reviewer.release(); runner.releaseStorage();
+        // A runs stage this retry retired was this worker's own: its runs are live here, so once they are saved again
+        // the marks known now must not cancel the queued runs of the next start. Marks a later retry makes are its own.
+        try {
+          const marks = await unsettledRunsRetirements(stateDir);
+          if (marks.length) { await runs.flushState(); await settleRunsRetirements(marks); }
+        } catch (error) { console.error(`Retired runs stage evidence stays unsettled after a storage retry: ${error instanceof Error ? error.message : String(error)}`); }
         return storageStatus;
       } finally { retrying = undefined; }
     })();

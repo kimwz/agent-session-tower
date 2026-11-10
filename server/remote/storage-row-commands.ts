@@ -1,4 +1,5 @@
 import { defineStorageDomain, type DomainReadContext, type DomainWriteContext } from '../storage/domain.js';
+import { strandedStageCommands } from '../storage/stranded-stage-commands.js';
 import type { DomainAuthority, StorageDomainSchema } from '../storage/contract.js';
 import { canonical, object, hash, EXTERNAL_INTENT_BYTES, EXTERNAL_CHUNK_BYTES, type ExternalCodec, type ExternalRow } from './storage-rows.js';
 export interface ExternalHead { storageId: string; authority: DomainAuthority | null; revision: number | null }
@@ -67,6 +68,7 @@ export function externalDomain(schema: StorageDomainSchema, codec: ExternalCodec
   }
   return defineStorageDomain({ schema,commands: {
     head: { kind:'read',run: c=>head(c) },
+    ...strandedStageCommands(t),
     bootstrapHistory: { kind:'read',run: c=>({ stages: (c.prepare(`SELECT count(*) AS n FROM ${t}_stages`).get() as { n: number }).n }) },
     keys: { kind:'read',run(c,payload) { const p=object(payload);current(c,p);
       return c.prepare(`SELECT ordinal,length(CAST(id AS BLOB)) AS idBytes,length(CAST(json AS BLOB)) AS bytes FROM ${t}_rows WHERE channel=? AND kind=? AND ordinal>=? ORDER BY ordinal LIMIT 32`).all(String(p.channel),String(p.kind),integer(p.after)); } },
