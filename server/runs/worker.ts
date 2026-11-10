@@ -1624,10 +1624,12 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
         storageStatus.admissionOpen = true; runs.releaseStorage(); autoPrompts.releaseStorage();
         paused = false; initializedRetention?.resume(); temporary.resume(); runs.resumeAttachmentCleanup(); autoPrompts.resumeAttachmentCleanup();
         slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); tasks.resume(); compactions.release(); worktrees.resume(); permissions.resume(); if (startupComplete) reviewer.release(); runner.releaseStorage();
-        // A runs stage this retry retired was this worker's own: its runs are live here and saved again now, so the
-        // mark must not cancel the queued runs of the next start.
-        void runs.flushState().then(async () => settleRunsRetirements(await unsettledRunsRetirements(stateDir)))
-          .catch(error => console.error(`Retired runs stage evidence stays unsettled after a storage retry: ${error instanceof Error ? error.message : String(error)}`));
+        // A runs stage this retry retired was this worker's own: its runs are live here, so once they are saved again
+        // the marks known now must not cancel the queued runs of the next start. Marks a later retry makes are its own.
+        try {
+          const marks = await unsettledRunsRetirements(stateDir);
+          if (marks.length) { await runs.flushState(); await settleRunsRetirements(marks); }
+        } catch (error) { console.error(`Retired runs stage evidence stays unsettled after a storage retry: ${error instanceof Error ? error.message : String(error)}`); }
         return storageStatus;
       } finally { retrying = undefined; }
     })();

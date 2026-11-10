@@ -72,8 +72,10 @@ export async function unsettledRunsRetirements(stateDir: string): Promise<string
   return pending;
 }
 
-/** Marks the documents settled once the restore that cancelled queued runs has been saved. */
-/** An unreadable one is kept, renamed `<name>.unreadable`, so it no longer holds every later start. */
+/**
+ * Marks the documents settled once the restore that cancelled queued runs has been saved. An unreadable one is kept,
+ * renamed `<name>.unreadable`, so it no longer holds every later start.
+ */
 export async function settleRunsRetirements(paths: readonly string[]): Promise<void> {
   for (const path of paths) {
     let document: Record<string, unknown>;
