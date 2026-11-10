@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { StorageClient } from './client.js';
 import type { DomainAuthority } from './contract.js';
@@ -21,6 +21,8 @@ export async function retireStrandedStages(storage: StorageClient, stateDir: str
   for (const scope of STAGED_DOMAINS) {
     // A domain without database authority keeps its refusal: its rows are not this store's to judge.
     if (authorities.get(scope)?.authority !== 'database') continue;
+    // Nor does a domain a recovery barrier still holds: the owner reconciles it first.
+    if (!(await storage.gate(scope)).open) continue;
     for (const stage of await storage.read<StrandedStage[]>(scope, 'strandedStages', {})) if (stage.ownerEpoch < ownerEpoch) stranded.push({ scope, ...stage });
   }
   if (!stranded.length) return undefined;
@@ -71,9 +73,16 @@ export async function unsettledRunsRetirements(stateDir: string): Promise<string
 }
 
 /** Marks the documents settled once the restore that cancelled queued runs has been saved. */
+/** An unreadable one is kept, renamed `<name>.unreadable`, so it no longer holds every later start. */
 export async function settleRunsRetirements(paths: readonly string[]): Promise<void> {
   for (const path of paths) {
-    const document = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+    let document: Record<string, unknown>;
+    try { document = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>; }
+    catch (error) {
+      console.error(`Stranded stage evidence ${path} is unreadable; kept as ${path}.unreadable: ${error instanceof Error ? error.message : String(error)}`);
+      await rename(path, `${path}.unreadable`);
+      continue;
+    }
     await writePrivateDocument(path, JSON.stringify({ ...document, runsSettledAt: new Date().toISOString() }, null, 2));
   }
 }

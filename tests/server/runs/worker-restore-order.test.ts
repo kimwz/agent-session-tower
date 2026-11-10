@@ -11,9 +11,13 @@ test('the worker restores in order: files before services, the Vault before trig
   assert.ok(at('runs.useStorage(database!, { afterRetiredStage: runsRetirements.length > 0 })') < at('takeWorkerRestore('));
   assert.ok(at('takeWorkerRestore(') < at('sessions.start()'));
   // A retired runs stage: restore cancels queued runs before anything can start them; the mark goes only after that restore was saved.
-  assert.ok(at('await unsettledRunsRetirements(stateDir)') < at('runs.useStorage(database!, { afterRetiredStage: runsRetirements.length > 0 })'));
-  assert.ok(at('    await runs.start();') < at('settleRunsRetirements(runsRetirements)'));
-  assert.ok(at('settleRunsRetirements(runsRetirements)') < at('runs.markReady()'));
+  assert.ok(at('await unsettledRunsRetirements(stateDir).catch(') < at('runs.useStorage(database!, { afterRetiredStage: runsRetirements.length > 0 })'));
+  assert.ok(at('    await runs.start();') < at('settleRunsRetirements(runsRetirements.filter('));
+  assert.ok(at('settleRunsRetirements(runsRetirements.filter(') < at('runs.markReady()'));
+  // A storage retry while running retired this worker's own runs stage: settled once its live runs were saved again.
+  const retry = source.slice(at('retryNormal = retryRuntime = '), at('    const settingsBackup = async'));
+  assert.ok(retry.indexOf('runs.releaseStorage()') < retry.indexOf('void runs.flushState().then(async () => settleRunsRetirements(await unsettledRunsRetirements(stateDir)))'));
+  assert.ok(retry.indexOf('runs.releaseStorage()') !== -1);
   assert.ok(at('await sessions.quiesce()') < at('takeWorkerRestore('));
   assert.ok(at('new SecretService(') < at('new TriggerService('));
   assert.ok(at('triggers.start(restoring') < at('runs.markReady()'));

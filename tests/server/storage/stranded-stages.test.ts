@@ -167,6 +167,9 @@ test('a retired runs stage stays marked for restore across starts until settled;
   assert.equal(JSON.parse(await readFile(first.retired!.evidence, 'utf8')).stages[0].intent, 'started-maybe', 'settling keeps the evidence');
   await writeFile(join(dir, 'storage-recovery', 'stranded-stages', 'broken.json'), '{', { mode: 0o600 });
   assert.deepEqual((await unsettledRunsRetirements(dir)).map(path => path.split('/').pop()), ['broken.json'], 'an unreadable document counts as unsettled');
+  await settleRunsRetirements(await unsettledRunsRetirements(dir));
+  assert.deepEqual(await unsettledRunsRetirements(dir), [], 'settling an unreadable one keeps it aside instead of holding every start');
+  assert.equal(await readFile(join(dir, 'storage-recovery', 'stranded-stages', 'broken.json.unreadable'), 'utf8'), '{');
 });
 
 test('a removal that fails part way keeps the runs mark (written before any row goes) and the next start finishes it', async t => {
