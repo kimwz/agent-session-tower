@@ -64,7 +64,7 @@ export async function unsettledRunsRetirements(stateDir: string): Promise<string
     try {
       const document = JSON.parse(await readFile(path, 'utf8')) as { stages?: { scope?: string }[]; runsSettledAt?: string };
       if (document.runsSettledAt || !document.stages?.some(stage => stage.scope === 'runs')) continue;
-    } catch { /* unreadable: kept pending, the safe side */ }
+    } catch (error) { console.error(`Stranded stage evidence ${path} is unreadable; runs restore treats it as unsettled: ${error instanceof Error ? error.message : String(error)}`); }
     pending.push(path);
   }
   return pending;
