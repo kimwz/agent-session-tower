@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { TODO_MASTER_ISSUE_HEADER, TODO_MASTERS_FOLDER, type MasterBinding } from '../../shared/master.js';
+import { MASTER_SENDER_HEADER, masterRefTask, TODO_MASTER_ISSUE_HEADER, TODO_MASTERS_FOLDER, type MasterBinding, type MasterRef } from '../../shared/master.js';
 import type { Session, Snapshot } from '../../shared/types.js';
 import { newestIssueMaster, todoMasterTaskId } from '../runs/subscription.js';
 import { clearClosedIssueFiles } from './issue-files.js';
@@ -31,8 +31,8 @@ export interface IssueMastersOptions {
   readDb?: ReadDatabase;
   /** The owner's screen, shared with the main master. */
   screen: MasterScreen;
-  /** The main master's session. */
-  main: { binding(): MasterBinding | undefined };
+  /** The main master's session, and the main master itself (once it is made). */
+  main: { binding(): MasterBinding | undefined; session?(): MasterSession | undefined };
   followMs?: number;
   /** Tests shorten the wait before a refused report goes again. */
   reportRetryMs?: number;
@@ -95,6 +95,11 @@ export class IssueMasters {
   masterSession(id: string): boolean {
     return id === this.options.main.binding()?.sessionId || this.bound.has(id) || this.folderSessions().has(id);
   }
+  /** A master open now, by its ref: the main master, or the issue master followed for that todo. */
+  master(ref: MasterRef): MasterSession | undefined {
+    const task = masterRefTask(ref);
+    return task === undefined ? this.options.main.session?.() : this.instances.get(task)?.session;
+  }
   masterRun(id: string, self = ''): boolean {
     const owner = this.turns.get(id);
     return owner !== undefined && owner !== self;
@@ -117,7 +122,7 @@ export class IssueMasters {
     if (!this.instances.has(taskId)) await this.refresh();
     const tools = this.instances.get(taskId)?.tools ?? (this.untracked ??= new MasterTools({ tower: this.options.tower, live: this.options.live, ...(this.options.readDb ? { readDb: this.options.readDb } : {}),
       scope: 'untracked', screen: this.options.screen, started: async () => {}, delegated: () => ({ name: 'delegated', columns: ['id', 'title', 'state', 'session_id', 'node', 'created_at', 'report', 'outcome'], rows: [] }) }));
-    return tools.call(name, args, { [TODO_MASTER_ISSUE_HEADER]: taskId });
+    return tools.call(name, args, { [TODO_MASTER_ISSUE_HEADER]: taskId, [MASTER_SENDER_HEADER]: `todo:${taskId}` });
   }
 
   /** One look at Tower's sessions: issue masters to follow, to let go of, and old files to clear away. */
@@ -172,9 +177,9 @@ export class IssueMasters {
     const { tower, live, readDb, screen, followMs, reportRetryMs } = this.options;
     entry.session = new MasterSession({ stateDir: this.options.stateDir, dataDir: issueDataDir(this.options.dataDir, taskId), binding: () => entry.binding,
       folder: join(this.options.stateDir, TODO_MASTERS_FOLDER, taskId), writeGuide: folder => writeTodoMasterGuide(folder, taskId), ...(baselineAt ? { baselineAt } : {}),
-      otherMaster: { session: id => this.masterSession(id), run: id => this.masterRun(id, taskId) }, turns: this.turnsOf(taskId, entry), tower, live, ...(followMs ? { followMs } : {}), ...(reportRetryMs ? { reportRetryMs } : {}),
+      otherMaster: { session: id => this.masterSession(id), run: id => this.masterRun(id, taskId) }, turns: this.turnsOf(taskId, entry), ref: `todo:${taskId}`, peer: ref => this.master(ref), tower, live, ...(followMs ? { followMs } : {}), ...(reportRetryMs ? { reportRetryMs } : {}),
       onChange: () => { if (entry.followed) this.notify(); } });
-    entry.tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), scope: `todo:${taskId}`, screen, started: (target, body, answer) => entry.session.started(target, body, answer), delegated: () => entry.session.delegatedTable(), approvalGate: input => entry.session.approvalGate(input) });
+    entry.tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), scope: `todo:${taskId}`, screen, started: (target, body, answer) => entry.session.started(target, body, answer), delegated: () => entry.session.delegatedTable(), approvalGate: input => entry.session.approvalGate(input), reply: args => entry.session.reply(args) });
     try { await mkdir(issueDataDir(this.options.dataDir, taskId), { recursive: true, mode: 0o700 }); await entry.session.start(); }
     catch (error) {
       entry.followed = false;

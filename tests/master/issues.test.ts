@@ -23,6 +23,9 @@ import { until } from '../helpers/until.js';
 import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import type { ChatMessage, Run, Session, Snapshot } from '../../shared/types.js';
 import '../helpers/skip-fsync.js';
+import { masterMessageHeader } from '../../shared/master.js';
+import { parseRunSenderMaster } from '../../server/runs/origin.js';
+import { masterRefOf } from '../../server/runs/subscription.js';
 
 const MAIN = 'claude:main';
 const SECRET = 'b'.repeat(64);
@@ -39,7 +42,7 @@ async function harness(t: test.TestContext) {
   const sessions: Session[] = [];
   const runs: Run[] = [];
   const histories = new Map<string, { updatedAt: string; messages: ChatMessage[] }>();
-  const headers: Array<{ path: string; capability?: string; master?: string; issue?: string }> = [];
+  const headers: Array<{ path: string; capability?: string; master?: string; issue?: string; sender?: string }> = [];
   /** Messages to sessions are refused while set. */
   let refuse = false;
   /** Messages to sessions are answered only once this settles. */
@@ -65,12 +68,17 @@ async function harness(t: test.TestContext) {
     const url = new URL(req.url!, 'http://x');
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> : {};
     const sent = (name: string) => typeof req.headers[name] === 'string' ? req.headers[name] as string : undefined;
-    if (req.method === 'POST') headers.push({ path: url.pathname, ...Object.fromEntries(([['capability', 'x-tower-run-capability'], ['master', 'x-tower-master'], ['issue', 'x-tower-issue']] as const).flatMap(([key, name]) => sent(name) ? [[key, sent(name)]] : [])) });
+    if (req.method === 'POST') headers.push({ path: url.pathname, ...Object.fromEntries(([['capability', 'x-tower-run-capability'], ['master', 'x-tower-master'], ['issue', 'x-tower-issue'], ['sender', 'x-tower-master-sender']] as const).flatMap(([key, name]) => sent(name) ? [[key, sent(name)]] : [])) });
     const message = /^\/api\/sessions\/([^/]+)\/messages$/.exec(url.pathname);
     if (req.method === 'POST' && message) await paused;
     if (req.method === 'POST' && message && refuse) { res.writeHead(409, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'busy' })); return; }
     if (req.method === 'POST' && (message || url.pathname === '/api/sessions')) {
       const run = turn(message ? decodeURIComponent(message[1]) : `codex:${randomUUID().slice(0, 6)}`, String(body.prompt));
+      // The worker marks a master's own message into another master's conversation (RunManager.masterSender).
+      const senderMaster = parseRunSenderMaster(sent('x-tower-master-sender'));
+      const target = sessions.find(session => session.id === run.sessionId);
+      const targetRef = run.sessionId === MAIN ? 'main' : target ? masterRefOf(dir, target.cwd) : undefined;
+      if (senderMaster && targetRef && senderMaster !== targetRef) Object.assign(run, { sender: 'master', senderMaster, prompt: `${masterMessageHeader(senderMaster, run.id)}\n\n${run.prompt}` });
       res.writeHead(202, { 'Content-Type': 'application/json' }).end(JSON.stringify(message ? { run } : { session: { id: run.sessionId }, run }));
       return;
     }
@@ -102,7 +110,7 @@ async function harness(t: test.TestContext) {
   /** What pages were told of the issue masters' running work, in order. */
   const told: Record<string, number>[] = [];
   const openIssues = () => {
-    const opened = new IssueMasters({ stateDir: dir, dataDir: data, tower, live, screen: new MasterScreen({ broadcast: () => {} }), main: { binding: () => main?.binding() }, followMs: 60_000, reportRetryMs: 1,
+    const opened = new IssueMasters({ stateDir: dir, dataDir: data, tower, live, screen: new MasterScreen({ broadcast: () => {} }), main: { binding: () => main?.binding(), session: () => main }, followMs: 60_000, reportRetryMs: 1,
       onChange: () => told.push(opened.runningTasks()) });
     cleanup.push(() => opened.close());
     return opened;
@@ -111,7 +119,7 @@ async function harness(t: test.TestContext) {
   // The main master tells the first registry of its turns; a registry opened later is told by its own masters only.
   const first = issues;
   main = new MasterSession({ stateDir: dir, dataDir: data, settings, tower, live, room, followMs: 60_000, reportRetryMs: 1,
-    otherMaster: { session: id => issues.masterSession(id), run: id => issues.masterRun(id) }, turns: first.turnsOf() });
+    otherMaster: { session: id => issues.masterSession(id), run: id => issues.masterRun(id) }, turns: first.turnsOf(), ref: 'main', peer: ref => issues.master(ref) });
   await main.start();
   cleanup.push(async () => { await main.close(); await room.flush(); });
   const issueSession = (taskId: string, extra: Partial<Session> = {}): Session => {
@@ -193,7 +201,7 @@ test('an issue master\'s tool call goes as the main master\'s do, naming its tod
   h.turn(a.id, '배포해 줘');
   const answer = await h.issues().call('task-a', 'tower_api', { method: 'POST', path: '/api/sessions', body: { cwd: '/work', prompt: 'deploy it' } }) as { state: string; body: { run: Run } };
   assert.equal(answer.state, 'succeeded');
-  assert.deepEqual(h.headers.at(-1), { path: '/api/sessions', master: SECRET, issue: 'task-a' }, 'the master\'s own secret and its todo, no calling-turn credential');
+  assert.deepEqual(h.headers.at(-1), { path: '/api/sessions', master: SECRET, issue: 'task-a', sender: 'todo:task-a' }, 'the master\'s own secret and its todo, no calling-turn credential');
   const issue = h.issues().get('task-a')!;
   assert.deepEqual(issue.delegatedTable().rows.map(row => row[1]), ['deploy it'], 'the issue master was found for the call and follows its work');
   // A follow-up the delegated session hands on with its own credential stays with the issue master.
@@ -207,7 +215,7 @@ test('an issue master\'s tool call goes as the main master\'s do, naming its tod
   assert.equal(h.reports(a.id).length, 1);
   // A call for a todo with no open issue master still goes, naming its todo.
   await h.issues().call('task-z', 'tower_api', { method: 'POST', path: '/api/sessions/codex:x/messages', body: { prompt: 'still goes' } });
-  assert.deepEqual(h.headers.at(-1), { path: '/api/sessions/codex:x/messages', master: SECRET, issue: 'task-z' });
+  assert.deepEqual(h.headers.at(-1), { path: '/api/sessions/codex:x/messages', master: SECRET, issue: 'task-z', sender: 'todo:task-z' });
 });
 
 test('the newest open session of a todo is its master; subfolders and subagents are not; a closed one stops and its file is cleared away after 30 days', async t => {
@@ -285,7 +293,7 @@ test('through the host, an issue master\'s tool server names its todo and calls 
       res.write(`id: 1\nevent: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
       return;
     }
-    seen.push({ path: req.url!, ...(req.headers['x-tower-run-capability'] ? { capability: String(req.headers['x-tower-run-capability']) } : {}), ...(req.headers['x-tower-master'] ? { master: String(req.headers['x-tower-master']) } : {}), ...(req.headers['x-tower-issue'] ? { issue: String(req.headers['x-tower-issue']) } : {}) });
+    seen.push({ path: req.url!, ...(req.headers['x-tower-run-capability'] ? { capability: String(req.headers['x-tower-run-capability']) } : {}), ...(req.headers['x-tower-master'] ? { master: String(req.headers['x-tower-master']) } : {}), ...(req.headers['x-tower-issue'] ? { issue: String(req.headers['x-tower-issue']) } : {}), ...(req.headers['x-tower-master-sender'] ? { sender: String(req.headers['x-tower-master-sender']) } : {}) });
     res.writeHead(202, { 'Content-Type': 'application/json' }).end(JSON.stringify({ session: { id: 'codex:new' }, run: { id: 'run-new', sessionId: 'codex:new', createdAt: new Date().toISOString() } }));
   });
   await new Promise<void>(resolve => web.listen(0, '127.0.0.1', resolve));
@@ -312,12 +320,12 @@ test('through the host, an issue master\'s tool server names its todo and calls 
   const issueTools = await mcp({ id: 'todo:task-h' });
   const reply = await issueTools('tower_api', { method: 'POST', path: '/api/sessions', body: { cwd: '/work', prompt: 'fix it' } });
   assert.equal(reply.result.isError, undefined);
-  assert.deepEqual(seen.at(-1), { path: '/api/sessions', master: 'b'.repeat(64), issue: 'task-h' });
+  assert.deepEqual(seen.at(-1), { path: '/api/sessions', master: 'b'.repeat(64), issue: 'task-h', sender: 'todo:task-h' });
   assert.deepEqual(host.issues!.get('task-h')!.delegatedTable().rows.map(row => row[3]), ['codex:new'], 'the issue master follows what it started');
   assert.match(await readFile(join(stateDir, 'todo-masters', 'task-h', 'CLAUDE.md'), 'utf8'), /`task-h`/);
   const mainTools = await mcp();
   await mainTools('tower_api', { method: 'POST', path: '/api/sessions/codex:new/messages', body: { prompt: 'more' } });
-  assert.deepEqual(seen.at(-1), { path: '/api/sessions/codex:new/messages', master: 'b'.repeat(64) });
+  assert.deepEqual(seen.at(-1), { path: '/api/sessions/codex:new/messages', master: 'b'.repeat(64), sender: 'main' }, 'the main master\'s own calls name it');
   assert.equal(host.session!.delegatedTable().rows.length, 1, 'the main master follows its own call');
   // A tool server that names no proper todo is refused.
   await assert.rejects(page.call('tool', { name: 'tower_api', arguments: { method: 'GET', path: '/api/link' }, instance: 'todo:../x' }), /올바르지 않습니다/);
@@ -497,4 +505,82 @@ test('an issue master let go of while its report is answered leaves none of its 
   const report = h.runs.find(run => run.sessionId === a.id && run.prompt.startsWith('[Tower report]'));
   assert.ok(report, 'the report already sent is not taken back');
   assert.equal(h.issues().masterRun(report.id), false, 'its turn is not kept for a master no longer followed');
+});
+
+test('one issue master asks another: the message names it, its turn ending is reported, and the final result comes back as a reply to its current session', async t => {
+  const h = await harness(t);
+  const a = h.issueSession('task-a');
+  const b = h.issueSession('task-b');
+  await h.issues().refresh();
+  const asking = h.turn(a.id, 'B에게 빌드 확인을 맡겨');
+  const sent = (await h.issues().call('task-a', 'session_message', { sessionId: b.id, prompt: '빌드가 통과하는지 확인해 주세요.' }) as { body: { run?: Run } }).body;
+  assert.ok(sent.run?.id);
+  assert.equal(h.headers.at(-1)?.sender, 'todo:task-a', 'an issue master\'s own call names it');
+  const request = h.runs.find(run => run.id === sent.run!.id)!;
+  const requestId = request.id.slice(0, 8);
+  assert.equal(request.senderMaster, 'todo:task-a');
+  assert.match(request.prompt, new RegExp(`^\\[From master: the issue master of todo task-a · request ${requestId}\\]`));
+  h.finish(asking, '맡겼어요');
+  await h.follow();
+  // B's turn ends having only handed the work on: A hears it ended, and that the final result comes as a reply.
+  const handedOn = h.turn('codex:b-work', 'build check', h.from(request));
+  h.finish(request, '빌드 확인을 다른 세션에 맡겼습니다.');
+  await h.follow();
+  const ended = h.reports(a.id).at(-1) ?? '';
+  assert.match(ended, /Work you handed out ended/);
+  assert.match(ended, new RegExp(`final result with master_reply, which comes to you as a reply \\(request ${requestId}\\)`));
+  // B's own report of its handed-out work reminds it of A's open request.
+  h.finish(handedOn, '빌드 통과');
+  await h.follow();
+  assert.match(h.reports(b.id).at(-1) ?? '', new RegExp(`not replied to yet:\\n- request ${requestId} from the issue master of todo task-a: "빌드가 통과하는지 확인해 주세요\\."`));
+  // A replaced its session (compaction): the reply goes to the session its todo has now.
+  const a2 = h.issueSession('task-a');
+  await h.issues().refresh();
+  assert.equal(h.issues().get('task-a')?.binding()?.sessionId, a2.id);
+  const unknown = await h.issues().call('task-b', 'master_reply', { requestId: 'ffffffff', text: '?' }) as { error?: string; open?: Array<{ requestId: string }> };
+  assert.match(unknown.error ?? '', /request id가 없습니다/);
+  assert.deepEqual(unknown.open?.map(item => item.requestId), [requestId], 'it is told which requests are open');
+  const before = h.runs.length;
+  assert.deepEqual(await h.issues().call('task-b', 'master_reply', { requestId, text: '빌드가 통과했습니다. 로그: ci#12' }), { replied: true, to: 'the issue master of todo task-a', note: 'Tower reports it to that master\'s current session as a reply.' });
+  await h.follow();
+  const replies = h.runs.slice(before).filter(run => run.prompt.includes('replied'));
+  assert.equal(replies.length, 1, 'one reply, sent once');
+  assert.equal(replies[0]!.sessionId, a2.id);
+  assert.match(replies[0]!.prompt, /^\[Tower report\] A master you sent a request to replied/);
+  assert.match(replies[0]!.prompt, new RegExp(`"빌드가 통과하는지 확인해 주세요\\." — reply from the issue master of todo task-b \\(request ${requestId}, session ${b.id}\\):\\n    빌드가 통과했습니다\\. 로그: ci#12`));
+  assert.equal(replies[0]!.senderMaster, undefined, 'Tower brings it: B wrote nothing into A\'s conversation, and follows nothing there');
+  assert.match((await h.issues().call('task-b', 'master_reply', { requestId, text: 'again' }) as { error?: string }).error ?? '', /이미 회신했습니다/);
+  await h.follow();
+  assert.equal(h.runs.slice(before).filter(run => run.prompt.includes('replied')).length, 1);
+  const later = h.turn('codex:b-more', 'more', h.from(request));
+  h.finish(later, 'done');
+  await h.follow();
+  assert.match(h.reports(b.id).at(-1) ?? '', /"more" — completed/);
+  assert.doesNotMatch(h.reports(b.id).at(-1) ?? '', /not replied to yet/, 'answered, it is no longer listed');
+});
+
+test('a reply waits while its master is stopped, and goes nowhere when that master is not open', async t => {
+  const h = await harness(t);
+  const b = h.issueSession('task-b');
+  await h.issues().refresh();
+  // The main master asked B, then the owner stops the main master.
+  const request = h.turn(b.id, `${masterMessageHeader('main', 'r'.repeat(8))}\n\n상태 알려줘`);
+  Object.assign(request, { sender: 'master', senderMaster: 'main' });
+  const stopped = h.turn(MAIN, '그만');
+  Object.assign(stopped, { ownerStopped: true, status: 'cancelled', finishedAt: h.tick() });
+  await h.follow();
+  assert.ok(h.main.heartbeatStopped());
+  const before = h.runs.length;
+  assert.deepEqual((await h.issues().call('task-b', 'master_reply', { requestId: request.id.slice(0, 8), text: '진행 중입니다' }) as { replied?: boolean }).replied, true);
+  await h.follow();
+  assert.equal(h.runs.slice(before).filter(run => run.sessionId === MAIN).length, 0, 'held while the owner\'s stop stands');
+  h.turn(MAIN, '계속해');
+  await h.follow();
+  assert.equal(h.reports(MAIN).filter(prompt => prompt.includes('진행 중입니다')).length, 1, 'the owner\'s next word lets it through');
+  // A request from an issue master no longer open cannot be answered; nothing is marked.
+  const orphan = h.turn(b.id, `${masterMessageHeader('todo:task-gone', 'o'.repeat(8))}\n\n이것도`);
+  Object.assign(orphan, { sender: 'master', senderMaster: 'todo:task-gone' });
+  await h.follow();
+  assert.match((await h.issues().call('task-b', 'master_reply', { requestId: orphan.id.slice(0, 8), text: 'done' }) as { error?: string }).error ?? '', /열려 있지 않아/);
+  assert.match((await h.issues().call('task-b', 'master_reply', { requestId: orphan.id.slice(0, 8), text: 'done' }) as { error?: string }).error ?? '', /열려 있지 않아/, 'still open to answer');
 });

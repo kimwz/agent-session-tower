@@ -210,6 +210,17 @@ test("the master's requests say they come from the master agent and keep their l
   for (const plain of [owner, older]) { assert.doesNotMatch(plain, /from-master|마스터 에이전트/); assert.match(plain, /<span>나<\/span>/); }
 });
 
+test("another master's message in a master's conversation names that master: the main master, or the issue master with a link to its todo", () => {
+  const messages = [row('main', '[From master: the main master · request 11111111]\n\n상태?', 10_000), row('issue', '[From master: the issue master of todo task-a · request 22222222]\n\n빌드 확인', 30_000)];
+  const runs = [run('from-main', { prompt: messages[0]!.text, sender: 'master', senderMaster: 'main' }),
+    run('from-issue', { prompt: messages[1]!.text, createdAt: at(29_000), startedAt: at(30_000), finishedAt: at(40_000), sender: 'master', senderMaster: 'todo:task-a' })];
+  const { matches } = matchChatRuns(messages, runs, 'session');
+  assert.equal(matches.get('issue')?.senderMaster, 'todo:task-a');
+  const [main, issue] = renderToStaticMarkup(createElement(ChatTranscript, { messages, runMatches: matches })).split('<article').slice(1);
+  assert.match(main, /from-master/); assert.match(main, /메인 마스터/); assert.doesNotMatch(main, /마스터 에이전트/);
+  assert.match(issue, /<a href="\?view=todo&amp;task=task-a"[^>]*>이슈마스터<\/a>/);
+});
+
 test('a master instruction a running turn took minutes later still says it comes from the master agent', () => {
   const late = row('late', '추가 지시입니다', 200_000);
   const steered = run('steered', { prompt: '추가 지시입니다', sender: 'master', createdAt: at(9000), startedAt: at(10_000), finishedAt: undefined, status: 'running',

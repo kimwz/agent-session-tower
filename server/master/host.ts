@@ -3,7 +3,7 @@ import { chmod, mkdir, unlink, writeFile } from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { APP_VERSION } from '../../shared/app-identity.js';
-import type { MasterOverview, MasterStreamEvent } from '../../shared/master.js';
+import { MASTER_SENDER_HEADER, type MasterOverview, type MasterStreamEvent } from '../../shared/master.js';
 import type { Provider } from '../../shared/types.js';
 import { acquireStateLock, MonitorAlreadyRunning } from '../instance/state-lock.js';
 import { LiveState } from '../tower-tools/live-state.js';
@@ -162,7 +162,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'tools': return MASTER_TOOLS;
       case 'tool': {
         if (typeof args.name !== 'string' || !args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) throw failure('도구 호출이 올바르지 않습니다.', 'invalid');
-        if (args.instance === undefined) return tools!.call(args.name, args.arguments as Record<string, unknown>);
+        if (args.instance === undefined) return tools!.call(args.name, args.arguments as Record<string, unknown>, { [MASTER_SENDER_HEADER]: 'main' });
         // An issue master's call: it goes as the main master's do, naming its todo.
         const issue = typeof args.instance === 'string' ? ISSUE_INSTANCE.exec(args.instance)?.[1] : undefined;
         if (!issue) throw failure('도구 호출이 올바르지 않습니다.', 'invalid');
@@ -272,11 +272,11 @@ export async function startMasterHost(options: MasterHostOptions) {
     await room.start();
     // The owner's screen is one, whichever master uses it.
     const screen = new MasterScreen({ broadcast: event => room.broadcast(event) });
-    const masters = issues = new IssueMasters({ stateDir: paths.stateDir, dataDir: paths.data, tower, live, ...(readDb ? { readDb } : {}), screen, main: { binding: () => session?.binding() }, onChange: broadcastOverview,
+    const masters = issues = new IssueMasters({ stateDir: paths.stateDir, dataDir: paths.data, tower, live, ...(readDb ? { readDb } : {}), screen, main: { binding: () => session?.binding(), session: () => session }, onChange: broadcastOverview,
       ...(options.followMs ? { followMs: options.followMs } : {}) });
     session = new MasterSession({ stateDir: paths.stateDir, dataDir: paths.data, settings, tower, live, room, onChange: broadcastOverview,
-      otherMaster: { session: id => masters.masterSession(id), run: id => masters.masterRun(id) }, turns: masters.turnsOf(), ...(options.followMs ? { followMs: options.followMs } : {}) });
-    tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), screen, started: (target, body, answer) => session!.started(target, body, answer), delegated: () => session!.delegatedTable(), approvalGate: input => session!.approvalGate(input) });
+      otherMaster: { session: id => masters.masterSession(id), run: id => masters.masterRun(id) }, turns: masters.turnsOf(), ref: 'main', peer: ref => masters.master(ref), ...(options.followMs ? { followMs: options.followMs } : {}) });
+    tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), screen, started: (target, body, answer) => session!.started(target, body, answer), delegated: () => session!.delegatedTable(), approvalGate: input => session!.approvalGate(input), reply: args => session!.reply(args) });
     const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), ...options.voice?.elevenLabs });
     voice = new MasterVoice({ dataDir: paths.data, settings, room, elevenLabs, firstReply: options.voice?.firstReply ?? new FirstReplyMaker({ stateDir: paths.stateDir }), ...(options.voice?.timing ? { timing: options.voice.timing } : {}),
       hooks: { hide: text => text, connectedSince: () => tower.connectedSince(), send: input => session!.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }),

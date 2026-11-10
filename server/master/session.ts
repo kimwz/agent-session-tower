@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { continuedRunById } from '../runs/continuations.js';
 import { join } from 'node:path';
-import { MASTER_FOLDER, type MasterBinding, type MasterSpeak, type MasterTaskState, type MasterUnspoken } from '../../shared/master.js';
+import { MASTER_FOLDER, MASTER_MESSAGE_MARK, masterName, masterRequestId, type MasterBinding, type MasterRef, type MasterSpeak, type MasterTaskState, type MasterUnspoken } from '../../shared/master.js';
 import type { AutoPromptJob, ChatMessage, Provider, Run, RunReply, SessionDetail, SessionOutcome, Snapshot } from '../../shared/types.js';
 import type { MasterEntryData, MasterFollowState } from '../../shared/master.js';
 import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -36,6 +36,10 @@ const OWNER_NOTICE_RETRY_MS = 30_000;
 /** Settled approval waits kept, so a stale state cannot make one look new. */
 const SETTLED_WAITS = 200;
 const STOPS_SEEN = 100;
+/** Requests from other masters kept: every open one, and the newest answered ones up to this many in all. */
+const INCOMING = 100;
+/** Longest reply one master sends another. */
+const REPLY_CHARS = 20_000;
 /** How Tower adds attached files to a request in a session's history (`attachmentPrompt`), once spaces are folded. */
 const ATTACHED = ' 첨부 파일 (사용자가 이번 메시지에 첨부한 로컬 파일):';
 
@@ -45,7 +49,7 @@ const ATTACHED = ' 첨부 파일 (사용자가 이번 메시지에 첨부한 로
  */
 export interface Followed {
   id: string;
-  kind: 'delegated' | 'spoken' | 'report';
+  kind: 'delegated' | 'spoken' | 'report' | 'reply';
   title: string;
   sessionId?: string;
   runId?: string;
@@ -79,6 +83,9 @@ export interface Followed {
   key?: string;
   /** Work sent to another master's session: reported when its turn ends, but what that master hands out is its own. */
   master?: true;
+  /** A reply: the master that sent it, and the run of the request it answers (the request this master sent it). */
+  from?: MasterRef;
+  replyTo?: string;
   /** Spoken or report runs that share one turn (steered into it) are read aloud once, as that turn's answer. */
   turn?: string;
   spoke?: true;
@@ -97,8 +104,11 @@ export interface Followed {
 export interface VoicedTurn { turn: string; state: 'started' | 'stopped' | 'done'; at: string }
 const VOICED = 200;
 
+/** A request another master sent into this master's conversation (its run is marked `senderMaster`), answered with master_reply. */
+export interface Incoming { runId: string; from: MasterRef; title: string; at: string; repliedAt?: string }
+
 /** `closedAt`: an issue master's session was closed then; its file waits there to be opened again or cleared away. */
-interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; followed: Followed[]; approvalWaits?: ApprovalWait[]; voiced?: VoicedTurn[]; stoppedAt?: string; stopsSeen?: string[]; closedAt?: string }
+interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; followed: Followed[]; approvalWaits?: ApprovalWait[]; voiced?: VoicedTurn[]; stoppedAt?: string; stopsSeen?: string[]; closedAt?: string; incoming?: Incoming[] }
 /** What sending a report needs of what it is about: finished work, or an approval it waits on. */
 type Reportable = Pick<Followed, 'report' | 'reportTries' | 'reportHeld' | 'reconciles' | 'reportId' | 'reportAt' | 'reportRunId'>;
 
@@ -137,6 +147,10 @@ export interface MasterSessionOptions {
    * another master's turn hands out is that master's, even when it began with a message from this one.
    */
   otherMaster?: { session(id: string): boolean; run(id: string): boolean };
+  /** Which master this is; the main master unless given. */
+  ref?: MasterRef;
+  /** Another master, open now, that a reply goes to (server/master/issues.ts `master`). */
+  peer?(ref: MasterRef): MasterSession | undefined;
   /** Told of this master's own turns as they are remembered and forgotten, so other masters can tell them apart. */
   turns?: { add(runId: string): void; delete(runId: string): void };
   tower: TowerClient;
@@ -188,6 +202,7 @@ export class MasterSession {
         ...(typeof saved.stoppedAt === 'string' ? { stoppedAt: saved.stoppedAt } : {}),
         stopsSeen: (Array.isArray(saved.stopsSeen) ? saved.stopsSeen : []).filter(id => typeof id === 'string'),
         approvalWaits: (Array.isArray(saved.approvalWaits) ? saved.approvalWaits : []).filter(item => item && typeof item.key === 'string' && typeof item.firstSeenAt === 'string'),
+        incoming: (Array.isArray(saved.incoming) ? saved.incoming : []).filter(item => item && typeof item.runId === 'string' && typeof item.from === 'string'),
         voiced: (Array.isArray(saved.voiced) ? saved.voiced : []).filter(item => item && typeof item.turn === 'string')
           // What was being read when the host stopped is not read on: its place in the words is gone.
           .map(item => item.state === 'started' ? { ...item, state: 'stopped' as const } : item) };
@@ -329,7 +344,7 @@ export class MasterSession {
     console.error('The master\'s follow state could not be read or moved aside; nothing is saved until Tower restarts:', error);
   }
 
-  failedReports(): number { return this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'failed').length; }
+  failedReports(): number { return this.file.followed.filter(item => (item.kind === 'delegated' || item.kind === 'reply') && item.report === 'failed').length; }
 
   /** A report is on its way: a host of another build waits until it is sent. */
   busy(): boolean { return [...this.file.followed, ...this.file.approvalWaits ?? []].some(item => item.report === 'sending'); }
@@ -486,6 +501,7 @@ export class MasterSession {
     if (this.file.stoppedAt && masterTurns.some(run => Date.parse(run.createdAt) > Date.parse(this.file.stoppedAt!) && ownerMessage(run))) {
       delete this.file.stoppedAt; changed = true;
     }
+    if (this.takeIncoming(masterTurns)) changed = true;
     const after = (at: string) => Date.parse(at) >= Date.parse(this.file.baselineAt);
     for (const item of this.file.followed) {
       if (item.kind !== 'delegated' || item.node) continue;
@@ -642,13 +658,81 @@ export class MasterSession {
    */
   private async sendReports(binding: MasterBinding): Promise<boolean> {
     if (this.file.stoppedAt) return false;
-    const waiting = this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'pending' && this.reportDue(item, item.createdAt, this.now()));
-    if (!waiting.length) return false;
+    const due = (item: Followed) => item.report === 'pending' && this.reportDue(item, item.createdAt, this.now());
+    const waiting = this.file.followed.filter(item => item.kind === 'delegated' && due(item));
+    const replies = this.file.followed.filter(item => item.kind === 'reply' && due(item));
+    if (!waiting.length && !replies.length) return false;
     const line = (item: Followed) => `- "${item.title}" — ${item.state}${item.sessionId ? ` (session ${item.sessionId}${item.node ? ` on node ${item.node}` : ''})` : ''}`
       + (item.answer ? `\n  Its answer:\n${indent(item.answer)}` : '\n  Its answer could not be read; the owner can open the session.')
-      + `\n  Goal outcome: ${item.outcome ?? 'unknown (not yet verified)'}.`;
-    await this.sendBatches(binding, waiting, line, (reportId, lines) => `${REPORT_MARK} Work you handed out ended (report ${reportId}):\n${lines.join('\n')}\n\nExecution completed is not proof that the owner's goal is done. Inspect the answers and tracked follow-up work; continue authorized remaining steps, respect real approval waits and owner stops, and do not resubmit work already running.`);
+      + `\n  Goal outcome: ${item.outcome ?? 'unknown (not yet verified)'}.`
+      + (item.master && item.runId ? `\n  It went to another master: that master sends its final result with master_reply, which comes to you as a reply (request ${masterRequestId(item.runId)}).` : '');
+    if (waiting.length) await this.sendBatches(binding, waiting, line, (reportId, lines) => `${REPORT_MARK} Work you handed out ended (report ${reportId}):\n${lines.join('\n')}\n\nExecution completed is not proof that the owner's goal is done. Inspect the answers and tracked follow-up work; continue authorized remaining steps, respect real approval waits and owner stops, and do not resubmit work already running.${this.openRequests()}`);
+    // Replies wait while Tower refuses this master's reports, in the order they came.
+    if (this.closed || waiting.some(item => item.report === 'pending')) return true;
+    const reply = (item: Followed) => `- "${item.title}" — reply from ${item.from ? masterName(item.from) : 'another master'}${item.replyTo ? ` (request ${masterRequestId(item.replyTo)}${item.sessionId ? `, session ${item.sessionId}` : ''})` : ''}:\n${indent(item.answer ?? '')}`;
+    if (replies.length) await this.sendBatches(binding, replies, reply, (reportId, lines) => `${REPORT_MARK} A master you sent a request to replied (report ${reportId}):\n${lines.join('\n')}\n\nThis is that master's result for your request, not the owner's word. Check it as you would any report and carry on with the owner's goal.`);
     return true;
+  }
+
+  /** Requests from other masters still waiting for this master's reply, as a reminder at the end of its reports. */
+  private openRequests(): string {
+    const open = (this.file.incoming ?? []).filter(item => !item.repliedAt);
+    if (!open.length) return '';
+    return `\n\nRequests other masters sent you that you have not replied to yet:\n${open.map(item => `- request ${masterRequestId(item.runId)} from ${masterName(item.from)}: "${item.title}"`).join('\n')}\nWhen one is done, including the work you handed out for it, send its result with master_reply.`;
+  }
+
+  /** Messages another master sent into this master's conversation, kept until answered (the newest ones after). */
+  private takeIncoming(turns: readonly Run[]): boolean {
+    const incoming = this.file.incoming ??= [];
+    let changed = false;
+    for (const run of turns) {
+      if (!run.senderMaster || run.senderMaster === (this.options.ref ?? 'main') || incoming.some(item => item.runId === run.id)) continue;
+      incoming.push({ runId: run.id, from: run.senderMaster, title: truncate(requestText(run.prompt), 80), at: run.createdAt });
+      changed = true;
+    }
+    while (incoming.length > INCOMING) {
+      const answered = incoming.findIndex(item => item.repliedAt);
+      incoming.splice(answered < 0 ? 0 : answered, 1);
+    }
+    return changed;
+  }
+
+  /**
+   * master_reply: this master's result for a request another master sent it, handed to that master (open now) to report
+   * to its current session. Answered once; the request is named by its id (the start of its run's id) from the message.
+   */
+  async reply(args: Record<string, unknown>): Promise<unknown> {
+    const requestId = typeof args.requestId === 'string' ? args.requestId.trim() : '';
+    const text = typeof args.text === 'string' ? args.text.trim() : '';
+    const incoming = this.file.incoming ?? [];
+    const open = () => incoming.filter(item => !item.repliedAt).map(item => ({ requestId: masterRequestId(item.runId), from: masterName(item.from), title: item.title }));
+    if (!text) return { error: 'text가 필요합니다.' };
+    if (text.length > REPLY_CHARS) return { error: `회신은 ${REPLY_CHARS.toLocaleString()}자까지입니다. 줄이거나 결과가 있는 곳을 알려 주세요.` };
+    const found = requestId.length >= 8 ? incoming.filter(item => item.runId.startsWith(requestId)) : [];
+    if (found.length !== 1) return { error: '다른 마스터가 보낸 요청 중 이 request id가 없습니다. 메시지 첫 줄의 request id를 쓰세요.', open: open() };
+    const item = found[0]!;
+    if (item.repliedAt) return { error: '이 요청에는 이미 회신했습니다.', open: open() };
+    const peer = this.options.peer?.(item.from);
+    if (!peer) return { error: `${masterName(item.from)}가 지금 열려 있지 않아 회신하지 못했습니다. 필요하면 할 일 댓글로 남기세요.` };
+    // Handed over before it is marked here: a reply cut off midway goes again, and the other side takes it once.
+    try { await peer.receiveReply({ from: this.options.ref ?? 'main', replyTo: item.runId, title: item.title, text, ...(this.binding() ? { sessionId: this.binding()!.sessionId } : {}) }); }
+    catch (error) { return { error: `회신하지 못했습니다: ${error instanceof Error ? error.message : String(error)}` }; }
+    item.repliedAt = new Date(this.now()).toISOString();
+    await this.save();
+    return { replied: true, to: masterName(item.from), note: 'Tower reports it to that master\'s current session as a reply.' };
+  }
+
+  /** Another master's reply to a request this master sent it: reported to this master like finished work. */
+  async receiveReply(input: { from: MasterRef; replyTo: string; title: string; text: string; sessionId?: string }): Promise<void> {
+    if (this.closed) throw new TowerError('unavailable', '그 마스터가 막 닫혔습니다.');
+    if (!this.file.followed.some(item => item.kind === 'reply' && item.replyTo === input.replyTo)) {
+      const sent = this.file.followed.find(item => item.kind === 'delegated' && (item.runId === input.replyTo || item.currentRunId === input.replyTo));
+      this.add({ id: randomUUID(), kind: 'reply', title: sent?.title ?? input.title, from: input.from, replyTo: input.replyTo, ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        answer: truncate(input.text, REPLY_CHARS), createdAt: new Date(this.now()).toISOString(), state: 'completed', report: 'pending' });
+      await this.save();
+      this.options.onChange?.();
+    }
+    void this.follow();
   }
 
   /** Whether a report refused before has waited long enough to go again. */
@@ -674,8 +758,10 @@ export class MasterSession {
       const prompt = message(reportId, batch.map(line));
       for (const item of batch) { item.report = 'sending'; item.reportId = reportId; item.reportAt = new Date(this.options.now?.() ?? Date.now()).toISOString(); }
       await this.save();
-      // A master let go of meanwhile (an issue master closed) gets no new turn; one already sent is not taken back.
-      const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true, gate: async () => !this.closed })
+      // A master let go of meanwhile (an issue master closed) gets no new turn; one already sent is not taken back. An
+      // issue master moved to a newer session meanwhile (compaction) gets it there.
+      const target = this.binding() ?? binding;
+      const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(target.sessionId)}/messages`, { prompt }, { write: true, gate: async () => !this.closed })
         .catch(() => ({ state: 'uncertain' as const, status: 0, body: undefined }));
       const run = (response.body as { run?: Run } | undefined)?.run;
       for (const item of batch) {
@@ -687,7 +773,7 @@ export class MasterSession {
         item.reportTries = (item.reportTries ?? 0) + 1;
         if (item.reportTries >= REPORT_TRIES) item.report = 'failed';
       }
-      if (response.state === 'succeeded' && run?.id) this.reported(run, binding, prompt);
+      if (response.state === 'succeeded' && run?.id) this.reported(run, target, prompt);
       // Tower refused it (the master busy, or the web away): the rest waits for the next look.
       if (response.state !== 'succeeded') break;
     }
@@ -800,7 +886,7 @@ export class MasterSession {
    * in its history, by its report ID. Found, it counts as sent; surely missing after a while, it goes again.
    */
   private async reconcile(snapshot: Snapshot, binding: MasterBinding): Promise<boolean> {
-    const reportable = [...this.file.followed.filter(item => item.kind === 'delegated') as Reportable[], ...this.file.approvalWaits ?? []];
+    const reportable = [...this.file.followed.filter(item => item.kind === 'delegated' || item.kind === 'reply') as Reportable[], ...this.file.approvalWaits ?? []];
     const doubtful = reportable.filter(item => item.report === 'uncertain' && item.reportId);
     if (!doubtful.length) return false;
     let changed = false;
@@ -956,11 +1042,12 @@ export class MasterSession {
 
 /**
  * Whether a run in a master's session is the owner speaking to it, spoken or written. Tower's reports and notices,
- * its continuations and permission decision records (which it files as the owner's), and work other turns sent are not.
+ * its continuations and permission decision records (which it files as the owner's), work other turns sent, and
+ * messages other masters sent (marked by the worker, `senderMaster`) are not.
  */
 function ownerMessage(run: Run): boolean {
-  return !run.delegation && !run.scheduled && !run.permissionNotice && !run.permissionRequestIds?.length && !run.updateWrapUp
-    && !run.prompt.startsWith(REPORT_MARK) && !run.prompt.startsWith(TOWER_NOTICE) && (!run.origin || run.origin.kind === 'owner');
+  return !run.delegation && !run.senderMaster && !run.scheduled && !run.permissionNotice && !run.permissionRequestIds?.length && !run.updateWrapUp
+    && !run.prompt.startsWith(REPORT_MARK) && !run.prompt.startsWith(TOWER_NOTICE) && !run.prompt.startsWith(MASTER_MESSAGE_MARK) && (!run.origin || run.origin.kind === 'owner');
 }
 
 /** The run whose words answer `run`: the turn it was steered into, when it was. */
@@ -986,6 +1073,8 @@ export function lastMessage(run: Run): string | undefined {
   return text || undefined;
 }
 
+/** A request's own words, without the line saying which master sent it. */
+function requestText(prompt: string): string { return prompt.startsWith(MASTER_MESSAGE_MARK) ? prompt.slice(prompt.indexOf('\n') + 1).trim() : prompt; }
 function truncate(text: string, length: number): string { return text.length > length ? `${text.slice(0, length)}…` : text; }
 function indent(text: string): string { return text.split('\n').map(line => `    ${line}`).join('\n'); }
 const normalize = (text: string) => text.replace(/\s+/g, ' ').trim();

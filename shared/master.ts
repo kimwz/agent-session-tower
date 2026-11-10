@@ -5,7 +5,8 @@
  * `client/src/master` and this file, so it can be removed as a unit.
  */
 
-import type { Provider, SessionStatus } from './types.js';
+import type { Provider, RunSenderMaster, SessionStatus } from './types.js';
+import { MASTER_MESSAGE_MARK } from './task-notification.js';
 
 /** The master's folder under Tower's state directory: the session runs there, with its guide files. */
 export const MASTER_FOLDER = 'master-session';
@@ -23,6 +24,29 @@ export const TODO_MASTER_TASK_ID = /^[A-Za-z0-9_-]{1,64}$/;
  * that todo's family, and trusts it only together with a verified master caller.
  */
 export const TODO_MASTER_ISSUE_HEADER = 'X-Tower-Issue';
+
+/** A master: the main master, or the issue master of a todo. */
+export type MasterRef = RunSenderMaster;
+/** The todo an issue master's ref names, or nothing for the main master. */
+export const masterRefTask = (ref: MasterRef): string | undefined => ref === 'main' ? undefined : ref.slice('todo:'.length);
+/**
+ * Sent by the master host with its own caller secret on the calls a master's own tool calls make (never on its
+ * bookkeeping: the owner's spoken words it relays, reports, notices): which master is calling. The web trusts it only
+ * together with a verified master caller; a message it carries into another master's conversation is marked as that
+ * master's (Run.senderMaster).
+ */
+export const MASTER_SENDER_HEADER = 'X-Tower-Master-Sender';
+export { MASTER_MESSAGE_MARK };
+/** The short request id a message from another master is answered by (master_reply): the start of its run's id. */
+export const masterRequestId = (runId: string): string => runId.slice(0, 8);
+/** How a master is named to another master's model. */
+export function masterName(ref: MasterRef): string {
+  const task = masterRefTask(ref);
+  return task ? `the issue master of todo ${task}` : 'the main master';
+}
+export function masterMessageHeader(from: MasterRef, runId: string): string {
+  return `${MASTER_MESSAGE_MARK} ${masterName(from)} · request ${masterRequestId(runId)}]`;
+}
 
 /** ElevenLabs models the master reads aloud with; the first is the default (fast, natural Korean). */
 export const MASTER_TTS_MODELS = ['eleven_v4_turbo', 'eleven_v3_conversational', 'eleven_v3', 'eleven_flash_v2_5'] as const;

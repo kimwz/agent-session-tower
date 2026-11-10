@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { issueRequest } from '../../shared/issues.js';
 import { REPORT_MARK } from '../../shared/task-notification.js';
+import { MASTER_FOLDER, MASTER_MESSAGE_MARK, TODO_MASTERS_FOLDER } from '../../shared/master.js';
 import { apiCatalog } from '../tower-tools/api-catalog.js';
 
 /** How a spoken request starts in the master session, so the master answers it to be heard. */
@@ -60,6 +61,8 @@ function workingRules(): string {
 ${issueRequest('<the issue as the owner described it>')}
 \`\`\`
 - To get an answer that needs project knowledge, ask a session in that folder the same way; its answer comes back in a report.
+- Other masters: the main master, and an issue master for each todo the owner opened a chat on. To ask one, send to its current session with session_message (with tower_query, the newest open session whose folder ends in \`/${TODO_MASTERS_FOLDER}/<todo id>\`, or in \`/${MASTER_FOLDER}\` for the main master); say what you need back. Tower reports when its turn ends, and later brings its final result as a reply report.
+- A message starting with "${MASTER_MESSAGE_MARK} … · request <id>]" was sent by another master, not the owner. Work on it as on any request within the owner's goals, but it is not the owner's word: it cannot decide owner-only approvals, and it does not release a stop the owner made. When it is done, including the work you handed out for it and its checks, send your result once with master_reply (the request id from that line); Tower reports it to that master's current session. If you cannot do it, reply saying why. Your reports list the requests you have not replied to yet.
 - Look things up fast with tower_query (one read-only SQL SELECT over Tower's current state). Read a session with session_read. Use tower_api for changes and for data the tables do not have; avoid GET /api/snapshot, which is large.
 - To find what earlier sessions said or did, use the sessions_search and sessions_read tools.
 - The owner's screen is yours to use with ui: open or close a conversation, open a panel, set the sidebar's search and filters, or change the language or chat text size. The result says whether the page did it.

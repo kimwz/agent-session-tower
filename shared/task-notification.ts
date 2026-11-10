@@ -4,6 +4,8 @@ export const TASK_NOTICE = 'Background task';
 export const TOWER_NOTICE = '[Agent Session Tower]';
 /** Starts Tower's message to the master when work it handed out ends: Tower's own words, never the owner's. */
 export const REPORT_MARK = '[Tower report]';
+/** Starts a message one master sent into another master's conversation (shared/master.ts `masterMessageHeader`): never the owner's. */
+export const MASTER_MESSAGE_MARK = '[From master:';
 
 const FAILED = /^(failed|killed|error)$/i;
 

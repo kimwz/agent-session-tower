@@ -207,6 +207,11 @@ export interface RunOrigin {
  * Set only by the entry point that authenticated the caller, and for display only: nothing is granted or refused by it.
  */
 export type RunSender = 'master';
+/**
+ * Set by the worker only on a message one master sent into another master's conversation: the sending master, the main
+ * master or a todo's issue master (server/runs/origin.ts `parseRunSenderMaster`). Never the owner's word.
+ */
+export type RunSenderMaster = 'main' | `todo:${string}`;
 /** Authenticated caller links for reporting, independent of the authority in RunOrigin. */
 export interface RunDelegation {
   parentRunId: string; rootRunId: string;
@@ -224,6 +229,7 @@ export interface Run {
   origin?: RunOrigin;
   delegation?: RunDelegation;
   sender?: RunSender;
+  senderMaster?: RunSenderMaster;
   /** Authenticated internal heartbeat admission, never selectable in a public message body. */
   heartbeat?: import('./master.js').HeartbeatAdmission;
   /** Original admitted heartbeat run; retained only through managed continuations. */
@@ -395,6 +401,8 @@ export interface AutoPromptJob {
   origin?: RunOrigin;
   delegation?: RunDelegation;
   sender?: RunSender;
+  /** The master whose call submitted it (see MASTER_SENDER_HEADER); its run is marked when it lands in another master's conversation. */
+  senderMaster?: RunSenderMaster;
   /** For remote work: the remote-sharing exclusion revision its candidates were filtered with. */
   exclusionRevision?: number;
   unattended?: boolean;

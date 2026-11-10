@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { MASTER_FOLDER, TODO_MASTER_TASK_ID, TODO_MASTERS_FOLDER } from '../../shared/master.js';
+import { MASTER_FOLDER, TODO_MASTER_TASK_ID, TODO_MASTERS_FOLDER, type MasterRef } from '../../shared/master.js';
 import type { Session } from '../../shared/types.js';
 
 /**
@@ -51,9 +51,13 @@ function canonical(path: string): string {
  * Whether a session is the master's: it runs in the master's folder under Tower's state directory. Both sides are
  * compared with links followed, so a state directory reached through a link (as /var is on macOS) still matches.
  */
-export function subscriptionOnly(stateDir: string, cwd: string): boolean {
-  if (resolve(cwd) === join(resolve(stateDir), MASTER_FOLDER)) return true;
-  return canonical(cwd) === masterFolder(stateDir) || todoMasterTaskId(stateDir, cwd) !== undefined;
+export function subscriptionOnly(stateDir: string, cwd: string): boolean { return masterRefOf(stateDir, cwd) !== undefined; }
+/** The master whose conversation runs in this folder: the main master's, an issue master's, or none. */
+export function masterRefOf(stateDir: string, cwd: string): MasterRef | undefined {
+  if (resolve(cwd) === join(resolve(stateDir), MASTER_FOLDER)) return 'main';
+  const task = todoMasterTaskId(stateDir, cwd);
+  if (task) return `todo:${task}`;
+  return canonical(cwd) === masterFolder(stateDir) ? 'main' : undefined;
 }
 /**
  * The todo whose issue master runs in this folder: `<state>/todo-masters/<taskId>` exactly, as written or under the

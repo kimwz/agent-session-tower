@@ -38,7 +38,7 @@ import { WorktreeJanitor } from '../worktrees/janitor.js';
 import { openCodexBridgeRun } from './codex-bridge.js';
 import { RunManager, type RunAdmission } from './manager.js';
 import { inMasterFolder, withoutMasterFolder } from './subscription.js';
-import { parseRunOrigin, PUBLIC_TRIGGER_PREFIX } from './origin.js';
+import { parseRunOrigin, parseRunSenderMaster, PUBLIC_TRIGGER_PREFIX } from './origin.js';
 import { autoUpdateEnabled, ToolUpdates } from '../updates/tools.js';
 import { defaultStateDir } from '../state-dir.js';
 import { join, resolve } from 'node:path';
@@ -458,7 +458,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         const admitted = admit(args[1]);
         const autoPrompts = options.autoPrompts;
         const request = args[0] as AutoPromptInput;
-        return remote(admitted, 'autoPrompt', request, undefined, async () => { context ??= await runnerContext(options); await context.refresh(); return autoPrompts.submit(request, { origin: admitted.origin, ...(admitted.delegation ? { delegation: admitted.delegation } : {}), ...(admitted.sender ? { sender: admitted.sender } : {}), ...(admitted.validate ? { validate: admitted.validate } : {}) }); },
+        return remote(admitted, 'autoPrompt', request, undefined, async () => { context ??= await runnerContext(options); await context.refresh(); return autoPrompts.submit(request, { origin: admitted.origin, ...(admitted.delegation ? { delegation: admitted.delegation } : {}), ...(admitted.sender ? { sender: admitted.sender } : {}), ...(admitted.senderMaster ? { senderMaster: admitted.senderMaster } : {}), ...(admitted.validate ? { validate: admitted.validate } : {}) }); },
           value => ({ kind: 'autoPrompt', jobId: value.id }), result => result.kind === 'autoPrompt' ? autoPrompts.get(result.jobId) : undefined);
       } break;
       case 'cancelAutoPrompt': if (options.autoPrompts) return options.autoPrompts.cancel(args[0] as string); break;
@@ -516,7 +516,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (!Object.hasOwn(OPERATIONS, operation)) throw new TowerError('not-found', 'Unknown API operation.');
         const validate = () => { admitted?.validate?.(); const storage = options.storage?.(); if (OPERATIONS[operation].write && storage && !storage.admissionOpen) throw new TowerError('unavailable', storage.reason, { disposition: 'not-admitted' }); };
         validate();
-        return options.api.call(args[0], args[1], controllerId ? { kind: 'owner', via: 'remote', controllerId } : { kind: 'owner', via: 'ui' }, admitted?.requestId, { delegation: admitted?.delegation, ...(admitted?.sender ? { sender: admitted.sender } : {}), validate });
+        return options.api.call(args[0], args[1], controllerId ? { kind: 'owner', via: 'remote', controllerId } : { kind: 'owner', via: 'ui' }, admitted?.requestId, { delegation: admitted?.delegation, ...(admitted?.sender ? { sender: admitted.sender } : {}), ...(admitted?.senderMaster ? { senderMaster: admitted.senderMaster } : {}), validate });
       } break;
       case 'slackTool': if (options.slack) return options.slack.tool(args[0] as string, args[1] as string, args[2] as Record<string, unknown>); break;
       case 'skillsOverview': if (options.skills) return options.skills.overview(record(args[0])); break;
@@ -776,12 +776,15 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
  */
 function admission(value: unknown): RunAdmission {
   // An older web may still send `brokerOwnerAuthorized`; nothing reads it any more.
-  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown; heartbeat?: unknown; sender?: unknown } : {};
+  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown; heartbeat?: unknown; sender?: unknown; senderMaster?: unknown } : {};
   const origin = input.origin === undefined ? { kind: 'owner' as const } : parseRunOrigin(input.origin);
   if (!origin || (origin.kind !== 'owner' && origin.kind !== 'agent')) throw new TowerError('invalid', 'The web connection can only admit owner or agent work.');
   if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-f\d-]{36}$/i.test(input.requestId))) throw new TowerError('invalid', 'Invalid request ID.');
   // Only the verified master's requests are marked, and only for display.
   if (input.sender !== undefined && (input.sender !== 'master' || origin.controllerId)) throw new TowerError('invalid', 'Invalid sender.');
+  // Which master's own tool call it was; only with the master's mark.
+  const senderMaster = parseRunSenderMaster(input.senderMaster);
+  if (input.senderMaster !== undefined && (!senderMaster || input.sender !== 'master')) throw new TowerError('invalid', 'Invalid sender master.');
   let heartbeat: HeartbeatAdmission | undefined;
   if (input.heartbeat !== undefined) {
     const value = record(input.heartbeat);
@@ -802,7 +805,7 @@ function admission(value: unknown): RunAdmission {
     heartbeat = value as unknown as HeartbeatAdmission;
   }
   return { ...(heartbeat ? { heartbeat } : {}), ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin,
-    ...(typeof input.requestId === 'string' ? { requestId: input.requestId.toLowerCase() } : {}), ...(input.sender === 'master' ? { sender: 'master' as const } : {}) };
+    ...(typeof input.requestId === 'string' ? { requestId: input.requestId.toLowerCase() } : {}), ...(input.sender === 'master' ? { sender: 'master' as const } : {}), ...(senderMaster ? { senderMaster } : {}) };
 }
 
 

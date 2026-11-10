@@ -3,7 +3,7 @@ import type { Attachment, AutoPromptJob, AutoPromptDecision } from '../../shared
 import { attachmentMetadata } from '../stores/attachments.js';
 import { validEffort, validModelId } from '../providers/models.js';
 import { isSavedDelegation } from '../runs/saved-state.js';
-import { parseRunOrigin } from '../runs/origin.js';
+import { parseRunOrigin, parseRunSenderMaster } from '../runs/origin.js';
 import { pickProblem } from '../../shared/models.js';
 import { canonical, object as requiredObject, type ExternalRow, type ExternalCodec } from '../remote/storage-rows.js';
 type Relation = 'continuation' | 'adjacent' | 'new';
@@ -37,6 +37,7 @@ export function validEntry(value: unknown): value is Entry {
     && (job.brokerOwnerAuthorized === undefined || typeof job.brokerOwnerAuthorized === 'boolean')
     && (job.origin === undefined || !!parseRunOrigin(job.origin))
     && (job.sender === undefined || job.sender === 'master')
+    && (job.senderMaster === undefined || job.sender === 'master' && parseRunSenderMaster(job.senderMaster) !== undefined)
     && (job.untrustedInput === undefined || job.untrustedInput === true)
     && typeof job.id === 'string' && UUID.test(job.id) && ['claude', 'codex'].includes(String(job.provider))
     && (job.sessionMode === undefined || job.sessionMode === 'new')

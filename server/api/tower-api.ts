@@ -1,5 +1,5 @@
 import { permissionProtected } from '../permissions/protection.js';
-import { subscriptionOnly } from '../runs/subscription.js';
+import { masterRefOf } from '../runs/subscription.js';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { FOLLOWED_OPERATIONS, OPERATIONS, REMOTE_PAGE_OPERATIONS, isOperationName, type OperationName } from '../../shared/api/operations.js';
@@ -20,7 +20,7 @@ import { remoteJob, remoteJobVisible, type RemoteScope } from '../remote/visibil
 import { eventPaths, handlerPaths, RemoteView, type KeptTriggers } from './remote-view.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
-type CallContext = Pick<RunAdmission, 'delegation' | 'validate' | 'sender'>;
+type CallContext = Pick<RunAdmission, 'delegation' | 'validate' | 'sender' | 'senderMaster'>;
 
 const failure = (message: string, kind: ErrorKind) => new TowerError(kind, message);
 const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -118,8 +118,12 @@ export class TowerApi {
     if (actor.kind === 'agent' && !('agent' in operation && operation.agent)) throw failure('Agents cannot use this Tower operation.', 'forbidden');
     // The authenticated master also has run-scoped Tower MCP tools, outside its page-tool adapter.
     if (name === 'autoPrompt.submit' && actor.kind === 'agent' && !actor.controllerId && actor.runId && actor.sessionId
-      && this.services.sessions?.list().some(session => session.id === actor.sessionId && subscriptionOnly(this.services.stateDir, session.cwd))
-      && input && typeof input === 'object' && !Array.isArray(input)) { input = { ...input, modelRole: 'master.worker' }; context = { ...context, sender: 'master' }; }
+      && input && typeof input === 'object' && !Array.isArray(input)) {
+      // A master's own run-scoped call: its folder says which master it is.
+      const cwd = this.services.sessions?.list().find(session => session.id === actor.sessionId)?.cwd;
+      const senderMaster = cwd === undefined ? undefined : masterRefOf(this.services.stateDir, cwd);
+      if (senderMaster) { input = { ...input, modelRole: 'master.worker' }; context = { ...context, sender: 'master', senderMaster }; }
+    }
     const parsed = operation.input.safeParse(input ?? {});
     if (!parsed.success) throw failure(`Invalid request: ${parsed.error.issues.map(issue => `${issue.path.join('.') || 'input'}: ${issue.message}`).join('; ')}`, 'invalid');
     // Changes from agents, and from controlling computers, are made once per request.
