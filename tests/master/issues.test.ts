@@ -540,6 +540,8 @@ test('one issue master asks another: the message names it, its turn ending is re
   const unknown = await h.issues().call('task-b', 'master_reply', { requestId: 'ffffffff', text: '?' }) as { error?: string; open?: Array<{ requestId: string }> };
   assert.match(unknown.error ?? '', /request id가 없습니다/);
   assert.deepEqual(unknown.open?.map(item => item.requestId), [requestId], 'it is told which requests are open');
+  // A reply longer than one report could carry (its lines indented as reported) is refused, and nothing is marked.
+  assert.match((await h.issues().call('task-b', 'master_reply', { requestId, text: 'ok\n'.repeat(6000) }) as { error?: string }).error ?? '', /너무 깁니다/);
   const before = h.runs.length;
   assert.deepEqual(await h.issues().call('task-b', 'master_reply', { requestId, text: '빌드가 통과했습니다. 로그: ci#12' }), { replied: true, to: 'the issue master of todo task-a', note: 'Tower reports it to that master\'s current session as a reply.' });
   await h.follow();

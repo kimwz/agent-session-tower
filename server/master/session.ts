@@ -707,7 +707,8 @@ export class MasterSession {
     const incoming = this.file.incoming ?? [];
     const open = () => incoming.filter(item => !item.repliedAt).map(item => ({ requestId: masterRequestId(item.runId), from: masterName(item.from), title: item.title }));
     if (!text) return { error: 'text가 필요합니다.' };
-    if (text.length > REPLY_CHARS) return { error: `회신은 ${REPLY_CHARS.toLocaleString()}자까지입니다. 줄이거나 결과가 있는 곳을 알려 주세요.` };
+    // Measured as it is reported (indented), so the report always fits in one message.
+    if (indent(text).length > REPLY_CHARS) return { error: '회신이 너무 깁니다. 줄이거나, 결과가 있는 곳(파일·세션·PR)을 알려 주세요.' };
     const found = requestId.length >= 8 ? incoming.filter(item => item.runId.startsWith(requestId)) : [];
     if (found.length !== 1) return { error: '다른 마스터가 보낸 요청 중 이 request id가 없습니다. 메시지 첫 줄의 request id를 쓰세요.', open: open() };
     const item = found[0]!;
@@ -729,9 +730,10 @@ export class MasterSession {
       const sent = this.file.followed.find(item => item.kind === 'delegated' && (item.runId === input.replyTo || item.currentRunId === input.replyTo));
       this.add({ id: randomUUID(), kind: 'reply', title: sent?.title ?? input.title, from: input.from, replyTo: input.replyTo, ...(input.sessionId ? { sessionId: input.sessionId } : {}),
         answer: truncate(input.text, REPLY_CHARS), createdAt: new Date(this.now()).toISOString(), state: 'completed', report: 'pending' });
-      await this.save();
       this.options.onChange?.();
     }
+    // Saved before the other master counts it replied, also when it was taken before and its saving failed then.
+    await this.save();
     void this.follow();
   }
 
@@ -760,8 +762,9 @@ export class MasterSession {
       await this.save();
       // A master let go of meanwhile (an issue master closed) gets no new turn; one already sent is not taken back. An
       // issue master moved to a newer session meanwhile (compaction) gets it there.
+      // An issue master moved on while this waited for the web is not sent the old one: held, it goes to the new one.
       const target = this.binding() ?? binding;
-      const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(target.sessionId)}/messages`, { prompt }, { write: true, gate: async () => !this.closed })
+      const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(target.sessionId)}/messages`, { prompt }, { write: true, gate: async () => !this.closed && (this.binding() ?? binding).sessionId === target.sessionId })
         .catch(() => ({ state: 'uncertain' as const, status: 0, body: undefined }));
       const run = (response.body as { run?: Run } | undefined)?.run;
       for (const item of batch) {
