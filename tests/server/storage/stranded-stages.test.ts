@@ -10,6 +10,8 @@ import { StorageCommandError } from '../../../server/storage/contract.js';
 import { openWorkerStorage } from '../../../server/storage/initialize.js';
 import { preflightStorage } from '../../../server/storage/preflight.js';
 import { readSnapshot } from '../../../server/storage/recovery.js';
+import { retireStrandedStages, settleRunsRetirements, unsettledRunsRetirements } from '../../../server/storage/stranded-stages.js';
+import type { StorageClient } from '../../../server/storage/client.js';
 import { RunsRepository } from '../../../server/runs/storage-repository.js';
 import { currentStorage } from '../../helpers/current-storage.js';
 
@@ -147,4 +149,44 @@ test('discardStranded removes only named stages of an earlier epoch', async t =>
   assert.equal(rows(join(dir, DATABASE), 'runs_stages').length, 2, 'a refused command removes nothing');
   await storage.write('runs', 'discardStranded', { stages: [{ intent: 'old', ownerEpoch: 1, sha256: SHA }] }, 'd5');
   assert.deepEqual((rows(join(dir, DATABASE), 'runs_stages') as { intent: string }[]).map(row => row.intent), ['live']);
+});
+
+test('a retired runs stage stays marked for restore across starts until settled; other domains never mark', async t => {
+  const dir = await currentStore(t);
+  sql(dir, stageRow('triggers', 'only-triggers', 1));
+  await start(dir);
+  assert.deepEqual(await unsettledRunsRetirements(dir), [], 'a triggers stage asks nothing of runs restore');
+  sql(dir, stageRow('runs', 'started-maybe', 1));
+  const first = await start(dir);
+  assert.deepEqual(await unsettledRunsRetirements(dir), [first.retired!.evidence]);
+  // Another reboot before the worker saved its restore: the mark is still there for the next one.
+  await start(dir);
+  assert.deepEqual(await unsettledRunsRetirements(dir), [first.retired!.evidence]);
+  await settleRunsRetirements([first.retired!.evidence]);
+  assert.deepEqual(await unsettledRunsRetirements(dir), []);
+  assert.equal(JSON.parse(await readFile(first.retired!.evidence, 'utf8')).stages[0].intent, 'started-maybe', 'settling keeps the evidence');
+  await writeFile(join(dir, 'storage-recovery', 'stranded-stages', 'broken.json'), '{', { mode: 0o600 });
+  assert.deepEqual((await unsettledRunsRetirements(dir)).map(path => path.split('/').pop()), ['broken.json'], 'an unreadable document counts as unsettled');
+});
+
+test('a removal that fails part way keeps the runs mark (written before any row goes) and the next start finishes it', async t => {
+  const dir = await currentStore(t);
+  sql(dir, stageRow('runs', 'first', 1) + stageRow('triggers', 'second', 1));
+  const storage = await currentStorage(dir, { initialize: false });
+  const failing = new Proxy(storage, { get(target, key) {
+    if (key === 'write') return (scope: string, command: string, payload: unknown, id: string) => scope === 'triggers' && command === 'discardStranded'
+      ? Promise.reject(new Error('injected')) : target.write(scope, command, payload, id);
+    const value = Reflect.get(target, key, target) as unknown;
+    return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+  } }) as StorageClient;
+  const authorities = new Map((await storage.inspect()).authority.map(authority => [authority.domain, authority]));
+  await assert.rejects(retireStrandedStages(failing, dir, authorities), /injected/);
+  await storage.close();
+  assert.equal(rows(join(dir, DATABASE), 'runs_stages').length, 0);
+  assert.equal(rows(join(dir, DATABASE), 'triggers_stages').length, 1);
+  assert.equal((await unsettledRunsRetirements(dir)).length, 1, 'the runs removal is remembered although the call failed');
+  const next = await start(dir);
+  assert.equal(next.refusal, undefined, JSON.stringify(next.refusal));
+  assert.deepEqual(next.retired!.stages.map(stage => stage.intent), ['second']);
+  assert.equal((await unsettledRunsRetirements(dir)).length, 1);
 });

@@ -9,6 +9,7 @@ import { OPERATIONS, type OperationName } from '../../shared/api/operations.js';
 import type { WorkerStorageStatus } from '../../shared/storage.js';
 import { captureStorageBundle, storageBuildContext, preflightStorage, adoptSnapshot, reconcileRecovery, readRecoveryBarrier, StorageCommandError, type StorageClient } from '../storage/index.js';
 import { openWorkerStorage, type StorageRefusal } from '../storage/initialize.js';
+import { settleRunsRetirements, unsettledRunsRetirements } from '../storage/stranded-stages.js';
 import type { HeartbeatAdmission } from '../../shared/master.js';
 import { newWorkerSession } from '../models/worker.js';
 import { latestNativeUserMessage } from './native-user-message.js';
@@ -891,8 +892,6 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
    * an existing storage unchanged or refuses it, and creates the schema and empty domain authorities only where there
    * is nothing yet. A newer hold (its generation) wins over an attempt underway.
    */
-  /** A start of this worker removed a runs write an earlier worker left unfinished; restore must not start queued runs. */
-  let retiredRunsStage = false;
   const attempt = async (reopen = false): Promise<boolean> => {
     const generation = storageHoldGeneration;
     const current = () => generation === storageHoldGeneration;
@@ -913,7 +912,6 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
     // generation on: it answers `aborted`, and its status is already set.
     if (opened.aborted || !current()) return false;
     if (opened.refusal) { refused(opened.refusal); return false; }
-    if (opened.retired?.stages.some(stage => stage.scope === 'runs')) retiredRunsStage = true;
     if (await privateFile(join(stateDir, 'storage-permissions-pending.json'))) {
       storageStatus = { ...storageStatus, state: 'recovery-required', code: 'permissions-receipt-held', reason: 'Permission receipt/effect reconciliation requires its explicit owner.', admissionOpen: false };
       return false;
@@ -1043,7 +1041,9 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
   };
   // Gate(core), not prepare's claim, precedes every restore and startup effect.
   await startupGate();
-  runs.useStorage(database!, { afterRetiredStage: retiredRunsStage });
+  // A retired runs write (this start or an earlier one whose restore was not saved) may have started a queued run.
+  const runsRetirements = await unsettledRunsRetirements(stateDir);
+  runs.useStorage(database!, { afterRetiredStage: runsRetirements.length > 0 });
   await startupGate();
   const externalRemote = new RemoteRepository(database!);
   const externalPrompts = new AutoPromptRepository(database!);
@@ -1172,6 +1172,8 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
     await tools?.start(autoUpdateEnabled());
     await startupGate();
     await runs.start();
+    // runs.start() saved the restore (its flush throws otherwise): the queued runs it cancelled stay cancelled.
+    if (runsRetirements.length) await settleRunsRetirements(runsRetirements).catch(error => console.error(`Retired runs stage evidence stays unsettled: ${error instanceof Error ? error.message : String(error)}`));
     // The web process saves the remote-sharing exclusion list; this copy follows it on every refresh.
     const exclusions = new RemoteExclusionStore(stateDir);
     await exclusions.start();

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { StorageClient } from './client.js';
 import type { DomainAuthority } from './contract.js';
@@ -34,6 +35,7 @@ export async function retireStrandedStages(storage: StorageClient, stateDir: str
     await privateDirectory(layout.recoveryDir, true);
     await privateDirectory(dir, true);
     evidence = join(dir, `${snapshotId}.json`);
+    // Written, durably, before any row goes: it is also the mark that runs restore has not yet been told (see below).
     await writePrivateDocument(evidence, JSON.stringify({
       format: 'tower-stranded-stages', version: 1, recordedAt: new Date().toISOString(), build: storage.identity, ownerEpoch, snapshotId, stages: stranded,
     }, null, 2));
@@ -43,4 +45,35 @@ export async function retireStrandedStages(storage: StorageClient, stateDir: str
     await storage.write(scope, 'discardStranded', { stages: named }, `stranded-${scope}-${randomUUID()}`);
   }
   return { snapshotId, evidence, stages: stranded };
+}
+
+const evidenceDir = async (stateDir: string) => join((await storageLayout(stateDir)).recoveryDir, 'stranded-stages');
+
+/**
+ * Evidence documents of retired runs stages whose restore has not yet been settled. A retired runs write may have been
+ * the start of a queued run, so until the restore that cancels queued runs has been saved, every start asks for it
+ * again (a failed retry, an aborted attempt or another reboot keep the mark). A document that cannot be read counts.
+ */
+export async function unsettledRunsRetirements(stateDir: string): Promise<string[]> {
+  const dir = await evidenceDir(stateDir);
+  let names: string[];
+  try { names = await readdir(dir); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+  const pending: string[] = [];
+  for (const name of names.filter(name => name.endsWith('.json') && !name.startsWith('.')).sort()) {
+    const path = join(dir, name);
+    try {
+      const document = JSON.parse(await readFile(path, 'utf8')) as { stages?: { scope?: string }[]; runsSettledAt?: string };
+      if (document.runsSettledAt || !document.stages?.some(stage => stage.scope === 'runs')) continue;
+    } catch { /* unreadable: kept pending, the safe side */ }
+    pending.push(path);
+  }
+  return pending;
+}
+
+/** Marks the documents settled once the restore that cancelled queued runs has been saved. */
+export async function settleRunsRetirements(paths: readonly string[]): Promise<void> {
+  for (const path of paths) {
+    const document = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+    await writePrivateDocument(path, JSON.stringify({ ...document, runsSettledAt: new Date().toISOString() }, null, 2));
+  }
 }
