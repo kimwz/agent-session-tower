@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.180.1] - 2026-11-10
+
+- **재부팅 등으로 끊긴 저장 하나 때문에 컴퓨터 전체가 멈추지 않습니다.** Tower는 실행 기록 같은 큰 저장을 여러 조각으로 나눠 쓴 뒤 한 번에 확정합니다. 확정 전에 컴퓨터가 꺼지거나 확정이 거절되면 반쯤 쓴 예약이 남는데, 다음 시작 때 저장소가 이를 보고 "소유자 복구 필요"로 멈췄습니다. 그동안 그 컴퓨터는 세션 목록도 실행도 트리거도 보여 주지 않아 캔버스가 비었고, 소유자가 이를 풀 방법도 없었습니다. 이제 이전 실행이 남긴 예약은 확정된 적도 확정될 수도 없는 것이므로, 시작할 때 저장소 스냅샷과 증거 파일(`storage-recovery/stranded-stages/`)에 보존한 뒤 치우고 정상으로 시작합니다. 확정된 기록과 Claude·Codex 대화 원본은 그대로이고, 잃는 것은 확정되지 않았던 그 한 번의 저장뿐입니다. 보존에 실패하면 지금처럼 멈춘 채로 둡니다.
+
 ## [1.180.0] - 2026-11-08
 
 - **Goal이 active인 Codex 대화가 Tower 실행 안에서 끝까지 이어집니다.** Codex는 Goal이 active이면 한 턴이 끝나자마자 다음 턴을 스스로 시작하는데, Tower는 첫 턴이 끝나면 곧바로 Codex 프로세스를 닫았습니다. 그래서 Goal이 있어도 턴마다 멈췄고 마스터나 소유자가 "계속하세요"를 다시 보내야 했습니다. 이제 Goal이 active인 동안 같은 실행이 다음 턴을 따라가며, 그동안 Tower 도구(일회성 승인, 브라우저, 세션 조회)도 그대로 쓸 수 있습니다.

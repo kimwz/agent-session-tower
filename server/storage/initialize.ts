@@ -19,6 +19,7 @@ import { StorageCommandError, type DomainAuthority, type StorageFailure, type St
 import { OCCUPIED_TABLES_COMMAND } from './domain.js';
 import { requireDomainAuthority, stagesOf, STORAGE_DOMAINS, StorageInitializationError, type StorageDomainScope } from './domain-authority.js';
 import type { StoragePreflight } from './preflight.js';
+import { retireStrandedStages, type RetiredStages } from './stranded-stages.js';
 
 /**
  * How the execution worker comes to a ready storage, without migrating anything that exists. Its order:
@@ -138,6 +139,8 @@ export interface OpenWorkerStorageResult {
   refusal?: StorageRefusal;
   aborted?: true;
   domains?: { scope: StorageDomainScope; result: 'present' | 'created' }[];
+  /** Stage rows an earlier worker left, kept as evidence and removed before the domains were checked. */
+  retired?: RetiredStages;
 }
 
 /**
@@ -173,11 +176,14 @@ export async function openWorkerStorage(input: OpenWorkerStorageInput): Promise<
     const first = await held();
     if (first) return result({ refusal: first });
     if (!proceed()) return result({ aborted: true });
+    const retired = await retireStrandedStages(database, input.stateDir, new Map((await database.inspect()).authority.map(authority => [authority.domain, authority])));
+    if (retired) console.warn(`Storage retired ${retired.stages.length} stranded staged write(s) (${retired.stages.map(stage => `${stage.scope}/${stage.intent}`).join(', ')}); kept in snapshot ${retired.snapshotId}, evidence ${retired.evidence}.`);
+    if (!proceed()) return result({ aborted: true, ...(retired ? { retired } : {}) });
     const domains = await initializeStorageDomains(database, input.stateDir);
     if (!proceed()) return result({ aborted: true });
     const last = await held();
     if (last) return result({ refusal: last });
-    return result({ domains });
+    return result({ domains, ...(retired ? { retired } : {}) });
   } catch (error) {
     return result({ refusal: errorRefusal(error, database) });
   }

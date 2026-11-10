@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { strandedStageCommands } from '../storage/stranded-stage-commands.js';
 import { linkTriggerAdmissions, type TriggerAdmissionLink } from '../triggers/storage-commands.js';
 import { defineStorageDomain, type DomainReadContext, type DomainWriteContext, type StorageDomain } from '../storage/domain.js';
 import type { DomainAuthority, StorageDomainSchema } from '../storage/contract.js';
@@ -39,6 +40,7 @@ export function runsDomainFor(schema: StorageDomainSchema): StorageDomain {
   if (schema.domain !== runsSchema.domain || canonical(schema.migrations) !== canonical(runsSchema.migrations) || canonical(schema.preparation) !== canonical(runsSchema.preparation)) throw new Error('Runs schema/contract mismatch.');
   return defineStorageDomain({ schema, commands: {
     head: { kind: 'read', run: context => head(context) },
+    ...strandedStageCommands('runs'),
     bootstrapHistory: { kind: 'read', run: context => ({ stages: Number((context.prepare('SELECT count(*) AS n FROM runs_stages').get() as { n: number }).n) }) },
     keys: { kind: 'read', run(context, payload) {
       const input = object(payload); current(context, input);

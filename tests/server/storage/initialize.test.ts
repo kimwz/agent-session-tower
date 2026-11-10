@@ -243,7 +243,6 @@ test('a store shaped like a 1.137.x install opens unrefused: its legacy JSON, mi
 });
 
 for (const [code, scope, damage] of [
-  ['stages-held', 'runs', `INSERT INTO runs_stages (intent, owner_epoch, bytes, sha256, chunks) VALUES ('stranded', 1, 1, '${'0'.repeat(64)}', 1)`],
   ['legacy-exported', 'remote', "UPDATE domain_imports SET authority = 'legacy-exported' WHERE domain = 'remote'"],
 ] as const) {
   test(`${code} (${scope}) is refused with nothing written`, async t => {

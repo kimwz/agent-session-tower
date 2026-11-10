@@ -1,4 +1,5 @@
 import type { EngineState } from './state.js';
+import { strandedStageCommands } from '../storage/stranded-stage-commands.js';
 import { createHash } from 'node:crypto';
 import { defineStorageDomain, type DomainReadContext, type DomainWriteContext, type StorageDomain } from '../storage/domain.js';
 import type { DomainAuthority, StorageDomainSchema } from '../storage/contract.js';
@@ -77,6 +78,7 @@ export function triggersDomainFor(schema: StorageDomainSchema): StorageDomain {
   if (schema.domain !== triggersSchema.domain || canonical(schema.migrations) !== canonical(triggersSchema.migrations) || canonical(schema.preparation) !== canonical(triggersSchema.preparation)) throw new Error('Triggers schema/contract mismatch.');
   return defineStorageDomain({ schema, commands: {
     head: { kind: 'read', run: context => head(context) },
+    ...strandedStageCommands('triggers'),
     bootstrapHistory: { kind: 'read', run: context => ({ stages: Number((context.prepare('SELECT count(*) AS n FROM triggers_stages').get() as { n: number }).n) }) },
     keys: { kind: 'read', run(context, payload) {
       const input = object(payload); current(context, input);
