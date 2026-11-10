@@ -762,9 +762,10 @@ export class MasterSession {
       await this.save();
       // A master let go of meanwhile (an issue master closed) gets no new turn; one already sent is not taken back. An
       // issue master moved to a newer session meanwhile (compaction) gets it there.
-      // An issue master moved on while this waited for the web is not sent the old one: held, it goes to the new one.
+      // A master moved on (an issue master's newer session) or let go of while this waited for the web is not sent it:
+      // held, it goes to the session bound then.
       const target = this.binding() ?? binding;
-      const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(target.sessionId)}/messages`, { prompt }, { write: true, gate: async () => !this.closed && (this.binding() ?? binding).sessionId === target.sessionId })
+      const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(target.sessionId)}/messages`, { prompt }, { write: true, gate: async () => !this.closed && this.binding()?.sessionId === target.sessionId })
         .catch(() => ({ state: 'uncertain' as const, status: 0, body: undefined }));
       const run = (response.body as { run?: Run } | undefined)?.run;
       for (const item of batch) {
