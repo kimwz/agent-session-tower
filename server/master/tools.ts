@@ -4,15 +4,12 @@ import { NODE_ID, TOWER_TOOLS, TowerTools, truncate, type TowerToolsOptions } fr
 import { apiTarget } from '../tower-tools/api-target.js';
 import { masterWorkerModel, parseModelSettings } from '../../shared/models.js';
 import { TowerError } from '../../shared/errors.js';
-import { SESSION_MESSAGE_TOOL, SESSION_START_TOOL } from '../runs/subscription.js';
+import { MASTER_REPLY_TOOL, SESSION_MESSAGE_TOOL, SESSION_START_TOOL } from '../runs/subscription.js';
 
 /** How long a screen command waits for the page to say it was done. */
 const ACK_MS = 5_000;
 /** A page that said it shows the master within this time is where screen commands go. */
 const PRESENCE_MS = 2 * 60_000;
-
-/** How a master answers another master's request (MasterSession.reply). */
-export const MASTER_REPLY_TOOL = 'master_reply';
 
 /** The tools the master session gets from Tower, besides its own and Tower's MCP operations: the Tower tools and the owner's screen. */
 export const MASTER_TOOLS = [

@@ -533,9 +533,8 @@ test('one issue master asks another: the message names it, its turn ending is re
   h.finish(handedOn, '빌드 통과');
   await h.follow();
   assert.match(h.reports(b.id).at(-1) ?? '', new RegExp(`not replied to yet:\\n- request ${requestId} from the issue master of todo task-a: "빌드가 통과하는지 확인해 주세요\\."`));
-  // A replaced its session (compaction): the reply goes to the session its todo has now.
+  // A replaced its session (compaction): the reply goes to the session its todo has now, even before the host's next look.
   const a2 = h.issueSession('task-a');
-  await h.issues().refresh();
   assert.equal(h.issues().get('task-a')?.binding()?.sessionId, a2.id);
   const unknown = await h.issues().call('task-b', 'master_reply', { requestId: 'ffffffff', text: '?' }) as { error?: string; open?: Array<{ requestId: string }> };
   assert.match(unknown.error ?? '', /request id가 없습니다/);
@@ -544,6 +543,7 @@ test('one issue master asks another: the message names it, its turn ending is re
   assert.match((await h.issues().call('task-b', 'master_reply', { requestId, text: 'ok\n'.repeat(6000) }) as { error?: string }).error ?? '', /너무 깁니다/);
   const before = h.runs.length;
   assert.deepEqual(await h.issues().call('task-b', 'master_reply', { requestId, text: '빌드가 통과했습니다. 로그: ci#12' }), { replied: true, to: 'the issue master of todo task-a', note: 'Tower reports it to that master\'s current session as a reply.' });
+  await until(() => h.runs.slice(before).some(run => run.prompt.includes('replied')));
   await h.follow();
   const replies = h.runs.slice(before).filter(run => run.prompt.includes('replied'));
   assert.equal(replies.length, 1, 'one reply, sent once');
@@ -578,6 +578,7 @@ test('a reply waits while its master is stopped, and goes nowhere when that mast
   assert.equal(h.runs.slice(before).filter(run => run.sessionId === MAIN).length, 0, 'held while the owner\'s stop stands');
   h.turn(MAIN, '계속해');
   await h.follow();
+  await until(() => h.reports(MAIN).some(prompt => prompt.includes('진행 중입니다')));
   assert.equal(h.reports(MAIN).filter(prompt => prompt.includes('진행 중입니다')).length, 1, 'the owner\'s next word lets it through');
   // A request from an issue master no longer open cannot be answered; nothing is marked.
   const orphan = h.turn(b.id, `${masterMessageHeader('todo:task-gone', 'o'.repeat(8))}\n\n이것도`);
@@ -585,4 +586,30 @@ test('a reply waits while its master is stopped, and goes nowhere when that mast
   await h.follow();
   assert.match((await h.issues().call('task-b', 'master_reply', { requestId: orphan.id.slice(0, 8), text: 'done' }) as { error?: string }).error ?? '', /열려 있지 않아/);
   assert.match((await h.issues().call('task-b', 'master_reply', { requestId: orphan.id.slice(0, 8), text: 'done' }) as { error?: string }).error ?? '', /열려 있지 않아/, 'still open to answer');
+});
+
+test('an answer can come at once, and a report lists only a few requests whose master can still take a reply', async t => {
+  const h = await harness(t);
+  const a = h.issueSession('task-a');
+  const b = h.issueSession('task-b');
+  await h.issues().refresh();
+  const ask = (from: 'main' | `todo:${string}`, text: string) => {
+    const run = h.turn(b.id, '');
+    Object.assign(run, { prompt: `${masterMessageHeader(from, run.id)}\n\n${text}`, sender: 'master', senderMaster: from });
+    return run;
+  };
+  // Answered before the issue master looked at Tower again: taken in on the spot.
+  const quick = ask('todo:task-a', '지금 몇 시예요?');
+  assert.deepEqual((await h.issues().call('task-b', 'master_reply', { requestId: quick.id.slice(0, 8), text: '오후 4시입니다.' }) as { replied?: boolean }).replied, true);
+  for (let n = 0; n < 12; n++) ask('todo:task-a', `요청 ${n}`);
+  ask('todo:task-gone', '닫힌 마스터의 요청');
+  const work = h.turn('codex:b-work', 'work', h.from(h.turn(b.id, '일')));
+  h.finish(work, 'done');
+  await h.follow();
+  const report = h.reports(b.id).find(prompt => prompt.includes('"work" — completed')) ?? '';
+  assert.equal(report.match(/^- request /gm)?.length, 10, 'the newest ten');
+  assert.match(report, /- and 2 older ones/);
+  assert.match(report, /"요청 11"/);
+  assert.doesNotMatch(report, /요청 0"|닫힌 마스터|지금 몇 시/, 'older, answered, and unanswerable ones are left out');
+  void a;
 });

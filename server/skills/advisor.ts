@@ -4,7 +4,7 @@ import { sep } from 'node:path';
 import type { ChatMessage, Session } from '../../shared/types.js';
 import type { Skill, SkillEvidence, SkillProposal } from '../../shared/skills.js';
 import { SKILL_NAME } from '../../shared/skills.js';
-import { isTaskNotification } from '../../shared/task-notification.js';
+import { isTaskNotification, MASTER_MESSAGE_MARK } from '../../shared/task-notification.js';
 import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
 import type { SkillStateStore } from './state.js';
 import { TowerError } from '../../shared/errors.js';
@@ -93,7 +93,7 @@ const day = (time: number) => new Date(time).toISOString().slice(0, 10);
 /** What the owner asked in a session, without Tower's and the agent's own notices or a carried-over summary. */
 export function ownerRequests(messages: ChatMessage[], after?: string): ChatMessage[] {
   return messages.filter(message => message.role === 'user' && (!after || message.timestamp > after) && message.text.trim()
-    && !isTaskNotification(message.text) && !/^\[Tower report\]/.test(message.text.trimStart())
+    && !isTaskNotification(message.text) && !/^\[Tower report\]/.test(message.text.trimStart()) && !message.text.trimStart().startsWith(MASTER_MESSAGE_MARK)
     && !message.text.startsWith('This session is being continued from a previous conversation'));
 }
 

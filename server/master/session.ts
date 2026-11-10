@@ -36,10 +36,12 @@ const OWNER_NOTICE_RETRY_MS = 30_000;
 /** Settled approval waits kept, so a stale state cannot make one look new. */
 const SETTLED_WAITS = 200;
 const STOPS_SEEN = 100;
-/** Requests from other masters kept: every open one, and the newest answered ones up to this many in all. */
+/** Requests from other masters kept, this many in all: answered ones go first, and only beyond that the oldest open ones. */
 const INCOMING = 100;
 /** Longest reply one master sends another. */
 const REPLY_CHARS = 20_000;
+/** Open requests listed at the end of a report; with titles of 80 characters they keep it well within one message. */
+const OPEN_REQUESTS_SHOWN = 10;
 /** How Tower adds attached files to a request in a session's history (`attachmentPrompt`), once spaces are folded. */
 const ATTACHED = ' 첨부 파일 (사용자가 이번 메시지에 첨부한 로컬 파일):';
 
@@ -674,11 +676,16 @@ export class MasterSession {
     return true;
   }
 
-  /** Requests from other masters still waiting for this master's reply, as a reminder at the end of its reports. */
+  /**
+   * Requests from other masters still waiting for this master's reply, as a reminder at the end of its reports: only
+   * those whose master is open to take a reply, the newest few, so the report stays within one message.
+   */
   private openRequests(): string {
-    const open = (this.file.incoming ?? []).filter(item => !item.repliedAt);
+    const open = (this.file.incoming ?? []).filter(item => !item.repliedAt && this.options.peer?.(item.from));
     if (!open.length) return '';
-    return `\n\nRequests other masters sent you that you have not replied to yet:\n${open.map(item => `- request ${masterRequestId(item.runId)} from ${masterName(item.from)}: "${item.title}"`).join('\n')}\nWhen one is done, including the work you handed out for it, send its result with master_reply.`;
+    const shown = open.slice(-OPEN_REQUESTS_SHOWN);
+    return `\n\nRequests other masters sent you that you have not replied to yet:\n${shown.map(item => `- request ${masterRequestId(item.runId)} from ${masterName(item.from)}: "${item.title}"`).join('\n')}`
+      + `${open.length > shown.length ? `\n- and ${open.length - shown.length} older ones (master_reply with any request id lists them)` : ''}\nWhen one is done, including the work you handed out for it, send its result with master_reply.`;
   }
 
   /** Messages another master sent into this master's conversation, kept until answered (the newest ones after). */
@@ -704,12 +711,18 @@ export class MasterSession {
   async reply(args: Record<string, unknown>): Promise<unknown> {
     const requestId = typeof args.requestId === 'string' ? args.requestId.trim() : '';
     const text = typeof args.text === 'string' ? args.text.trim() : '';
-    const incoming = this.file.incoming ?? [];
+    const incoming = this.file.incoming ??= [];
     const open = () => incoming.filter(item => !item.repliedAt).map(item => ({ requestId: masterRequestId(item.runId), from: masterName(item.from), title: item.title }));
     if (!text) return { error: 'text가 필요합니다.' };
     // Measured as it is reported (indented), so the report always fits in one message.
     if (indent(text).length > REPLY_CHARS) return { error: '회신이 너무 깁니다. 줄이거나, 결과가 있는 곳(파일·세션·PR)을 알려 주세요.' };
-    const found = requestId.length >= 8 ? incoming.filter(item => item.runId.startsWith(requestId)) : [];
+    const find = () => requestId.length >= 8 ? incoming.filter(item => item.runId.startsWith(requestId)) : [];
+    let found = find();
+    // A request that arrived since the last look is taken in now: an answer may come at once.
+    if (!found.length) {
+      const binding = this.binding();
+      if (binding && this.takeIncoming((this.options.live.snapshot()?.runs ?? []).filter(run => run.sessionId === binding.sessionId))) { await this.save(); found = find(); }
+    }
     if (found.length !== 1) return { error: '다른 마스터가 보낸 요청 중 이 request id가 없습니다. 메시지 첫 줄의 request id를 쓰세요.', open: open() };
     const item = found[0]!;
     if (item.repliedAt) return { error: '이 요청에는 이미 회신했습니다.', open: open() };
@@ -760,10 +773,9 @@ export class MasterSession {
       const prompt = message(reportId, batch.map(line));
       for (const item of batch) { item.report = 'sending'; item.reportId = reportId; item.reportAt = new Date(this.options.now?.() ?? Date.now()).toISOString(); }
       await this.save();
-      // A master let go of meanwhile (an issue master closed) gets no new turn; one already sent is not taken back. An
-      // issue master moved to a newer session meanwhile (compaction) gets it there.
-      // A master moved on (an issue master's newer session) or let go of while this waited for the web is not sent it:
-      // held, it goes to the session bound then.
+      // Sent to the session bound now. A master let go of (an issue master closed) gets no new turn, and one moved on
+      // (an issue master's newer session) or let go of while this waits for the web is not sent it: held, it goes to the
+      // session bound then. One already sent is not taken back.
       const target = this.binding() ?? binding;
       const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(target.sessionId)}/messages`, { prompt }, { write: true, gate: async () => !this.closed && this.binding()?.sessionId === target.sessionId })
         .catch(() => ({ state: 'uncertain' as const, status: 0, body: undefined }));

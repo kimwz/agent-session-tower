@@ -26,7 +26,7 @@ test('Codex calls Tower lookups, permission requests and secret listings without
 });
 
 test('only the master\'s own tools get the longer timeout, and a turn without tools gets no servers', () => {
-  assert.deepEqual(codexMcpServers({ tower_master: server('master') }, true), { tower_master: { ...server('master'), tool_timeout_sec: MASTER_TOOL_TIMEOUT_SECONDS, tools: approved('session_start', 'session_message') } });
+  assert.deepEqual(codexMcpServers({ tower_master: server('master') }, true), { tower_master: { ...server('master'), tool_timeout_sec: MASTER_TOOL_TIMEOUT_SECONDS, tools: approved('session_start', 'session_message', 'master_reply') } });
   assert.deepEqual(codexMcpServers({ tower_master: server('master') }, false), { tower_master: server('master') });
   assert.equal(codexMcpServers(undefined, true), undefined);
 });
@@ -35,7 +35,7 @@ test('a master\'s Codex turn hands work out without review; the same servers els
   const servers = { tower: server('tower'), tower_master: server('master') };
   const lookups = CODEX_APPROVED_TOWER_TOOLS.tower!;
   const master = codexMcpServers(servers, true)!;
-  assert.deepEqual(master.tower_master!.tools, approved('session_start', 'session_message'));
+  assert.deepEqual(master.tower_master!.tools, approved('session_start', 'session_message', 'master_reply'));
   assert.deepEqual(master.tower!.tools, approved(...lookups, 'autoPrompt_submit'));
   const other = codexMcpServers(servers, false)!;
   assert.equal(other.tower_master!.tools, undefined);
