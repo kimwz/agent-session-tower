@@ -891,6 +891,8 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
    * an existing storage unchanged or refuses it, and creates the schema and empty domain authorities only where there
    * is nothing yet. A newer hold (its generation) wins over an attempt underway.
    */
+  /** A start of this worker removed a runs write an earlier worker left unfinished; restore must not start queued runs. */
+  let retiredRunsStage = false;
   const attempt = async (reopen = false): Promise<boolean> => {
     const generation = storageHoldGeneration;
     const current = () => generation === storageHoldGeneration;
@@ -911,6 +913,7 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
     // generation on: it answers `aborted`, and its status is already set.
     if (opened.aborted || !current()) return false;
     if (opened.refusal) { refused(opened.refusal); return false; }
+    if (opened.retired?.stages.some(stage => stage.scope === 'runs')) retiredRunsStage = true;
     if (await privateFile(join(stateDir, 'storage-permissions-pending.json'))) {
       storageStatus = { ...storageStatus, state: 'recovery-required', code: 'permissions-receipt-held', reason: 'Permission receipt/effect reconciliation requires its explicit owner.', admissionOpen: false };
       return false;
@@ -1040,7 +1043,7 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
   };
   // Gate(core), not prepare's claim, precedes every restore and startup effect.
   await startupGate();
-  runs.useStorage(database!);
+  runs.useStorage(database!, { afterRetiredStage: retiredRunsStage });
   await startupGate();
   const externalRemote = new RemoteRepository(database!);
   const externalPrompts = new AutoPromptRepository(database!);

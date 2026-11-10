@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { RunManager } from '../../../server/runs/manager.js';
-import { restoreRuns, SCHEDULED_OUTPUT, serializeRuns } from '../../../server/runs/run-history.js';
+import { restoreRuns, RETIRED_STAGE_NOT_STARTED, SCHEDULED_OUTPUT, serializeRuns, UPDATE_RESUME_WAIT } from '../../../server/runs/run-history.js';
 import type { CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
 import { checkedInstructions } from '../../../server/runs/turn-notes.js';
 import { UUID, type CreatedSession } from '../../../server/runs/saved-state.js';
@@ -311,6 +311,26 @@ test('restoreRuns keeps a scheduled continuation within its hour of grace and en
   assert.deepEqual(runs.map(run => run.status), ['queued', 'cancelled']);
   assert.equal(runs[0].output, SCHEDULED_OUTPUT);
   assert.deepEqual([carried, restoredRetained], [[], []]);
+});
+
+test('restoreRuns after a retired runs stage starts no queued run by itself: each may already have started', () => {
+  const now = Date.parse('2026-10-01T12:00:00.000Z');
+  const base = { sessionId: `codex:${ID}`, prompt: 'p', createdAt: '2026-10-01T00:00:00.000Z', output: '' };
+  const saved = [
+    { ...base, id: 'carried', status: 'queued', keepQueued: true },
+    { ...base, id: 'update', status: 'queued', scheduled: { at: new Date(now).toISOString(), afterRunId: '50000000-0000-4000-8000-000000000099', resume: 'update' } },
+    { ...base, id: 'wakeup', status: 'queued', scheduled: { at: new Date(now + 60_000).toISOString(), afterRunId: '50000000-0000-4000-8000-000000000099' } },
+    { ...base, id: 'permission', status: 'queued', scheduled: { at: new Date(now).toISOString(), afterRunId: '50000000-0000-4000-8000-000000000099', resume: 'permission' } },
+    { ...base, id: 'done', status: 'completed', output: 'kept' },
+  ];
+  const ordinary = restoreRuns(saved, new Map(), now);
+  assert.deepEqual(ordinary.runs.map(run => [run.id, run.status, run.output]), [['carried', 'queued', ''], ['update', 'queued', UPDATE_RESUME_WAIT], ['wakeup', 'queued', SCHEDULED_OUTPUT],
+    ['permission', 'queued', 'Waiting for the requesting turn to finish before permission continuation.'], ['done', 'completed', 'kept']]);
+  assert.deepEqual(ordinary.carried, ['carried']);
+  const held = restoreRuns(saved, new Map(), now, { afterRetiredStage: true });
+  assert.deepEqual(held.runs.map(run => [run.id, run.status, run.error]), [['carried', 'cancelled', RETIRED_STAGE_NOT_STARTED], ['update', 'cancelled', RETIRED_STAGE_NOT_STARTED],
+    ['wakeup', 'cancelled', RETIRED_STAGE_NOT_STARTED], ['permission', 'cancelled', RETIRED_STAGE_NOT_STARTED], ['done', 'completed', undefined]]);
+  assert.deepEqual(held.carried, [], 'nothing is carried into a start');
 });
 
 test('serializeRuns adds the markers a restore reads and leaves live fields out', () => {

@@ -407,7 +407,7 @@ export class RunManager extends EventEmitter {
     return this.registry.backfill(links, id => this.runs.get(id));
   }
 
-  useStorage(storage: StorageClient): void { this.history.useStorage(storage); }
+  useStorage(storage: StorageClient, options: { afterRetiredStage?: boolean } = {}): void { this.history.useStorage(storage, options); }
   pendingAdmission(): { commandId: string; sha256: string } | undefined { return this.history.pendingAdmission(); }
   private async persistNativeIdentity(run: Run): Promise<boolean> {
     for (;;) {

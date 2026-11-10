@@ -27,6 +27,7 @@ const RETAIN = 'retain';
 /** A scheduled continuation Tower was not running for is still delivered this long after its time. */
 const SCHEDULE_GRACE_MS = 60 * 60 * 1000;
 export const SCHEDULED_OUTPUT = 'Scheduled by the agent. Tower resumes this conversation at the scheduled time.';
+export const RETIRED_STAGE_NOT_STARTED = 'Agent Session Tower stopped while saving this computer\'s run records, so this queued task may already have started. It was not started again; check the conversation and send an instruction to continue.';
 export const UPDATE_RESUME_WAIT = 'Tower resumes this conversation on its new version.';
 
 /**
@@ -65,11 +66,17 @@ export class RunHistory {
     if (storage) this.repository = new RunsRepository(storage);
   }
 
-  /** Bind exactly the worker's SDK, before restoration. The repository survives its close/reopen. */
-  useStorage(storage: StorageClient): void {
+  /**
+   * Bind exactly the worker's SDK, before restoration. The repository survives its close/reopen. `afterRetiredStage`:
+   * this start removed a runs write an earlier worker never finished (see server/storage/stranded-stages.ts), so the
+   * last committed state may predate a run having started; restore then starts no queued run by itself.
+   */
+  useStorage(storage: StorageClient, options: { afterRetiredStage?: boolean } = {}): void {
     if (this.repository && this.repository.storage !== storage) throw new Error('Runs already belongs to another storage owner.');
     this.repository ??= new RunsRepository(storage);
+    if (options.afterRetiredStage) this.afterRetiredStage = true;
   }
+  private afterRetiredStage = false;
   private async readDatabase(): Promise<void> {
     if (!this.repository) throw new Error('Runs storage is unavailable; SQL authority is required.');
     this.database = await this.repository.databaseAuthority();
@@ -116,7 +123,7 @@ export class RunHistory {
   async restore(): Promise<Run[]> {
     await this.readDatabase();
     const kept = new Map(Object.entries(this.current!.instructions).map(([id, value]) => [id, { ...checkedInstructions(value), required: true }]));
-    const restored = restoreRuns(this.current!.runs, kept);
+    const restored = restoreRuns(this.current!.runs, kept, Date.now(), { afterRetiredStage: this.afterRetiredStage });
     for (const id of restored.restoredRetained) this.restoredRetained.add(id);
     for (const id of restored.carried) this.carried.add(id);
     return restored.runs;
@@ -214,7 +221,7 @@ export class RunHistory {
  * error and a queued one as cancelled, except Tower's own continuations, a scheduled one still within its grace
  * period, and one accepted while Tower switched workers (`carried`).
  */
-export function restoreRuns(saved: readonly unknown[], kept: ReadonlyMap<string, RunInstructions>, now = Date.now()): { runs: Run[]; restoredRetained: string[]; carried: string[] } {
+export function restoreRuns(saved: readonly unknown[], kept: ReadonlyMap<string, RunInstructions>, now = Date.now(), options: { afterRetiredStage?: boolean } = {}): { runs: Run[]; restoredRetained: string[]; carried: string[] } {
   const runs: Run[] = [], restoredRetained: string[] = [], carried: string[] = [];
   const valid = saved.slice(-1000).filter(isSavedRun);
   const marked = (value: Run, key: string) => (value as unknown as Record<string, unknown>)[key] === true;
@@ -242,7 +249,12 @@ export function restoreRuns(saved: readonly unknown[], kept: ReadonlyMap<string,
     if (context) run.contextUsage = context; else delete run.contextUsage;
     // A continuation that has not started is only a time and the agent's own prompt; it waits again, unless it needed
     // instructions, which did not survive the restart.
-    if (run.status === 'queued' && run.scheduled && needsInstructions) {
+    if (run.status === 'queued' && options.afterRetiredStage) {
+      // Its start may have been the write that never finished: starting it again could send the same request twice.
+      run.status = 'cancelled';
+      run.error = RETIRED_STAGE_NOT_STARTED;
+      run.finishedAt = new Date().toISOString();
+    } else if (run.status === 'queued' && run.scheduled && needsInstructions) {
       run.status = 'cancelled';
       run.error = 'Agent Session Tower restarted before this continuation, and it would have run without the instructions Tower gave its turn. It was not started; send an instruction to continue.';
       run.finishedAt = new Date().toISOString();
