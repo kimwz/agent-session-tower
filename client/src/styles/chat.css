@@ -266,6 +266,12 @@
   gap:5px;
   color:#aaa4ee
 }
+/* Another issue master's message: its name opens its todo. */
+.chat-message.user.from-master .message-meta>span>a {
+  color:inherit;
+  text-decoration:underline dotted;
+  text-underline-offset:2px
+}
 .chat-message.assistant .message-meta:before {
   content:'';
   display:inline-block;
