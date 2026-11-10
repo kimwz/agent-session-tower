@@ -554,6 +554,12 @@ test('one issue master asks another: the message names it, its turn ending is re
   assert.match((await h.issues().call('task-b', 'master_reply', { requestId, text: 'again' }) as { error?: string }).error ?? '', /이미 회신했습니다/);
   await h.follow();
   assert.equal(h.runs.slice(before).filter(run => run.prompt.includes('replied')).length, 1);
+  // The newest closed, the one before is the todo's master again; with none open, there is none to report to.
+  a2.closed = true;
+  assert.equal(h.issues().get('task-a')?.binding()?.sessionId, a.id);
+  a.closed = true;
+  assert.equal(h.issues().get('task-a')?.binding(), undefined);
+  a.closed = false;
   const later = h.turn('codex:b-more', 'more', h.from(request));
   h.finish(later, 'done');
   await h.follow();

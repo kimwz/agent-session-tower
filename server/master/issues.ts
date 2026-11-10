@@ -179,18 +179,17 @@ export class IssueMasters {
   }
 
   /**
-   * An issue master's session as Tower's state shows it now: a newer session of its todo (a compaction just made one)
-   * is taken at once, so a report or reply never goes to the one it left, even between two looks.
+   * An issue master's session as Tower's state shows it now, by the rule `refresh` uses: a newer session of its todo (a
+   * compaction just made one) is taken at once, and with none of its sessions open it has none (its reports wait), so a
+   * report or reply never goes to a session it left, even between two looks.
    */
-  private bindingNow(entry: IssueMaster): MasterBinding {
+  private bindingNow(entry: IssueMaster): MasterBinding | undefined {
     const snapshot = this.options.live.snapshot();
-    if (!snapshot || snapshot.scanning) return entry.binding;
+    if (!entry.followed || !snapshot || snapshot.scanning) return entry.binding;
     if (this.newest?.snapshot !== snapshot) this.newest = { snapshot, masters: this.mastersIn(snapshot) };
     const session = this.newest.masters.get(entry.taskId);
-    if (entry.followed && session && session.id !== entry.binding.sessionId && Date.parse(session.createdAt) > Date.parse(entry.binding.startedAt)) {
-      entry.binding = bindingOf(session);
-      this.rebind();
-    }
+    if (!session) return undefined;
+    if (session.id !== entry.binding.sessionId) { entry.binding = bindingOf(session); this.rebind(); }
     return entry.binding;
   }
 
