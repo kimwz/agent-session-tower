@@ -52,9 +52,9 @@ const program = (segment: string) => segment.replace(/\s>\s*[^\s>]*/g, ' ').trim
  */
 export function longLivedService(command: string): boolean {
   if (command.length > MAX_SERVICE_COMMAND || AGENT_CLI.test(command)) return false;
-  // Only plain commands are read. Comments, line continuations, `||` (the service may never run), command
-  // substitution and heredocs change what runs in ways a pattern cannot follow: work.
-  if (/#|\\\n|\|\||\$\(|`|<</.test(command)) return false;
+  // Only plain commands are read. Comments, line continuations, escaped quotes, `||` (the service may never run),
+  // command and process substitution and heredocs change what runs in ways a pattern cannot follow: work.
+  if (/#|\\\n|\\['"]|\|\||\$\(|<\(|`|<</.test(command)) return false;
   // What is quoted becomes one opaque token (QUOTED): it splits nothing but still stands where it was. A
   // redirection's `&` (`2>&1`, `&>`) separates nothing.
   const runs = command.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, QUOTED);
