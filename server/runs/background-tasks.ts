@@ -39,7 +39,7 @@ const SERVICES = [
   /^(?!(?:gh|kubectl|oc)\s)\S+.*\s--watch(?!=(?:false|0)\b)(?=\s|=|$)/,
 ];
 /** What may stand beside a service in the same command without being work of its own. */
-const SETUP = /^(?:(?:cd|pushd|export|source|\.|set|ulimit|umask|echo|printf|mkdir|sleep|nvm\s+use)(?=\s|$)|true$|:$|$)/;
+const SETUP = /^(?:(?:cd|pushd|export|set|ulimit|umask|echo|printf|mkdir|sleep|nvm\s+use)(?=\s|$)|true$|:$|$)/;
 const PREFIXES = /^(?:(?:nohup|exec|env|sudo|time)\s+|\w+=\S*\s+)+/;
 /** A segment as its program runs it: prefixes dropped, the program's directory dropped, nothing after `--`. */
 const program = (segment: string) => segment.trim().replace(PREFIXES, '').replace(/^\w+=\S*$/, '').replace(/^\S*\//, '').replace(/\s--(?=\s|$)[\s\S]*$/, '');
@@ -52,7 +52,7 @@ export function longLivedService(command: string): boolean {
   // What is quoted, or written into a heredoc, is text the command prints or passes on, not what it runs; a
   // redirection's `&` (`2>&1`, `&>`) separates nothing.
   const runs = command.replace(/<<-?\s*['"]?(\w+)['"]?[^\n]*\n[\s\S]*?(?:\n\1(?=\n|$)|$)/g, ' ').replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ' ')
-    .replace(/\d*>>?&\d*-?|&>>?/g, ' > ').replace(/\d*>>?|</g, ' > ');
+    .replace(/(^|\s)\d+(?=[<>])/g, '$1').replace(/>>?&\d*-?|&>>?|>>?|</g, ' > ');
   const segments = runs.split(/&&|\|\||[;|\n&]/).map(program);
   return segments.some(segment => SERVICES.some(pattern => pattern.test(segment)))
     && segments.every(segment => SETUP.test(segment) || SERVICES.some(pattern => pattern.test(segment)));

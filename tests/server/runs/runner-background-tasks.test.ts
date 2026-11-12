@@ -674,7 +674,7 @@ test('only clearly long-lived services count as services; agent CLIs, builds and
     'cd game && codex exec "run npm run dev and check"', 'npm test', 'npm run build', 'pytest -x', 'sleep 300', 'docker compose up -d',
     'make reviews', './run-reviews.sh', 'npm run typecheck', 'python3 train.py', "printf 'npm run dev'; npm run build",
     'echo "start with: npm run dev" && npm test', 'jest --watch=false', 'npx vite build', 'vite build --mode production',
-    'pip install uvicorn && pytest', 'npm run dev >dev.log 2>&1 & npm test', 'npm run dev-check', 'npm run start:test',
+    'pip install uvicorn && pytest', 'npm run dev2>dev.log 2>&1', 'npm run dev2>>dev.log 2>&1', 'npm run dev & source ./run-tests.sh', 'npm run dev >dev.log 2>&1 & npm test', 'npm run dev-check', 'npm run start:test',
     'docker compose up --exit-code-from tests', 'docker compose up --wait', 'gh pr checks 236 --watch', 'kubectl rollout status deploy/app --watch',
     'python observe.py', 'python scripts/test_server.py', 'bash scripts/deploy-server.sh', 'node scripts/check-server.mjs', 'npx vite --mode production build', 'rg -- --watch server && npm test', 'pytest tests/test_server.py', 'cat > notes.md <<EOF\nnpm run dev\nEOF',
     `${'x'.repeat(2100)} && npm run dev`, `npm run dev <<'EOF'\n${'prompt '.repeat(700)}\nEOF\ncodex exec -`]) assert.equal(longLivedService(command), false, command);
