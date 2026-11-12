@@ -7,6 +7,8 @@ export const contextCapacity = (value: unknown): value is number => contextToken
 
 // Exact entries in Claude Code 2.1.263's native model catalog (context.window).
 // These are defaults, not proof of a historical session's settings or capacity.
+// A later point release of a listed model (`claude-fable-5-2` after `claude-fable-5`) takes its family's default
+// (defaultWindow): interactive sessions write no native capacity, so an unlisted new release would otherwise show none.
 const CLAUDE_DEFAULT_WINDOWS: Readonly<Record<string, number>> = {
   'claude-sonnet-5': 1_000_000,
   'claude-opus-4-8': 1_000_000,
@@ -37,9 +39,17 @@ export function claudeInputTokens(usage: unknown): number | undefined {
   return contextTokens(usedTokens) ? usedTokens : undefined;
 }
 
+/** The listed default for a model, or for the nearest listed model it is a numbered release of. */
+function defaultWindow(model: string): number | undefined {
+  for (let id = model; ; id = id.replace(/-\d+$/, '')) {
+    if (Object.hasOwn(CLAUDE_DEFAULT_WINDOWS, id)) return CLAUDE_DEFAULT_WINDOWS[id];
+    if (!/-\d+$/.test(id)) return undefined;
+  }
+}
+
 export function claudeContextUsage(model: string | undefined, usedTokens: number, updatedAt: string, previous?: SessionContextUsage): SessionContextUsage {
   const nativeCapacity = previous?.capacitySource === undefined && contextCapacity(previous?.contextWindow) ? previous.contextWindow : undefined;
-  const capacity = nativeCapacity ?? (model && Object.hasOwn(CLAUDE_DEFAULT_WINDOWS, model) ? CLAUDE_DEFAULT_WINDOWS[model] : undefined);
+  const capacity = nativeCapacity ?? (model ? defaultWindow(model) : undefined);
   return { usedTokens, updatedAt, ...(capacity ? { contextWindow: capacity, usedPercent: usedTokens / capacity * 100,
     ...(nativeCapacity === undefined ? { capacitySource: 'model-default' as const } : {}) } : {}) };
 }

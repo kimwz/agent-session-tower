@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import type { ChatMessage, Session, SessionOutcome } from '../../shared/types.js';
 import type { DecisionRecord } from '../../shared/decisions.js';
+import { asksClaude } from '../../shared/local-command.js';
 import type { DecisionEngine } from '../decisions/engine.js';
 import { judgeTurn } from '../notifications/attention.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -57,7 +58,7 @@ export function judgeable(session: Session, now = Date.now()): boolean {
 /** The last request in the history and what the agent wrote after it, in the form turn judgments read. */
 export function lastTurn(messages: readonly ChatMessage[]): { request: string; output: string } {
   let start = messages.length;
-  while (start > 0 && !(messages[start - 1].role === 'user' && messages[start - 1].text.trim())) start--;
+  while (start > 0 && !asksClaude(messages, start - 1)) start--;
   const request = start > 0 ? messages[start - 1].text : '';
   const output = messages.slice(start).map(message => message.role === 'assistant' ? message.text : message.role === 'tool' ? `[${message.toolName || 'Tool'}]\n` : '').filter(Boolean).join('\n');
   return { request, output };

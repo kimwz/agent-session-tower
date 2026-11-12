@@ -121,16 +121,16 @@ test('explicit native Claude result capacity is model-specific and is invalidate
   assert.deepEqual(f.service.get(`claude:${id}`)?.contextUsage, { usedTokens: 10, updatedAt: timestamp });
 });
 
-test('only exact verified Claude model IDs receive default estimates, including observed zero', async t => {
+test('verified Claude model IDs and their later numbered releases receive default estimates, including observed zero', async t => {
   const f = await fixture(t);
-  for (const model of ['claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-5', 'claude-fable-5', 'claude-fable-5-1', 'claude-opus-5-5']) {
+  for (const model of ['claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-5', 'claude-fable-5', 'claude-fable-5-1', 'claude-opus-5-5', 'claude-fable-5-2', 'claude-sonnet-5-5']) {
     await writeFile(f.claude, lines(claudeUsage(0, 0, 0, model)));
     await f.service.refresh();
     assert.deepEqual(f.service.get(`claude:${id}`)?.contextUsage, {
       usedTokens: 0, updatedAt: timestamp, contextWindow: 1_000_000, usedPercent: 0, capacitySource: 'model-default',
     });
   }
-  for (const model of ['opus', 'claude-opus-5-custom', 'claude-opus-5[1m]', 'provider/claude-opus-5', 'unknown-model']) {
+  for (const model of ['opus', 'claude-opus-5-custom', 'claude-opus-5[1m]', 'provider/claude-opus-5', 'unknown-model', 'claude-haiku-5-5', 'claude-opus-4-9']) {
     await writeFile(f.claude, lines(claudeUsage(100, 0, 0, model)));
     await f.service.refresh();
     assert.deepEqual(f.service.get(`claude:${id}`)?.contextUsage, { usedTokens: 100, updatedAt: timestamp });

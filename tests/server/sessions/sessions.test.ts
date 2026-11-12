@@ -558,10 +558,96 @@ test('a message sent while Claude works reads as the owner speaking, though Clau
     prompt: [{ type: 'text', text: 'Both run in the Korean region, so latency is fine.' }], source_uuid: 'run-1', commandMode: 'prompt' } };
   assert.deepEqual(parseMessages('claude', row), [{ id: 'queued:0', role: 'user', text: 'Both run in the Korean region, so latency is fine.', timestamp: '2026-09-27T10:21:55.026Z' }]);
   assert.equal(parseMessages('claude', { ...row, attachment: { ...row.attachment, prompt: 'As a plain string' } })[0]?.text, 'As a plain string');
-  // Claude Code's own queued notices and other attachments are not the owner speaking.
-  assert.deepEqual(parseMessages('claude', { ...row, attachment: { ...row.attachment, commandMode: 'task-notification' } }), []);
+  // Other queued modes and attachments are not the owner speaking.
+  assert.deepEqual(parseMessages('claude', { ...row, attachment: { ...row.attachment, commandMode: 'bash' } }), []);
   assert.deepEqual(parseMessages('claude', { ...row, attachment: { ...row.attachment, isMeta: true } }), []);
   assert.deepEqual(parseMessages('claude', { ...row, attachment: { type: 'hook_success' } }), []);
+});
+
+test('a background task that ends while Claude works reads as its notice, though Claude Code writes it only as a queued command', () => {
+  // As Claude Code 2.1.322 wrote it into a terminal session's transcript.
+  const prompt = '<task-notification>\n<task-id>b63u9ztgr</task-id>\n<tool-use-id>toolu_01</tool-use-id>\n<output-file>/private/tmp/b63u9ztgr.output</output-file>\n'
+    + '<status>completed</status>\n<summary>Background command "Check machine load" completed (exit code 0)</summary>\n</task-notification>';
+  const row = { type: 'attachment', uuid: 'notice', timestamp: '2026-11-12T12:00:09.000Z', entrypoint: 'cli',
+    attachment: { type: 'queued_command', prompt, commandMode: 'task-notification' } };
+  assert.deepEqual(parseMessages('claude', row), [{ id: 'notice:0', role: 'system', toolName: 'Background task', timestamp: '2026-11-12T12:00:09.000Z',
+    text: '**completed** · Background command "Check machine load" completed (exit code 0)' }]);
+  assert.equal(parseMessages('claude', { ...row, attachment: { ...row.attachment, prompt: prompt.replace('completed</status>', 'failed</status>') } })[0]?.isError, true);
+  assert.deepEqual(parseMessages('claude', { ...row, attachment: { ...row.attachment, prompt: '<task-notification>\n</task-notification>' } }), []);
+});
+
+test('a slash command Claude Code records as a system row reads like one recorded as a user row', () => {
+  const row = { type: 'system', subtype: 'local_command', uuid: 'model', timestamp: '2026-11-12T12:27:44.569Z', isMeta: false, level: 'info',
+    content: '<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args></command-args>' };
+  assert.deepEqual(parseMessages('claude', row), [{ id: 'model:0', role: 'user', text: row.content, timestamp: row.timestamp }]);
+  assert.equal(parseMessages('claude', { ...row, content: '<local-command-stdout>Kept model as `Fable 5.2`</local-command-stdout>' })[0]?.text,
+    '<local-command-stdout>Kept model as `Fable 5.2`</local-command-stdout>');
+  assert.deepEqual(parseMessages('claude', { ...row, isMeta: true }), []);
+  assert.deepEqual(parseMessages('claude', { ...row, subtype: 'informational', content: 'Claude can\'t use thinking from another organization' }), []);
+});
+
+function terminalCommandRows() {
+  const at = (seconds: number) => new Date(Date.now() - 60_000 + seconds * 1000).toISOString();
+  const base = { sessionId: rootId, cwd: '/work/game', entrypoint: 'cli' };
+  return lines([
+    { ...base, type: 'user', timestamp: at(0), message: { role: 'user', content: 'continue' } },
+    { ...base, type: 'assistant', timestamp: at(1), message: { role: 'assistant', model: 'claude-fable-5-2', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Done.' }] } },
+    { ...base, type: 'system', subtype: 'turn_duration', timestamp: at(1) },
+    { ...base, type: 'user', isMeta: true, timestamp: at(2), message: { role: 'user', content: '<local-command-caveat>The command below was run directly in Claude Code</local-command-caveat>' } },
+    { ...base, type: 'user', timestamp: at(2), message: { role: 'user', content: '<command-name>/effort</command-name>\n<command-message>effort</command-message>\n<command-args></command-args>' } },
+    { ...base, type: 'user', timestamp: at(2), message: { role: 'user', content: '<local-command-stdout>Cancelled</local-command-stdout>' } },
+    { ...base, type: 'system', subtype: 'local_command', timestamp: at(3), content: '<command-name>/model</command-name>' },
+  ]);
+}
+
+test('slash commands run in the terminal after a finished turn start no work', async (t) => {
+  const { service, claude } = await fixture(t);
+  await writeFile(claude, terminalCommandRows());
+  await service.refresh();
+  assert.equal(service.get(`claude:${rootId}`)?.status, 'completed');
+  assert.equal(service.get(`claude:${rootId}`)?.lastMessage, '<command-name>/model</command-name>');
+  // They are no request either: the last one is still `continue`.
+  assert.equal(service.get(`claude:${rootId}`)?.lastRequestAt, new Date(Date.parse(service.get(`claude:${rootId}`)!.createdAt)).toISOString());
+});
+
+test('an open Claude window waiting for input while its background shell runs is not working', async (t) => {
+  const { service, claude, claudeHome } = await fixture(t);
+  await mkdir(join(claudeHome, 'sessions'), { recursive: true });
+  await writeFile(join(claudeHome, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: rootId, status: 'shell', updatedAt: Date.now() }));
+  await writeFile(claude, terminalCommandRows());
+  await service.refresh();
+  assert.equal(service.get(`claude:${rootId}`)?.status, 'idle');
+  assert.equal(service.get(`claude:${rootId}`)?.statusReason, 'Claude process is waiting for input while a background shell runs');
+});
+
+test('a slash command Claude answers is the request and its answer the work, as with a typed request', async (t) => {
+  const { service, claude } = await fixture(t);
+  const start = Date.now() - 10_000; // well inside the two minutes a log turn stays fresh
+  const at = (seconds: number) => new Date(start + seconds * 1000).toISOString();
+  const base = { sessionId: rootId, cwd: '/work/game', entrypoint: 'cli' };
+  const rows = [
+    { ...base, type: 'user', timestamp: at(0), message: { role: 'user', content: 'continue' } },
+    { ...base, type: 'assistant', timestamp: at(1), message: { role: 'assistant', model: 'claude-fable-5-2', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Done.' }] } },
+    { ...base, type: 'system', subtype: 'turn_duration', timestamp: at(1) },
+    { ...base, type: 'user', timestamp: at(3), message: { role: 'user', content: '<command-name>/effort</command-name>' } },
+    { ...base, type: 'user', timestamp: at(3), message: { role: 'user', content: '<local-command-stdout>Cancelled</local-command-stdout>' } },
+    { ...base, type: 'user', timestamp: at(5), message: { role: 'user', content: '<command-name>/goal</command-name>\n<command-args>Ship it</command-args>' } },
+    { ...base, type: 'system', subtype: 'local_command', timestamp: at(5), content: '<local-command-stdout>Goal set: Ship it</local-command-stdout>' },
+    { ...base, type: 'user', isMeta: true, timestamp: at(5), message: { role: 'user', content: 'Work toward the goal: Ship it' } },
+  ];
+  await writeFile(claude, lines(rows));
+  await service.refresh();
+  assert.equal(service.get(`claude:${rootId}`)?.status, 'completed', 'no answer yet: the command alone starts nothing');
+  assert.equal(service.get(`claude:${rootId}`)?.lastRequestAt, at(0));
+  await appendFile(claude, lines([{ ...base, type: 'assistant', timestamp: at(6), message: { role: 'assistant', model: 'claude-fable-5-2', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] } }]));
+  await service.refresh();
+  assert.equal(service.get(`claude:${rootId}`)?.status, 'working');
+  // The latest command before the answer is the request, not the /effort before it.
+  assert.equal(service.get(`claude:${rootId}`)?.lastRequestAt, at(5));
+  // A page that holds only the answer names the command it answers as the request before it.
+  const page = await service.detail(`claude:${rootId}`, undefined, 1);
+  assert.equal(page?.messages.at(-1)?.toolName, 'Bash');
+  assert.equal(page?.previousUser?.text, '<command-name>/goal</command-name>\n<command-args>Ship it</command-args>');
 });
 
 test("Tower's hand-over of finished background work reads as a notice, not as the owner speaking", () => {
