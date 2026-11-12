@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.182.2] - 2026-11-12
+
+- **터미널에서 실행한 Claude(2.1.322)의 대화가 터미널과 같게 보입니다.** Claude가 작업하는 도중에 끝난 백그라운드 작업의 알림(`Background command "…" completed`)은 Claude Code가 대기 명령으로만 기록해 Tower가 버렸는데, 이제 다른 백그라운드 작업 알림처럼 대화에 보입니다. Claude Code가 새 형식(시스템 기록)으로 남기는 `/model` 같은 슬래시 명령과 그 출력도 예전 형식의 `/effort`처럼 보입니다.
+- **터미널에서 슬래시 명령을 실행해도 "작업중"이 되지 않습니다.** `/effort`·`/model` 같은 명령과 그 출력은 새 턴의 시작으로 치지 않습니다. 열린 Claude 창이 백그라운드 셸만 남긴 채 입력을 기다릴 때 쓰는 새 상태(`shell`)는 대기 중으로 봅니다.
+- **새 Claude 모델의 컨텍스트 사용량이 보입니다.** 대화형 세션은 컨텍스트 창 크기를 기록하지 않아 Tower의 모델별 기본값으로 계산하는데, 그 목록에 없던 `claude-fable-5-2`는 사용량 퍼센트가 비었습니다. 이제 목록에 있는 모델의 이후 번호 릴리스(`claude-fable-5` → `claude-fable-5-2`)는 그 모델의 기본값을 추정값으로 씁니다.
+
 ## [1.182.1] - 2026-11-12
 
 - **백그라운드로 띄운 작업자를 기다리는 턴이 다시 "작업중"으로 보입니다.** 1.182.0은 백그라운드로 실행한 명령을 모두 "끝나지 않는 서버일 수 있는 것"으로 보아 소유자의 턴을 답에서 끝냈습니다. 그래서 `codex exec` 작업자를 백그라운드로 여럿 띄우고 결과를 기다리는 대화가 작업 중인데도 끝난 것으로 보였고, 작업자가 끝난 뒤 Claude가 이어서 하는 턴은 어느 실행에도 속하지 않아 Tower 도구를 쓸 수 없고 권한 요청이 거부됐습니다. 이제 Tower는 Claude가 실행한 명령을 보고, 개발 서버·정적 서버·감시 프로세스처럼 분명히 계속 떠 있는 것(`npm run dev`, `vite`, `python -m http.server`, `…serve.py`, `uvicorn`, `docker compose up`, `tail -f`, `--watch` 등)만 소유자의 턴을 붙잡지 않게 합니다. 에이전트 실행(`codex`, `claude` 등), 빌드·테스트, 그 밖에 판단이 서지 않는 명령은 1.181.0처럼 끝날 때까지 턴을 열어 둡니다. 1.182.0의 나머지(대기 한도, 다음 메시지가 남은 프로세스의 자기 실행이 되는 것, 백그라운드 작업 중지)는 그대로입니다.

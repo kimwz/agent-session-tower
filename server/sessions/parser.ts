@@ -96,6 +96,10 @@ function isTowerInstructions(block: unknown): boolean {
   const value = block && typeof block === 'object' ? (block as { text?: unknown }).text : undefined;
   return typeof value === 'string' && value.startsWith(TOWER_INSTRUCTIONS_OPEN) && value.endsWith(TOWER_INSTRUCTIONS_CLOSE);
 }
+/** A slash command's own record (`<command-name>`, `<local-command-stdout>`, …), not something the person asked Claude. */
+function isLocalCommand(value: string): boolean {
+  return /^<(?:command-name|command-message|command-args|local-command-(?:stdout|stderr|caveat))>/.test(value.trimStart());
+}
 function isInjectedUser(value: string): boolean {
   return /^(?:# AGENTS\.md instructions|<environment_context>|<recommended_plugins>|<INSTRUCTIONS>|<system-reminder>|<in-app-browser-context|\[Request interrupted by user)/.test(value.trim());
 }
@@ -148,10 +152,23 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
   // A message sent while Claude works is written only as the queued command Claude took at its next step.
   const queued = row.type === 'attachment' && row.attachment?.type === 'queued_command' ? row.attachment : undefined;
   if (queued) {
-    if (queued.isMeta || (queued.commandMode !== undefined && queued.commandMode !== 'prompt')) return [];
+    // A background task that ends while Claude works is taken the same way, as a queued notice rather than a user turn.
+    const notice = queued.commandMode === 'task-notification';
+    if (queued.isMeta || (queued.commandMode !== undefined && queued.commandMode !== 'prompt' && !notice)) return [];
     const blocks: Json[] = (Array.isArray(queued.prompt) ? queued.prompt : [{ type: 'text', text: queued.prompt }]).filter((block: Json) => !isTowerInstructions(block));
+    const id = `${String(row.uuid || byteOffset)}:0`;
+    if (notice) {
+      const told = taskNotice(blocks.map(block => block?.type === 'text' ? text(block.text, limit) : '').join('\n').trim());
+      return told.text ? [{ id, role: 'system', toolName: TASK_NOTICE, text: text(told.text, limit), timestamp, ...(told.failed ? { isError: true } : {}) }] : [];
+    }
     const content = blocks.map(block => block?.type === 'text' ? text(block.text, limit) : block?.type === 'image' ? '[Image attachment]' : '').filter(Boolean).join('\n').trim();
-    return content && !isInjectedUser(content) ? [{ id: `${String(row.uuid || byteOffset)}:0`, role: 'user', text: content, timestamp }] : [];
+    return content && !isInjectedUser(content) ? [{ id, role: 'user', text: content, timestamp }] : [];
+  }
+  // Claude Code 2.1.322 writes some slash commands it runs itself (`/model`) and their output as system rows; earlier
+  // versions, and other commands still, write them as user rows. Both read the same.
+  if (row.type === 'system' && row.subtype === 'local_command') {
+    const content = typeof row.content === 'string' ? text(row.content, limit).trim() : '';
+    return content && !row.isMeta ? [{ id: `${String(row.uuid || byteOffset)}:0`, role: 'user', text: content, timestamp }] : [];
   }
   if (!['user', 'assistant'].includes(row.type) || !row.message || row.isMeta) return [];
   const value = row.message;
@@ -388,7 +405,7 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
   const rowTime = validTime(row.timestamp);
   const createdTime = row.payload?.internal_chat_message_metadata_passthrough?.create_time;
   const requestTime = s.provider === 'codex' && typeof createdTime === 'number' ? validTime(createdTime * 1000) ?? rowTime : rowTime;
-  if (messages.some(message => message.role === 'user')) s.lastRequestAt = latestTime(s.lastRequestAt, requestTime);
+  if (messages.some(message => message.role === 'user' && !isLocalCommand(message.text))) s.lastRequestAt = latestTime(s.lastRequestAt, requestTime);
 
   const setActivity = (activity: Activity) => { state.activity = activity; state.activityAt = at; };
   const setCompleted = (activity: 'completed' | 'error') => {
@@ -409,7 +426,9 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
       else if (state.explicitTurn && ['function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output', 'message'].includes(value.type)) setActivity('working');
     }
   } else {
-    if (row.type === 'user' && row.message && !row.isMeta && messages.length) setActivity('working');
+    // A slash command Claude Code runs itself, and its output, starts no turn; a command that prompts Claude is followed
+    // by Claude's answer, which does.
+    if (row.type === 'user' && row.message && !row.isMeta && messages.some(message => !isLocalCommand(message.text))) setActivity('working');
     if (row.type === 'assistant' && row.message && !row.isMeta) {
       if (['end_turn', 'stop_sequence'].includes(row.message.stop_reason)) setCompleted('completed');
       else if (row.message.stop_reason === 'max_tokens') setCompleted('error');
@@ -472,6 +491,8 @@ export function applyStatus(state: RecordState, processes: ProcessSnapshot, now:
   const registryCurrent = registry && (registry.updatedAt !== undefined ? registry.updatedAt >= state.activityAt : !fresh);
   if (registryCurrent && registry.status === 'busy') { s.status = 'working'; s.statusReason = 'Claude process reports an active task'; return; }
   if (registryCurrent && registry.status === 'idle') { s.status = 'idle'; s.statusReason = 'Claude process is waiting for input'; return; }
+  // Claude Code 2.1.322 reports `shell` while it waits for input with a background shell still running.
+  if (registryCurrent && registry.status === 'shell') { s.status = 'idle'; s.statusReason = 'Claude process is waiting for input while a background shell runs'; return; }
   if (state.activity === 'working' && (active || fresh)) {
     s.status = 'working';
     s.statusReason = active ? 'Active process with an unfinished task' : 'Recent unfinished task in session log';
