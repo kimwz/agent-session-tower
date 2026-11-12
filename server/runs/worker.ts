@@ -563,7 +563,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const mcp = { api: mcpApi(), capabilities, publicChain, secretTools: options.secrets ? SECRET_TOOLS : undefined, secretAuthorize: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>) => options.secrets!.authorizeCapability(capability) : undefined, secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
     githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined,
     heartbeatAllowed: (run: Run) => { const origin = options.runs.sessionOrigin(run.sessionId); return !origin?.untrustedInput && (!origin || origin.kind === 'owner'); },
-    run: (runId: string) => options.runs.list().find(run => run.id === runId) };
+    run: (runId: string) => options.runs.servingRun(runId) };
   const server = createServer(async (req, res) => {
     // Tool servers attached to provider turns hold a capability, not the worker credential; it opens only /mcp.
     const capability = req.headers.authorization?.match(/^Capability ([a-f\d]{64})$/)?.[1];
@@ -1213,8 +1213,11 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
     coordinators = () => new Set([...slack.coordinatorSessionIds(), ...github.coordinatorSessionIds()]);
     // A delegated task's run stays until its coordinator has finished with it, across pruning and restarts.
     runs.setRetained(() => [...slack.automation.retainedRuns(), ...github.automation.retainedRuns()]);
-    const capabilities = new CapabilityRegistry(capability => (capability.kind !== 'owner-run' && capability.kind !== 'caller-run' && capability.kind !== 'secret-run')
-      || runs.list().some(run => run.id === capability.runId && (run.status === 'running' || run.status === 'queued')));
+    const capabilities = new CapabilityRegistry(capability => {
+      if (capability.kind !== 'owner-run' && capability.kind !== 'caller-run' && capability.kind !== 'secret-run') return true;
+      const run = runs.servingRun(capability.runId);
+      return run?.status === 'running' || run?.status === 'queued';
+    });
     capabilities.grant(await sessionToolsKey(stateDir), { kind: 'session-reader' });
     const secretService = new SecretService({ stateDir });
     await secretService.start();

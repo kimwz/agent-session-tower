@@ -252,6 +252,8 @@ export class RunManager extends EventEmitter {
   private readonly nativeIdentityWaiters = new Map<string, { commandId: string; settle(saved: boolean, error?: Error): void }>();
   private readonly unsentSteering = new Map<string, string>();
   private readonly steeringAdmissions = new Map<string, Promise<Run>>();
+  /** A run whose Claude process went on to serve another run, while that process lives (see servingRun). */
+  private readonly handedOver = new Map<string, string>();
   private readonly uncertainPrepared = new Map<string, { createdIds: string[]; sessionId?: string }>();
   private readonly incomingAttachments = new Set<ReadonlyArray<string>>();
   private readonly locallySettled = new Map<string, number>();
@@ -301,7 +303,7 @@ export class RunManager extends EventEmitter {
       changed: (...runs) => this.changed(...runs), touch: run => this.touch(run.id), append: (run, text) => this.append(run, text), notifyOutput: run => { this.touch(run.id); this.notifyOutput(); }, flush: () => this.flush(), persistNativeIdentity: run => this.persistNativeIdentity(run),
       stopping: () => this.stopping, updating: () => this.updating, goalMayContinue: run => this.goalMayContinue(run), stop: (id, owned) => this.stopOwned(id, owned),
       prepareLaunch: run => this.prepareLaunch(run), refusedAtLaunch: (run, session) => this.refusedAtLaunch(run, session),
-      release: sessionId => { this.reservedSessions.delete(sessionId); }, exited: exit => this.exited(exit),
+      release: sessionId => { this.reservedSessions.delete(sessionId); }, exited: exit => this.exited(exit), answered: (run, _owned, error) => this.answered(run, error),
       runTools: (run, session) => this.runTools(run, session), executable: provider => this.executable(provider),
       getSession: id => this.getSession(id), isWorking: session => this.isWorking(session),
       validateSession: session => this.validateSession(session), masterSession: session => this.masterSession(session),
@@ -744,10 +746,10 @@ export class RunManager extends EventEmitter {
     if (this.resolvingLinks) return undefined;
     if (this.retentionHeld(run.sessionId) || this.permissions.noticeBlocked(run)) return undefined;
     if (this.stopping || run.status !== 'queued' || run.steering || run.scheduled || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
-    const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering);
+    const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering) ?? this.keptRun(run.sessionId);
     if (!target) return undefined;
-    // Inserted text reaches the running turn alone: instructions it must not go without would be lost.
-    if (run.instructions?.required) return { blocked: 'instructions' };
+    // A turn of its own carries its instructions; inserted text reaches the running turn alone, and would lose them.
+    if (run.instructions?.required && !this.adoptable(run, target)) return { blocked: 'instructions' };
     if (run.model && run.model !== (target.model ?? this.getSession(run.sessionId)?.model)) return { blocked: 'model' };
     if (run.effort && run.effort !== target.effort) return { blocked: 'effort' };
     // An inserted instruction runs with the active turn's tools, approvals and secret credential. They follow origin,
@@ -756,7 +758,33 @@ export class RunManager extends EventEmitter {
     if (!sameOrigin(run.origin, target.origin)) return { blocked: 'origin' };
     if (!sameDelegation(run.delegation, target.delegation)) return { blocked: 'delegation' };
     const adapter = this.stdio.get(target.id) ?? this.bridged.get(target.id) ?? this.owned.get(target.id)?.claude;
+    // A kept process takes a run only as a turn of its own, between the turns Claude starts there by itself.
+    if (FINISHED.has(target.status) && !this.adoptable(run, target)) return { blocked: 'starting' };
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : { blocked: 'starting' };
+  }
+
+  /** The Claude process kept for background work after its last run ended (see claudeProcess), as that run. */
+  private keptRun(sessionId: string): Run | undefined {
+    for (const id of this.owned.keys()) {
+      const run = this.runs.get(id);
+      if (run?.sessionId === sessionId && FINISHED.has(run.status)) return run;
+    }
+    return undefined;
+  }
+
+  /**
+   * Whether `run` goes into `target`'s Claude process as a turn of its own: the process is kept after `target` ended,
+   * and runs no turn now. Only the owner's runs end before their background processes, so only theirs are kept.
+   */
+  private adoptable(run: Run, target: Run): boolean {
+    return FINISHED.has(target.status) && target.origin?.kind === 'owner' && run.origin?.kind === 'owner' && Boolean(this.owned.get(target.id)?.canAdopt?.());
+  }
+
+  /** The run the Claude process started for `runId` serves now: a turn's tool credentials follow its process. */
+  servingRun(runId: string): Run | undefined {
+    let id = runId;
+    for (let hops = 0; this.handedOver.has(id) && hops < 1000; hops++) id = this.handedOver.get(id)!;
+    return this.list().find(run => run.id === id);
   }
 
   /** `targetRunId` inserts only into that turn: a decision made about one turn never lands in the next. */
@@ -793,6 +821,10 @@ export class RunManager extends EventEmitter {
       const current = this.steeringTarget(run);
       this.admissions.add(run.id);
       if (!current || current.target !== selected.target || current.adapter !== selected.adapter || (options.whileWaiting && !current.target.backgroundWait)) throw new SteeringError('The active turn changed before delivery.', 'rejected');
+      if (selected.adapter instanceof ClaudeControl && this.adoptable(run, selected.target)) {
+        submitted = await this.adopt(run, selected.target, attachments);
+        return this.list().find(item => item.id === runId)!;
+      }
       run.status = 'running'; run.startedAt = new Date().toISOString(); run.output = '';
       run.steering = { targetRunId: selected.target.id, state: 'sending', requestedAt: run.startedAt };
       this.changed(run);
@@ -830,6 +862,42 @@ export class RunManager extends EventEmitter {
       }
       throw error;
     }
+  }
+
+  /**
+   * Sends `run` into `target`'s idle Claude process as a turn of its own (see claudeProcess `adopt`): from here the
+   * process is held under `run`, which gets its own output, approvals and outcome, and its tools' credentials serve
+   * `run` (servingRun). Steering already requires the same origin and calling turn, so the authority is the same.
+   * True once the message may have been written.
+   */
+  private async adopt(run: Run, target: Run, attachments: Awaited<ReturnType<AttachmentStore['resolve']>>): Promise<boolean> {
+    // The notes every turn gets (see TurnNotes), as a launch adds them.
+    const session = this.getSession(run.sessionId);
+    if (session) await this.notes.add(run, session, false);
+    run.status = 'running'; run.startedAt = new Date().toISOString(); run.output = '';
+    this.changed(run);
+    await this.flush();
+    const owned = this.owned.get(target.id);
+    const delivery = !this.storageHeld && !this.pendingAdmission() && !this.stopping && owned && run.status === 'running' && this.adoptable(run, target) ? owned.adopt?.(run, attachments) : undefined;
+    if (!owned || !delivery) {
+      if (run.status === 'running') { delete run.startedAt; run.status = 'queued'; this.changed(run); }
+      throw new SteeringError('The conversation\'s Claude process changed before delivery.', 'rejected');
+    }
+    // Held under the run it serves from here; the message's write is still under way, Claude's replay comes later.
+    if (target.towerTools) run.towerTools = target.towerTools;
+    this.owned.delete(target.id); this.owned.set(run.id, owned); this.handedOver.set(target.id, run.id);
+    this.drain.noteHandedOver(run);
+    this.admissions.delete(run.id);
+    this.changed(run);
+    void delivery.then(() => {}, error => {
+      // Claude never took it: the process goes back to being kept for its background work, under the run it served.
+      if (this.owned.get(run.id) === owned && owned.disown?.(run, target)) { this.owned.delete(run.id); this.owned.set(target.id, owned); this.handedOver.delete(target.id); }
+      if (FINISHED.has(run.status)) return;
+      if (error instanceof SteeringError && error.disposition === 'rejected') { delete run.startedAt; run.status = 'queued'; run.output = ''; }
+      else { run.status = 'error'; run.finishedAt = new Date().toISOString(); run.error = `Delivery could not be confirmed. Check the conversation before sending again. ${errorMessage(error)}`; }
+      this.changed(run);
+    }).catch(error => console.error('Recording an undelivered request failed:', error));
+    return true;
   }
 
   /** Records how an instruction for a running turn ended, then lets that turn close if it has nothing left. */
@@ -979,6 +1047,7 @@ export class RunManager extends EventEmitter {
 
   private waitReason(session: Session): string {
     if (this.isWorking(session)) return 'Waiting for the current turn to finish before resuming this conversation.';
+    if (this.keptRun(session.id)) return 'Waiting: this conversation\'s Claude process still runs background work it started, and this request cannot go into it; it starts once that work ends.';
     if (session.provider === 'codex' && session.activeProcess) return 'Codex 앱이 이 세션의 쓰기 권한을 보유하고 있습니다. 기존 앱 서버에 연결할 수 있을 때 전달하거나, 원래 세션의 연결이 종료되면 재개합니다.';
     if (this.reservedSessions.has(session.id)) return 'Waiting for the previous instruction in this conversation.';
     return 'Queued — preparing to resume this conversation.';
@@ -1035,7 +1104,7 @@ export class RunManager extends EventEmitter {
         try {
           if (!session) throw new RunError('Session no longer exists.', 'not-found');
           if (!creating) this.validateSession(session);
-          if (this.isWorking(session) || this.reservedSessions.has(session.id)) {
+          if (this.isWorking(session) || this.reservedSessions.has(session.id) || this.keptRun(session.id)) {
             const reason = this.waitReason(session);
             if (run.output !== reason) { run.output = reason; this.changed(run); }
             continue;
@@ -1081,7 +1150,8 @@ export class RunManager extends EventEmitter {
 
   /**
    * A turn that has answered and only waits for its background work takes the owner's next message at once instead
-   * of holding it until that work ends. Only a session's oldest queued message goes, exactly like an explicit insert.
+   * of holding it until that work ends; a process kept for background work after its run ended takes it as a turn of
+   * its own (see adopt). Only a session's oldest queued message goes, exactly like an explicit insert.
    */
   private insertIntoWaitingTurns(): void {
     const seen = new Set<string>();
@@ -1174,6 +1244,21 @@ export class RunManager extends EventEmitter {
     prepared.start();
   }
 
+  /**
+   * A Claude run ended at its answer while its process stays for background work no run waits for (see claudeProcess):
+   * it is settled now, and its conversation is free for its next run, which goes into that process (adopt).
+   */
+  private answered(run: Run, error?: string): void {
+    if (FINISHED.has(run.status)) return;
+    this.settledRuns.add(run.id);
+    this.locallySettled.delete(run.sessionId); this.locallySettled.set(run.sessionId, Date.now());
+    if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
+    if (error) { this.fail(run, error); return; }
+    run.status = 'completed'; run.finishedAt = new Date().toISOString();
+    this.changed(run);
+    if (!this.stopping) void this.pump();
+  }
+
   /** The only place a turn's end is decided: it leaves the live turns, frees its conversation, and gets its outcome. */
   private exited(exit: TurnExit): void {
     const { run, session } = exit;
@@ -1187,9 +1272,14 @@ export class RunManager extends EventEmitter {
       this.locallySettled.delete(session.id);
       this.locallySettled.set(session.id, Date.now());
       if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
+      for (const [from, to] of [...this.handedOver]) if (to === run.id || !this.owned.has(to)) this.handedOver.delete(from);
       const { code, signal, sawCompletion, sawSessionId, waitTimedOut, outstanding, noticePending } = summary;
       let streamError = summary.streamError;
-      if (run.status !== 'cancelled') {
+      // Its last run already ended at its answer (see answered); the process was kept only for background work.
+      if (run.status === 'completed' || run.status === 'error') {
+        if (summary.wakeup && !this.stopping) this.scheduleContinuation(run, summary.wakeup);
+        this.changed(run);
+      } else if (run.status !== 'cancelled') {
         const recover = !streamError && !waitTimedOut && sawSessionId && (outstanding > 0 || noticePending)
           && !summary.pendingApproval && !summary.pendingSteer && !this.stopping && run.origin?.kind === 'owner';
         if (outstanding || noticePending) this.append(run, `\n[Tower] Provider exit: code=${code ?? 'none'}, signal=${signal ?? 'none'}, result=${sawCompletion}, inputClosedByTower=${summary.inputClosedByTower}, runningTasks=${summary.runningTasks}, unreadTasks=${summary.unreadTasks}.\n`);
@@ -1390,7 +1480,7 @@ export class RunManager extends EventEmitter {
 
   private prune(retained = this.retainedIds()): void {
     // The runs that finished longest ago go first: a long turn that just finished is still read by its watchers.
-    const finished = [...this.runs.values()].filter(run => FINISHED.has(run.status) && !retained.has(run.id) && !this.history.reservingAdmission(run.id) && !this.admissions.has(run.id)).sort((a, b) => finishedTime(a) - finishedTime(b));
+    const finished = [...this.runs.values()].filter(run => FINISHED.has(run.status) && !retained.has(run.id) && !this.history.reservingAdmission(run.id) && !this.admissions.has(run.id) && !this.owned.has(run.id)).sort((a, b) => finishedTime(a) - finishedTime(b));
     for (const run of finished.slice(0, Math.max(0, finished.length - MAX_RUNS))) { this.runs.delete(run.id); this.touch(run.id); this.settledRuns.delete(run.id); }
     for (const id of this.ownerStopped) if (!this.runs.has(id) || FINISHED.has(this.runs.get(id)!.status)) this.ownerStopped.delete(id);
   }

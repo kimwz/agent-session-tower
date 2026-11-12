@@ -288,9 +288,11 @@ export interface Run {
     /** Tower's own continuation for a turn a forced worker update ended; watchers of `afterRunId` follow it. */
     resume?: 'update' | 'permission' };
   /**
-   * The turn has answered but background work it started (a background command, Monitor or agent) is still running
-   * inside the provider process. Tower keeps the turn open so the agent can pick up the results; `since` is when the
-   * wait began and `tasks` how many are still running (0 while Claude is about to take a finished one).
+   * A running turn: it has answered, but background work it waits for (a background agent; a command or monitor too
+   * when others read its result) still runs inside the provider process, and the turn stays open so the agent can
+   * pick up the results. A finished run: it ended at its answer and its process is kept for background work no run
+   * waits for (a server), until that ends. `since` is when this began and `tasks` how many are still running (0 while
+   * Claude is about to take a finished one).
    */
   backgroundWait?: { since: string; tasks: number };
   /**

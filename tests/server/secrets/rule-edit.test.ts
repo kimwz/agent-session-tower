@@ -62,7 +62,7 @@ test('an expired key leaves its rules at the next sweep, so a rule that named on
 
 test('the owner page no longer edits rules, projects or task connections; changes report malformed input and a locked vault distinctly', async t => {
   const { directory, service } = await vault(t);
-  const runtime = new SecretRuntime({ stateDir: directory, service, runs: { list: () => [], getSession: () => undefined, sessionOrigin: () => undefined } }); t.after(() => runtime.close());
+  const runtime = new SecretRuntime({ stateDir: directory, service, runs: { list: () => [], servingRun: () => undefined, getSession: () => undefined, sessionOrigin: () => undefined } }); t.after(() => runtime.close());
   for (const action of ['overview', 'rule', 'project', 'attach', 'connect', 'revoke', 'end-task']) await refusal(runtime.control(action, { sessionId: 'codex:fixture', secretIds: ['x'] }), 'not-found', '알 수 없는 시크릿 작업입니다.');
   const secret = await service.create({ name: 'token', kind: 'scalar', value: 'v' });
   await refusal(runtime.control('sharing', { secretId: secret.id, revision: 'one', allMachines: true, folders: [] }), 'invalid', '시크릿 입력이 올바르지 않습니다.');

@@ -61,7 +61,7 @@ export class FixtureRuns {
     this.running.push({ id: runId, sessionId, prompt: 'fixture owner task', status: 'running', createdAt: at, startedAt: at, output: '', origin: { kind: 'owner' }, towerTools: 'attached' });
     return { kind: 'secret-run', runId, sessionId };
   }
-  list() { return this.running; } getSession(id: string) { return this.sessions.get(id); }
+  list() { return this.running; } servingRun(runId: string) { return this.running.find(run => run.id === runId); } getSession(id: string) { return this.sessions.get(id); }
   sessionOrigin(_id: string): SessionOrigin { return { kind: 'owner', untrustedInput: false }; }
 }
 

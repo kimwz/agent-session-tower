@@ -64,16 +64,7 @@ export async function prepareClaudeTurn(host: TurnHost, run: Run, session: Sessi
     ...(host.masterSession(session) ? Object.entries(MASTER_APPROVED_TOOLS).flatMap(([server, names]) => mcpServers?.[server] ? names.map(name => `mcp__${server}__${name}`) : []) : [])];
   if (allowed.length) args.push(`--allowedTools=${allowed.join(',')}`);
   for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
-  const prompt = attachmentPrompt(run.prompt, attachments);
-  const input = {
-    type: 'user', session_id: session.nativeId, parent_tool_use_id: null,
-    message: { role: 'user', content: [
-      { type: 'text', text: prompt },
-      // A block of its own, not the system prompt: Claude keeps a conversation's first system prompt for every later turn.
-      ...(run.instructions?.text ? [{ type: 'text', text: towerInstructionsBlock(run.instructions.text) }] : []),
-      ...claudeImageBlocks(attachments),
-    ] },
-  };
+  const input = turnMessage(run, session, attachments);
   // Recheck after asynchronous filesystem discovery, immediately before creating the writer.
   await host.prepareLaunch(run);
   const latest = host.getSession(session.id);
@@ -103,13 +94,30 @@ export async function prepareClaudeTurn(host: TurnHost, run: Run, session: Sessi
   return { kind: 'ready', handle: turn.spawn, start: turn.start, dispose: () => privateConfig?.remove() };
 }
 
+/** A run's request as Claude takes it at the start of a turn: its prompt, Tower's instructions and its images. */
+function turnMessage(run: Run, session: Session, attachments: Awaited<ReturnType<TurnHost['attachments']['resolve']>>, uuid?: string): Record<string, unknown> {
+  return {
+    type: 'user', ...(uuid ? { uuid } : {}), session_id: session.nativeId, parent_tool_use_id: null,
+    message: { role: 'user', content: [
+      { type: 'text', text: attachmentPrompt(run.prompt, attachments) },
+      // A block of its own, not the system prompt: Claude keeps a conversation's first system prompt for every later turn.
+      ...(run.instructions?.text ? [{ type: 'text', text: towerInstructionsBlock(run.instructions.text) }] : []),
+      ...claudeImageBlocks(attachments),
+    ] },
+  };
+}
+
 interface ClaudeLaunch {
   executable: string; args: string[]; env: NodeJS.ProcessEnv;
   input: Record<string, unknown>;
   privateConfig?: { path: string; bindConsumer(pid: number): Promise<void>; remove: () => Promise<void> };
 }
 
-/** One Claude Code process for one run: its output parsing, background work, master replies and identity. */
+/**
+ * One Claude Code process, started for one run: its output parsing, background work, master replies and identity. A run
+ * ends at its answer when only processes it does not wait for still run (see BackgroundTaskTracker.holding); the process
+ * is then kept for them, and the conversation's next run that may go into it becomes its run (see `adopt`).
+ */
 function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boolean, { executable, args, env, input, privateConfig }: ClaudeLaunch) {
   let child!: ChildProcessWithoutNullStreams;
   let finish!: () => void;
@@ -124,22 +132,35 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   let sawSessionId = false;
   let sawPartial = false;
   let messageHasPartial = false;
+  /** The run this process serves; none while it is kept only for background work no run waits for. */
+  let current: Run | undefined = run;
+  /** The last run it served: the manager holds the process under its id, and the process's end is reported for it. */
+  let last: Run = run;
   // What Claude itself put in the output, apart from Tower's notes: its final result is shown only if nothing was.
   let shown = false;
-  const show = (text: string) => { shown = true; host.append(run, text); };
+  // A turn Claude starts by itself in a kept process belongs to no run: its words are in the conversation only.
+  const show = (text: string) => { shown = true; if (current) host.append(current, text); };
+  const note = (text: string) => { if (current) host.append(current, text); };
   // The master's words, block by block, so they can be read aloud as they are written.
-  const replies = host.masterSession(session) ? new ReplyLog(run, Date.now) : undefined;
+  const masterReplies = (served: Run) => host.masterSession(session) ? new ReplyLog(served, Date.now) : undefined;
+  let replies = masterReplies(run);
   let replyMessage = '';
   /** Messages whose words came as partial text: their complete form adds nothing. */
   const streamedMessages = new Set<string>();
-  const replied = (changed: boolean) => { if (changed) host.notifyOutput(run); };
+  const replied = (changed: boolean) => { if (changed && current) host.notifyOutput(current); };
   let modeNoted = false;
   let contextInput: { model: string; usedTokens: number } | undefined;
   let identitySaved: Promise<void> = Promise.resolve();
   const wakeups = new WakeupTracker(MAX_PROMPT);
-  // A turn ends at its result, but background work it started keeps running in this process. Input stays open
-  // until that work has ended and Claude has taken each notice in a follow-up turn of this same run.
+  // A turn ends at its result, but background work it started keeps running in this process. Input stays open while
+  // it runs; the run itself stays until the work it waits for has ended and Claude has taken each notice in a
+  // follow-up turn of this same run.
   const tasks = new BackgroundTaskTracker();
+  // Whoever reads a run's result as "done" (an agent, a trigger, Slack) also waits for its background processes. The
+  // owner reads the conversation, where Claude still reports them from the kept process.
+  const waitsForProcesses = (served: Run) => served.origin?.kind !== 'owner';
+  /** What keeps the current run open after its answer. */
+  const holding = (served: Run) => tasks.holding(waitsForProcesses(served)) + tasks.unreadCount + (noticeId ? 1 : 0);
   const followUpMs = host.options.backgroundFollowUpMs ?? BACKGROUND_FOLLOW_UP_MS;
   const waitMaxMs = host.options.backgroundWaitMaxMs ?? BACKGROUND_WAIT_MAX_MS;
   const finishRecheckMs = host.options.claudeFinishRecheckMs ?? CLAUDE_FINISH_RECHECK_MS;
@@ -147,6 +168,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   /** Tower handed Claude the notice itself and Claude has not yet replayed it. */
   let noticeId: string | undefined;
   let waitTimedOut = false;
+  /** When the current run's background wait ends at the latest; follow-up turns of that run do not move it. */
+  let waitDeadline: number | undefined;
   let followUpTimer: ReturnType<typeof setTimeout> | undefined;
   let waitTimer: ReturnType<typeof setTimeout> | undefined;
   let finishTimer: ReturnType<typeof setTimeout> | undefined;
@@ -157,7 +180,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
     if (waitTimer) clearTimeout(waitTimer);
     followUpTimer = waitTimer = undefined;
   };
-  const endWait = () => { if (run.backgroundWait) { delete run.backgroundWait; host.changed(run); } };
+  const endWait = () => { if (current?.backgroundWait) { delete current.backgroundWait; host.changed(current); } };
   const beginTurn = () => {
     if (turnActive) return;
     clearFinishTimer();
@@ -182,73 +205,153 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   const start = (): void => {
     owned.claude = new ClaudeControl({
       write: message => new Promise<void>((resolve, reject) => {
-        if (run.status !== 'running' || child.exitCode !== null || child.stdin.destroyed || child.stdin.writableEnded) { reject(new Error('Provider input is closed.')); return; }
+        if ((current && current.status !== 'running') || child.exitCode !== null || child.stdin.destroyed || child.stdin.writableEnded) { reject(new Error('Provider input is closed.')); return; }
         child.stdin.write(JSON.stringify(message) + '\n', error => error ? reject(error) : resolve());
       }),
-      onApproval: approval => { if (run.status === 'running') { run.approvals = [...(run.approvals || []), approval]; host.changed(run); } },
-      onCancelled: id => {
-        if (!run.approvals?.some(approval => approval.id === id)) return;
-        run.approvals = run.approvals.filter(approval => approval.id !== id);
-        if (!run.approvals.length) delete run.approvals;
-        host.changed(run);
+      onApproval: approval => {
+        if (current?.status === 'running') { current.approvals = [...(current.approvals || []), approval]; host.changed(current); return; }
+        // A turn Claude started by itself in a kept process: no Tower task is there to ask the owner.
+        void owned.claude?.respond(approval.id, 'deny').catch(error => console.error('Claude permission request in a kept process could not be answered:', error));
       },
-      onError: error => { streamError = error.message; host.stop(run.id, owned); },
+      onCancelled: id => {
+        const served = current;
+        if (!served?.approvals?.some(approval => approval.id === id)) return;
+        served.approvals = served.approvals.filter(approval => approval.id !== id);
+        if (!served.approvals.length) delete served.approvals;
+        host.changed(served);
+      },
+      onError: error => { streamError = error.message; host.stop(last.id, owned); },
       // Instructions queued behind this turn can be inserted now; the page is told without waiting for output.
-      onReady: () => host.changed(run),
+      onReady: () => host.changed(last),
     });
     const closeInput = () => { inputClosedByTower = true; clearFinishTimer(); clearWaitTimers(); owned.claude?.close(); if (!child.stdin.writableEnded) child.stdin.end(); };
-    const idle = () => !turnActive && run.status === 'running' && child.exitCode === null && !child.stdin.writableEnded;
+    const idle = () => !turnActive && (!current || current.status === 'running') && child.exitCode === null && !child.stdin.writableEnded;
     const arm = (timer: 'followUp' | 'wait', ms: number) => {
       const handle = setTimeout(timer === 'followUp' ? followUp : waitLimit, ms);
       handle.unref();
       if (timer === 'followUp') followUpTimer = handle; else waitTimer = handle;
     };
+    /**
+     * Ends the current run at its answer while the process keeps running background work no run waits for any more.
+     * The run keeps `backgroundWait` while its process is kept, so its conversation counts as in use (retention).
+     */
+    const release = (error?: string) => {
+      const served = current;
+      if (!served) return;
+      clearFinishTimer(); clearWaitTimers(); waitDeadline = undefined;
+      tasks.detach();
+      current = undefined;
+      const count = tasks.detachedCount;
+      if (count) served.backgroundWait = { since: new Date().toISOString(), tasks: count };
+      else delete served.backgroundWait;
+      if (count) host.append(served, `\n[Tower] ${error ? 'Stopped waiting' : 'Turn finished'}; ${count} background task${count === 1 ? '' : 's'} keep${count === 1 ? 's' : ''} running in this conversation's Claude process.\n`);
+      host.answered(served, owned, error);
+    };
     // Claude normally takes a finished task's notice by itself. If it has not, Tower hands it over as a message.
     const followUp = () => {
       followUpTimer = undefined;
       if (!idle()) return;
-      if (run.approvals?.length) { arm('followUp', followUpMs); return; }
-      if (noticeId) { host.append(run, '\n[Tower] Claude has not answered the background work notice yet.\n'); return; }
+      // Nobody waits for a kept process's work: a notice Claude did not take by now is let go.
+      if (!current) { tasks.dropDetachedUnread(); owned.finishInput?.(); return; }
+      if (current.approvals?.length) { arm('followUp', followUpMs); return; }
+      if (noticeId) { note('\n[Tower] Claude has not answered the background work notice yet.\n'); return; }
       const unread = tasks.takeUnread();
       if (!unread.length) { owned.finishInput?.(); return; }
       noticeId = randomUUID();
-      host.append(run, '\n[Tower] Background work finished; asking Claude to continue.\n');
+      note('\n[Tower] Background work finished; asking Claude to continue.\n');
       child.stdin.write(JSON.stringify({ type: 'user', uuid: noticeId, session_id: session.nativeId, parent_tool_use_id: null,
         message: { role: 'user', content: [{ type: 'text', text: backgroundNotice(unread) }] } }) + '\n');
       arm('followUp', followUpMs);
     };
     const waitLimit = () => {
       waitTimer = undefined;
-      if (!idle()) return;
-      if (run.approvals?.length) { arm('wait', followUpMs); return; }
-      // Closing input is how every turn ended before; Claude ends what is left. Never reported as success.
+      if (!idle() || !current) return;
+      if (current.approvals?.length) { arm('wait', followUpMs); return; }
+      // Never reported as success.
       waitTimedOut = true;
-      host.append(run, `\n[Tower] Background work was still running after ${Math.round(waitMaxMs / 60_000)} minutes; closing the turn.\n`);
-      closeInput();
+      const minutes = Math.round(waitMaxMs / 60_000);
+      if (waitsForProcesses(current)) {
+        // Its result is read as the work's end, so the work ends with it. Closing input no longer ends Claude while
+        // its background work runs: the process is stopped, as the owner's Stop does.
+        note(`\n[Tower] Background work was still running after ${minutes} minutes; ending the turn and its work.\n`);
+        closeInput(); host.stop(last.id, owned);
+        return;
+      }
+      note(`\n[Tower] Background work was still running after ${minutes} minutes; the turn ends and the work keeps running.\n`);
+      release(`The turn answered, but its background work did not finish within the ${minutes} minutes Tower waits; it keeps running in this conversation.`);
+      owned.finishInput?.();
+    };
+    /** A kept process ends once nothing it runs is left and Claude is idle: input closes, as at any turn's end. */
+    const keptIdle = () => {
+      // Work started in a turn Claude began by itself belongs to no run either.
+      tasks.detach();
+      const count = tasks.detachedCount;
+      if (count) {
+        clearFinishTimer();
+        if (last.backgroundWait?.tasks !== count) { last.backgroundWait = { since: last.backgroundWait?.since ?? new Date().toISOString(), tasks: count }; host.changed(last); }
+        if (count > tasks.runningCount && !followUpTimer) arm('followUp', followUpMs);
+        return;
+      }
+      if (!finishTimer) finishTimer = setTimeout(() => {
+        finishTimer = undefined;
+        if (!idle() || current || owned.claude?.hasPendingSteers()) return;
+        if (tasks.detachedCount) { owned.finishInput?.(); return; }
+        if (last.backgroundWait) { delete last.backgroundWait; host.changed(last); }
+        closeInput();
+      }, finishRecheckMs);
     };
     owned.finishInput = () => {
-      if (!sawCompletion || turnActive || owned.claude?.hasPendingSteers() || child.stdin.writableEnded) return;
+      if (turnActive || owned.claude?.hasPendingSteers() || child.stdin.writableEnded) return;
+      if (!current) { keptIdle(); return; }
+      if (!sawCompletion) return;
       // A failed turn is not kept open for its background work.
       if (streamError) { endWait(); closeInput(); return; }
-      if (!tasks.outstanding && !noticeId) {
+      const served = current;
+      if (!holding(served)) {
         // Task bookends can follow a result, even in the next stdout chunk. Recheck after they drain.
         if (!finishTimer) finishTimer = setTimeout(() => {
           finishTimer = undefined;
-          if (!idle() || owned.claude?.hasPendingSteers()) return;
-          if (tasks.outstanding || noticeId) { owned.finishInput?.(); return; }
+          if (!idle() || current !== served || owned.claude?.hasPendingSteers()) return;
+          if (holding(served)) { owned.finishInput?.(); return; }
+          // Processes it does not wait for, and work an earlier run left, keep the process after the run.
+          if (tasks.runningCount || tasks.detachedCount) { release(); owned.finishInput?.(); return; }
           endWait(); closeInput();
         }, finishRecheckMs);
         return;
       }
       clearFinishTimer();
       if (tasks.unreadCount && !followUpTimer) arm('followUp', followUpMs);
-      if (!run.backgroundWait) {
-        run.backgroundWait = { since: new Date().toISOString(), tasks: tasks.runningCount };
-        host.append(run, tasks.runningCount ? `\n[Tower] Waiting for ${tasks.runningCount} background task${tasks.runningCount === 1 ? '' : 's'} before this turn ends.\n`
+      const waiting = tasks.holding(waitsForProcesses(served));
+      if (!served.backgroundWait) {
+        served.backgroundWait = { since: new Date().toISOString(), tasks: waiting };
+        note(waiting ? `\n[Tower] Waiting for ${waiting} background task${waiting === 1 ? '' : 's'} before this turn ends.\n`
           : '\n[Tower] Waiting for Claude to take the finished background work.\n');
-        arm('wait', waitMaxMs);
-      } else run.backgroundWait.tasks = tasks.runningCount;
-      host.changed(run);
+      } else served.backgroundWait.tasks = waiting;
+      if (!waitTimer) { waitDeadline ??= Date.now() + waitMaxMs; arm('wait', Math.max(0, waitDeadline - Date.now())); }
+      host.changed(served);
+    };
+    /**
+     * The conversation's next run goes into a kept process as a turn of its own, while no turn is under way here. A run
+     * still waiting for its background work keeps it: what arrives meanwhile is inserted into that run, as before.
+     * The caller sends the run's message; Claude acknowledges it by replaying it.
+     */
+    owned.canAdopt = () => !current && !turnActive && !streamError && child.exitCode === null && !child.stdin.writableEnded
+      && !owned.claude?.hasPendingSteers() && !noticeId && Boolean(owned.claude?.canSteer());
+    owned.adopt = (next, attachments) => {
+      if (!owned.canAdopt?.() || !owned.claude) return undefined;
+      clearFinishTimer(); clearWaitTimers();
+      if (last.backgroundWait) { delete last.backgroundWait; host.changed(last); }
+      current = last = next;
+      sawCompletion = false; shown = false; sawPartial = false; messageHasPartial = false; waitTimedOut = false; waitDeadline = undefined;
+      replies = masterReplies(next);
+      return owned.claude.steer(turnMessage(next, session, attachments, next.id));
+    };
+    /** The adopted run's message never reached Claude: the process is kept for its background work again. */
+    owned.disown = (next, previous) => {
+      if (current !== next || turnActive) return false;
+      current = undefined; last = previous;
+      owned.finishInput?.();
+      return true;
     };
     const parseEventLine = (line: string): void => {
       if (!line.trim()) return;
@@ -267,7 +370,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         host.changed(run);
         identitySaved = host.persistNativeIdentity(run).then(() => {}).catch(error => {
           streamError = `Cannot save the new conversation identity: ${errorMessage(error)}`;
-          host.stop(run.id, owned);
+          host.stop(last.id, owned);
         });
       }
       if (actualId === session.nativeId) sawSessionId = true;
@@ -277,16 +380,16 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       const startMode = actualId ? claudeStartMode(run, event.permissionMode) : undefined;
       if (startMode && 'stop' in startMode) {
         streamError = startMode.stop;
-        host.stop(run.id, owned);
+        host.stop(last.id, owned);
         return;
       }
       if (startMode) {
-        if (!modeNoted) host.append(run, startMode.note);
+        if (!modeNoted) note(startMode.note);
         modeNoted = true;
       }
       if (actualId && actualId !== session.nativeId) {
         streamError = creating ? 'The provider did not confirm the new conversation ID. The task was stopped.' : 'The provider opened a different conversation instead of resuming the requested session. The task was stopped.';
-        host.stop(run.id, owned);
+        host.stop(last.id, owned);
         return;
       }
       const mainContext = event.parent_tool_use_id == null && (event.session_id === undefined || event.session_id === session.nativeId);
@@ -335,18 +438,19 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         messageHasPartial = false;
       } else if (event.type === 'result' && mainContext) {
         const capacity = contextInput && mainContext ? modelContextWindow(event.modelUsage, contextInput.model) : undefined;
-        if (contextInput && contextCapacity(capacity) && sawSessionId && !streamError) {
-          run.contextUsage = { ...contextInput, contextWindow: capacity, usedPercent: contextInput.usedTokens / capacity * 100,
+        if (current && contextInput && contextCapacity(capacity) && sawSessionId && !streamError) {
+          current.contextUsage = { ...contextInput, contextWindow: capacity, usedPercent: contextInput.usedTokens / capacity * 100,
             updatedAt: new Date().toISOString() };
-          host.changed(run);
+          host.changed(current);
         }
         sawCompletion = true;
         turnActive = false;
         owned.claude?.setTurnIdle(true);
-        if (event.is_error) streamError = (event.errors ?? [event.result ?? 'Claude Code could not complete this turn.']).join('\n');
+        // A turn Claude started by itself in a kept process has no run to fail.
+        if (event.is_error && current) streamError = (event.errors ?? [event.result ?? 'Claude Code could not complete this turn.']).join('\n');
         // A denied tool call (by the user or the auto mode classifier) is part of a turn that
         // still finished; Claude's own reply explains it. Only a failed turn is reported.
-        if (event.is_error && event.permission_denials?.length) {
+        if (event.is_error && current && event.permission_denials?.length) {
           const denied = [...new Set(event.permission_denials.map((denial: any) => denial.tool_name ?? 'tool'))].join(', ');
           streamError = `Permission was denied for: ${denied}. The instruction could not complete with the current permissions.`;
           show(`\n${streamError}\n`);
@@ -359,7 +463,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       try { parseEventLine(line); }
       catch {
         streamError = 'The provider emitted an invalid output event. The task was stopped.';
-        host.stop(run.id, owned);
+        host.stop(last.id, owned);
       }
     };
     child.stdout.setEncoding('utf8');
@@ -368,7 +472,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       buffer += chunk;
       let newline: number;
       while ((newline = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1); parseLine(line); }
-      if (buffer.length > 2_000_000) { streamError = 'Provider emitted an oversized output event.'; buffer = ''; host.stop(run.id, owned); }
+      if (buffer.length > 2_000_000) { streamError = 'Provider emitted an oversized output event.'; buffer = ''; host.stop(last.id, owned); }
     });
     child.stderr.on('data', (chunk: string) => { stderr = (stderr + chunk).slice(-8000); });
     child.stdin.on('error', (error: NodeJS.ErrnoException) => { if (error.code !== 'EPIPE') streamError = errorMessage(error); });
@@ -376,16 +480,16 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
     child.on('close', async (code: number | null, signal: NodeJS.Signals | null) => {
       if (buffer) parseLine(buffer);
       clearFinishTimer(); clearWaitTimers();
-      const pendingApproval = !!run.approvals?.length;
+      const pendingApproval = !!current?.approvals?.length;
       const pendingSteer = owned.claude?.hasPendingSteers();
-      delete run.backgroundWait;
+      delete last.backgroundWait;
       owned.claude?.close();
       // A newly bound UUID must be durable before this turn reports success.
       await identitySaved;
       try { await configBound; await privateConfig?.remove(); } catch (error) { console.error('Claude temporary config cleanup failed:', error); }
       if (reported) return;
       reported = true;
-      host.exited({ kind: 'claude', run, session, owned, finish, summary: { code, signal, streamError, stderr, sawCompletion, sawSessionId, waitTimedOut, inputClosedByTower,
+      host.exited({ kind: 'claude', run: last, session, owned, finish, summary: { code, signal, streamError, stderr, sawCompletion, sawSessionId, waitTimedOut, inputClosedByTower,
         outstanding: tasks.outstanding, noticePending: Boolean(noticeId), runningTasks: tasks.runningCount, unreadTasks: tasks.unreadCount,
         pendingApproval, pendingSteer: Boolean(pendingSteer), wakeup: wakeups.pending } });
     });
