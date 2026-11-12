@@ -156,7 +156,7 @@ export function ChatPanel({ sessionId, session, allSessions, workspaceFolders = 
   } : null, [openWorkspace, roots, host?.name, filesUnavailable]);
   const currentRuns = useMemo(() => runs.filter(run => run.sessionId === sessionId), [runs, sessionId]);
   useEffect(() => { restoreComposerEffort(sessionId, currentRuns, effort => supportedEffort(provider, current?.model || provider?.defaultModel, effort)); }, [sessionId, currentRuns, provider, current?.model]);
-  const controlRuns = useMemo(() => currentRuns.filter(run => run.status === 'running' || run.status === 'queued' || run.status === 'error').sort((a, b) => Number(!!b.approvals?.length) - Number(!!a.approvals?.length)), [currentRuns]);
+  const controlRuns = useMemo(() => currentRuns.filter(run => run.status === 'running' || run.status === 'queued' || run.status === 'error' || (run.status === 'completed' && run.backgroundWait)).sort((a, b) => Number(!!b.approvals?.length) - Number(!!a.approvals?.length)), [currentRuns]);
   const approvalKey = controlRuns.flatMap(run => run.status === 'error' ? [] : run.approvals?.map(approval => `${run.id}:${approval.id}`) || []).join('|');
   useLayoutEffect(() => { if (approvalKey && runControls.current) runControls.current.scrollTop = 0; }, [approvalKey]);
   const runProjection = useMemo(() => matchChatRuns(detail?.messages || emptyMessages, currentRuns, sessionId), [detail?.messages, currentRuns, sessionId]);

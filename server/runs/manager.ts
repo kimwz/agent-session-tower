@@ -793,6 +793,12 @@ export class RunManager extends EventEmitter {
     return this.list().find(run => run.id === id);
   }
 
+  /** Whether a Claude process is kept for background work after its run ended (see claudeProcess). */
+  keepsProcess(): boolean {
+    for (const id of this.owned.keys()) { const run = this.runs.get(id); if (run && FINISHED.has(run.status) && run.backgroundWait) return true; }
+    return false;
+  }
+
   /** Whether the Claude process a run's credentials were issued to still lives (they are kept while it does). */
   holdsProcess(runId: string): boolean { return this.owned.has(this.servedBy(runId)); }
 
@@ -898,7 +904,12 @@ export class RunManager extends EventEmitter {
     if (refused || !this.owned.has(target.id)) throw new SteeringError('The run may not start now.', 'rejected');
     run.status = 'running'; run.startedAt = new Date().toISOString(); run.output = '';
     this.changed(run);
-    await this.flush();
+    try { await this.flush(); }
+    catch (error) {
+      // Not handed over: back in the queue rather than running with no process.
+      if (run.status === 'running') { delete run.startedAt; run.status = 'queued'; this.changed(run); }
+      throw error;
+    }
     // Saving yielded: the gate answers once more right before the message goes.
     const gated = run.status === 'running' ? this.launchGate?.(run) : undefined;
     if (gated) {
@@ -952,6 +963,10 @@ export class RunManager extends EventEmitter {
   async cancel(runId: string, reason?: string): Promise<void> {
     const run = this.runs.get(runId);
     if (!run) throw new RunError('Task not found.', 'not-found');
+    // A run that ended at its answer while its process was kept for background work: Stop ends that work. The run
+    // keeps its outcome.
+    const kept = FINISHED.has(run.status) ? this.owned.get(runId) : undefined;
+    if (kept) { this.stopOwned(runId, kept); return; }
     if (FINISHED.has(run.status)) return;
     if (run.steering) throw new RunError('An inserted instruction belongs to the active turn. Stop the active turn instead.', 'conflict');
     const noted = () => { if (reason && run.status === 'cancelled' && run.error !== reason) { run.error = reason; this.changed(run); } };
@@ -1289,9 +1304,8 @@ export class RunManager extends EventEmitter {
     this.settledRuns.add(run.id);
     this.locallySettled.delete(run.sessionId); this.locallySettled.set(run.sessionId, Date.now());
     if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
-    if (error) { this.fail(run, error); return; }
-    run.status = 'completed'; run.finishedAt = new Date().toISOString();
-    this.changed(run);
+    if (error) this.fail(run, error);
+    else { run.status = 'completed'; run.finishedAt = new Date().toISOString(); this.changed(run); }
     if (!this.stopping) void this.pump();
   }
 
@@ -1314,6 +1328,7 @@ export class RunManager extends EventEmitter {
       let streamError = summary.streamError;
       // Its last run already ended at its answer (see answered); the process was kept only for background work.
       if (run.status === 'completed' || run.status === 'error') {
+        delete run.backgroundWait;
         if (summary.wakeup && !this.stopping) this.scheduleContinuation(run, summary.wakeup);
         this.changed(run);
       } else if (run.status !== 'cancelled') {

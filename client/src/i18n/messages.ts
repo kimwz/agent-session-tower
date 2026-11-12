@@ -1220,6 +1220,8 @@ export const english: Record<string, string> = {
   '{0}에 이어서 진행': 'Resumes at {0}',
   '이어서 진행 대기 중': 'Waiting to resume',
   '백그라운드 작업 대기 중': 'Waiting for background work',
+  '백그라운드 작업 실행 중': 'Background work running',
+  '백그라운드 작업 중지': 'Stop background work',
   '예약 취소': 'Cancel scheduled continuation',
   '중지': 'Stop',
   '요청 다시 작성': 'Edit request for retry',

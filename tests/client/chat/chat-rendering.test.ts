@@ -51,6 +51,16 @@ for (const status of ['queued', 'running', 'error'] as const) {
   });
 }
 
+test('a run that ended while its process keeps background work running offers to stop that work', () => {
+  for (const status of ['completed', 'error'] as const) {
+    const run: Run = { id: 'run', sessionId: 'session', status, createdAt: '2026-09-15T00:00:00.000Z', prompt: 'Start the server', output: '',
+      backgroundWait: { since: '2026-09-15T00:00:00.000Z', tasks: 1 }, ...(status === 'error' ? { error: 'ACTIONABLE_RUN_ERROR' } : {}) };
+    const html = renderToStaticMarkup(createElement(RunControl, { run, onCancel: noop, onRetry: noop, cancelling: false }));
+    assert.match(html, /백그라운드 작업 중지/);
+    if (status === 'completed') assert.match(html, /백그라운드 작업 실행 중/);
+  }
+});
+
 test('visible assistant messages keep the complete original Markdown content', () => {
   const message: ChatMessage = {
     id: 'assistant', role: 'assistant', timestamp: '2026-09-15T00:00:00.000Z',

@@ -158,9 +158,9 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   // it runs; the run itself stays until the work it waits for has ended and Claude has taken each notice in a
   // follow-up turn of this same run.
   const tasks = new BackgroundTaskTracker();
-  // Whoever reads a run's result as "done" (an agent, a trigger, Slack) also waits for its background processes. The
-  // owner reads the conversation, where Claude still reports them from the kept process.
-  const waitsForProcesses = (served: Run) => served.origin?.kind !== 'owner';
+  // Whoever reads a run's result as "done" (an agent, a master, a trigger, Slack) also waits for its background
+  // processes. The owner reads the conversation, where Claude still reports them from the kept process.
+  const waitsForProcesses = (served: Run) => served.origin?.kind !== 'owner' || served.sender === 'master' || Boolean(served.delegation);
   /** What keeps the current run open after its answer. */
   const holding = (served: Run) => tasks.holding(waitsForProcesses(served)) + tasks.unreadCount + (noticeId ? 1 : 0);
   const followUpMs = host.options.backgroundFollowUpMs ?? BACKGROUND_FOLLOW_UP_MS;
@@ -213,7 +213,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       onApproval: approval => {
         if (current?.status === 'running') { current.approvals = [...(current.approvals || []), approval]; host.changed(current); return; }
         // A turn Claude started by itself in a kept process: no Tower task is there to ask the owner.
-        void owned.claude?.respond(approval.id, 'deny').catch(error => console.error('Claude permission request in a kept process could not be answered:', error));
+        void owned.claude?.respond(approval.id, 'deny', 'No Tower task is open in this conversation to ask the owner; the owner can ask for this in their next message.').catch(error => console.error('Claude permission request in a kept process could not be answered:', error));
       },
       onCancelled: id => {
         const served = current;
@@ -274,6 +274,14 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       // Never reported as success.
       waitTimedOut = true;
       const minutes = Math.round(waitMaxMs / 60_000);
+      if (waitsForProcesses(current)) {
+        // Its result is read as the work's end, and no later run of its origin could take the process (a trigger's
+        // next event is another origin), so the work ends with it, as the owner's Stop does. Closing input alone no
+        // longer ends Claude while background work runs.
+        note(`\n[Tower] Background work was still running after ${minutes} minutes; ending the turn and its work.\n`);
+        closeInput(); host.stop(last.id, owned);
+        return;
+      }
       note(`\n[Tower] Background work was still running after ${minutes} minutes; the turn ends and the work keeps running.\n`);
       release(`The turn answered, but its background work did not finish within the ${minutes} minutes Tower waits; it keeps running in this conversation.`);
       owned.finishInput?.();
@@ -303,12 +311,20 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       if (!sawCompletion) return;
       // A failed turn is not kept open for its background work. Claude does not end while that work runs, so the
       // process is kept for it, as after any run that ends before its work.
-      if (streamError) {
-        if (!tasks.runningCount && !tasks.detachedCount) { endWait(); closeInput(); return; }
-        const failure = streamError; streamError = undefined;
-        release(failure); owned.finishInput?.(); return;
-      }
       const served = current;
+      if (streamError) {
+        // Task bookends can follow a result, even in the next stdout chunk. Recheck after they drain.
+        if (!finishTimer) finishTimer = setTimeout(() => {
+          finishTimer = undefined;
+          if (!streamError || current !== served || turnActive || child.stdin.writableEnded) return;
+          if (!tasks.runningCount && !tasks.detachedCount) { endWait(); closeInput(); return; }
+          // The owner's process is kept for its work; work others read ends with its failed turn.
+          if (waitsForProcesses(served)) { closeInput(); host.stop(last.id, owned); return; }
+          const failure = streamError; streamError = undefined;
+          release(failure); owned.finishInput?.();
+        }, finishRecheckMs);
+        return;
+      }
       if (!holding(served)) {
         // Task bookends can follow a result, even in the next stdout chunk. Recheck after they drain.
         if (!finishTimer) finishTimer = setTimeout(() => {

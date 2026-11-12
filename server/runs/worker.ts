@@ -731,6 +731,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         // A handoff past its quiet check owns shutdown until it hands off or resumes: the state stays locked meanwhile.
         if (!options.onIdle || closing || draining || pending || Date.now() - lastRequest < (options.idleMs ?? 30_000)) return;
         if (options.runs.list().some(run => run.status === 'running' || run.status === 'queued')) return;
+        // A Claude process kept for background work (a dev server) after its run ended lives in this worker too.
+        if (options.runs.keepsProcess()) return;
         if (options.autoPrompts?.list().some(job => !['completed', 'error', 'cancelled'].includes(job.status))) return;
         if (options.terminals?.hasActive()) return;
         if (options.slack?.hasActive()) return;

@@ -130,7 +130,8 @@ export class ClaudeControl {
     return true;
   }
 
-  async respond(id: string, decision: RunApprovalResponse): Promise<void> {
+  /** `denial` is what Claude is told when Tower, not the owner, denies it. */
+  async respond(id: string, decision: RunApprovalResponse, denial = 'The user denied this tool request in Agent Session Tower.'): Promise<void> {
     const pending = this.pending.get(id);
     if (this.closed || !pending) throw failed('This permission request is no longer pending. Refresh the conversation.');
     const validated = validateApprovalResponse(pending.approval, decision);
@@ -142,7 +143,7 @@ export class ClaudeControl {
     this.remove(pending);
     const response = validated !== 'deny'
       ? { behavior: 'allow', updatedInput, ...(pending.toolUseId ? { toolUseID: pending.toolUseId } : {}) }
-      : { behavior: 'deny', message: 'The user denied this tool request in Agent Session Tower.', ...(pending.toolUseId ? { toolUseID: pending.toolUseId } : {}) };
+      : { behavior: 'deny', message: denial, ...(pending.toolUseId ? { toolUseID: pending.toolUseId } : {}) };
     try {
       await this.options.write({ type: 'control_response', response: { subtype: 'success', request_id: pending.requestId, response } });
     } catch {

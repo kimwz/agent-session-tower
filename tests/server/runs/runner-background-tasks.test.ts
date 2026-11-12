@@ -268,18 +268,44 @@ test("background work still running at the limit ends the owner's turn as an err
   assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Run the reviews', 'How is it going?']);
 });
 
-test('work others read ends at the limit as an error, and its process takes the same origin\'s next run', async t => {
-  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1')], reply: [says('Checked.')] }, { waitMaxMs: 200 });
+test('work others read ends at the limit together with its process', async t => {
+  // A trigger's next event is another origin: a process kept for it could take no later run and would hold the
+  // conversation, so it stops (closing input alone no longer ends Claude while the work runs).
+  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1')], lingerOnClose: true }, { waitMaxMs: 200 });
   t.after(cleanup);
-  const trigger = { origin: { kind: 'trigger' as const, triggerId: 'daily' }, unattended: true };
-  const run = await manager.enqueue(SESSION, 'Start the dev server', {}, trigger);
+  const run = await manager.enqueue(SESSION, 'Start the dev server', {}, { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
   const done = await settled(manager, run.id);
   assert.equal(done.status, 'error');
   assert.match(done.error ?? '', /background work did not finish/);
-  assert.ok(ownedTurn(manager, run.id), 'the work keeps running in its process');
-  const next = await manager.enqueue(SESSION, 'Nightly check', {}, trigger);
-  assert.equal((await settled(manager, next.id)).status, 'completed');
-  assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Start the dev server', 'Nightly check']);
+  assert.equal(ownedTurn(manager, run.id), undefined, 'the process was stopped');
+  assert.deepEqual((await entries()).flatMap(entry => entry.user ?? []), ['Start the dev server']);
+});
+
+test("a master's message waits for its background processes like other work read by someone else", async t => {
+  const { manager, release, cleanup } = await fixture({ first: [process_('reviews-1'), says('I will report when the reviews finish.')],
+    later: [{ when: 'done', frames: [notified('reviews-1'), takes('reviews-1'), says('All reviews passed.'), result] }] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'owner' }, sender: 'master' });
+  await until(() => find(manager, run.id).backgroundWait);
+  assert.equal(find(manager, run.id).status, 'running');
+  await release('done');
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /All reviews passed\./);
+});
+
+test('Stop on a run whose process was kept ends that work and keeps the run\'s outcome', async t => {
+  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1'), says('Server up.')] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Start the sample server', {}, { origin: { kind: 'owner' } });
+  assert.equal((await settled(manager, run.id)).status, 'completed');
+  assert.equal(manager.keepsProcess(), true, 'the worker stays for it (idle shutdown)');
+  await manager.cancel(run.id);
+  await until(() => !ownedTurn(manager, run.id));
+  assert.equal(manager.keepsProcess(), false);
+  await until(() => !find(manager, run.id).backgroundWait);
+  assert.equal(find(manager, run.id).status, 'completed');
+  assert.deepEqual((await entries()).flatMap(entry => entry.user ?? []), ['Start the sample server']);
 });
 
 test('a forced update stops a kept process at its deadline and keeps the outcome of the run it served', async t => {
@@ -293,18 +319,17 @@ test('a forced update stops a kept process at its deadline and keeps the outcome
   assert.ok(ownedTurn(manager, run.id), 'kept until the deadline');
   manager.driveUpdateDrain(Date.now() + 61_000);
   await until(() => !ownedTurn(manager, run.id));
-  assert.equal(manager.busy(), false);
+  await until(() => !manager.busy());
   assert.equal(find(manager, run.id).status, 'completed');
 });
 
 test('a run going into a kept process passes the launch gate first', async t => {
-  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1')] }, { waitMaxMs: 200 });
+  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1'), says('Server up.')] });
   t.after(cleanup);
-  const trigger = { origin: { kind: 'trigger' as const, triggerId: 'daily' }, unattended: true };
-  const run = await manager.enqueue(SESSION, 'Start the dev server', {}, trigger);
-  assert.equal((await settled(manager, run.id)).status, 'error');
-  manager.setLaunchGate(item => item.origin?.kind === 'trigger' ? 'The trigger was turned off before this run started, so it did not run.' : undefined);
-  const next = await manager.enqueue(SESSION, 'Nightly check', {}, trigger);
+  const run = await manager.enqueue(SESSION, 'Start the dev server', {}, { origin: { kind: 'owner' } });
+  assert.equal((await settled(manager, run.id)).status, 'completed');
+  manager.setLaunchGate(item => item.prompt === 'Nightly check' ? 'The trigger was turned off before this run started, so it did not run.' : undefined);
+  const next = await manager.enqueue(SESSION, 'Nightly check', {}, { origin: { kind: 'owner' } });
   const refused = await settled(manager, next.id);
   assert.equal(refused.status, 'cancelled');
   assert.match(refused.error ?? '', /turned off/);
