@@ -44,23 +44,23 @@ const PREFIXES = /^(?:(?:nohup|exec|env|sudo|time)\s+|\w+=\S*\s+)+/;
 /** Stands for a quoted string while a command is read. */
 const QUOTED = '\u0001';
 /** A segment as its program runs it: no redirections, prefixes and program directory dropped, nothing after `--`. */
-const program = (segment: string) => segment.replace(/\s>\s*[^\s>]*/g, ' ').trim().replace(PREFIXES, '').replace(/^\w+=(?!\S*[$`])\S*$/, '').replace(/^\S*\//, '').replace(/\s--(?=\s|$)[\s\S]*$/, '');
+const program = (segment: string) => segment.replace(/\s>\s*[^\s>]*/g, ' ').trim().replace(PREFIXES, '').replace(/^\w+=\S*$/, '').replace(/^\S*\//, '').replace(/\s--(?=\s|$)[\s\S]*$/, '');
 /**
  * Whether a background command is clearly a long-lived service. Commands run one after another, so the last one that
- * is not a trailing `echo`, `sleep`, `tee`… decides how long the whole runs. Anything uncertain is work, which a run
- * waits for.
+ * is not a trailing `echo`, `sleep`, `tee`… decides how long the whole runs. Anything uncertain, including any shell
+ * form this does not read, is work, which a run waits for.
  */
 export function longLivedService(command: string): boolean {
   if (command.length > MAX_SERVICE_COMMAND || AGENT_CLI.test(command)) return false;
-  // A heredoc is text passed on, not run; a line continuation joins one command. What is quoted becomes one opaque
-  // token (QUOTED), so it splits nothing but still stands where it was; a comment runs nothing; a redirection's `&`
-  // (`2>&1`, `&>`) separates nothing.
-  const runs = command.replace(/<<-?\s*['"]?(\w+)['"]?[^\n]*\n[\s\S]*?(?:\n\1(?=\n|$)|$)/g, ' ').replace(/\\\n/g, ' ')
-    .replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, QUOTED).replace(/(^|\s)#[^\n]*/g, '$1')
-    .replace(/(^|\s)\d+(?=[<>])/g, '$1').replace(/>>?&\d*-?|&>>?|>>?|</g, ' > ');
-  // After `||` the service may never run: the command may end with what came before.
-  if (runs.includes('||')) return false;
-  const last = runs.split(/&&|[;|\n&]/).map(program).filter(segment => !TRAILING.test(segment)).at(-1);
+  // Only plain commands are read. Comments, line continuations, `||` (the service may never run), command
+  // substitution and heredocs change what runs in ways a pattern cannot follow: work.
+  if (/#|\\\n|\|\||\$\(|`|<</.test(command)) return false;
+  // What is quoted becomes one opaque token (QUOTED): it splits nothing but still stands where it was. A
+  // redirection's `&` (`2>&1`, `&>`) separates nothing.
+  const runs = command.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, QUOTED);
+  if (/['"]/.test(runs)) return false;
+  const last = runs.replace(/(^|\s)\d+(?=[<>])/g, '$1').replace(/>>?&\d*-?|&>>?|>>?|</g, ' > ')
+    .split(/&&|[;|\n&]/).map(program).filter(segment => !TRAILING.test(segment)).at(-1);
   // A quoted word in the command that decides can be any name or option (`dev"-check"`, `"--exit-code-from"`): work.
   return last !== undefined && !last.includes(QUOTED) && SERVICES.some(pattern => pattern.test(last));
 }
