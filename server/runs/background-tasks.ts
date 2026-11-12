@@ -120,6 +120,8 @@ export class BackgroundTaskTracker {
   get unreadCount(): number { return [...this.unread.values()].filter(entry => !entry.detached).length; }
   /** Detached tasks still running, or ended without Claude having taken the notice yet: they keep the process. */
   get detachedCount(): number { return this.detached.size + this.unread.size - this.unreadCount; }
+  /** Detached tasks that ended and whose notice Claude has not taken yet. */
+  get detachedUnreadCount(): number { return this.unread.size - this.unreadCount; }
 
   /** No run waits for what runs now: it only keeps the process (a run that ends before its background work). */
   detach(): void {

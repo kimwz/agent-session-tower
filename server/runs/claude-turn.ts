@@ -240,7 +240,9 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       if (!served) return;
       clearFinishTimer(); clearWaitTimers(); waitDeadline = undefined;
       tasks.detach();
-      current = undefined;
+      // A notice Tower handed over and Claude has not taken yet is now for a turn no run waits for.
+      noticeId = undefined;
+      current = undefined; replies = undefined;
       const count = tasks.detachedCount;
       if (count) served.backgroundWait = { since: new Date().toISOString(), tasks: count };
       else delete served.backgroundWait;
@@ -270,13 +272,6 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       // Never reported as success.
       waitTimedOut = true;
       const minutes = Math.round(waitMaxMs / 60_000);
-      if (waitsForProcesses(current)) {
-        // Its result is read as the work's end, so the work ends with it. Closing input no longer ends Claude while
-        // its background work runs: the process is stopped, as the owner's Stop does.
-        note(`\n[Tower] Background work was still running after ${minutes} minutes; ending the turn and its work.\n`);
-        closeInput(); host.stop(last.id, owned);
-        return;
-      }
       note(`\n[Tower] Background work was still running after ${minutes} minutes; the turn ends and the work keeps running.\n`);
       release(`The turn answered, but its background work did not finish within the ${minutes} minutes Tower waits; it keeps running in this conversation.`);
       owned.finishInput?.();
@@ -289,7 +284,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       if (count) {
         clearFinishTimer();
         if (last.backgroundWait?.tasks !== count) { last.backgroundWait = { since: last.backgroundWait?.since ?? new Date().toISOString(), tasks: count }; host.changed(last); }
-        if (count > tasks.runningCount && !followUpTimer) arm('followUp', followUpMs);
+        if (tasks.detachedUnreadCount && !followUpTimer) arm('followUp', followUpMs);
         return;
       }
       if (!finishTimer) finishTimer = setTimeout(() => {
@@ -304,8 +299,13 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       if (turnActive || owned.claude?.hasPendingSteers() || child.stdin.writableEnded) return;
       if (!current) { keptIdle(); return; }
       if (!sawCompletion) return;
-      // A failed turn is not kept open for its background work.
-      if (streamError) { endWait(); closeInput(); return; }
+      // A failed turn is not kept open for its background work. Claude does not end while that work runs, so the
+      // process is kept for it, as after any run that ends before its work.
+      if (streamError) {
+        if (!tasks.runningCount && !tasks.detachedCount) { endWait(); closeInput(); return; }
+        const failure = streamError; streamError = undefined;
+        release(failure); owned.finishInput?.(); return;
+      }
       const served = current;
       if (!holding(served)) {
         // Task bookends can follow a result, even in the next stdout chunk. Recheck after they drain.
@@ -349,7 +349,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
     /** The adopted run's message never reached Claude: the process is kept for its background work again. */
     owned.disown = (next, previous) => {
       if (current !== next || turnActive) return false;
-      current = undefined; last = previous;
+      current = undefined; last = previous; replies = undefined;
       owned.finishInput?.();
       return true;
     };

@@ -749,7 +749,7 @@ export class RunManager extends EventEmitter {
     const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering) ?? this.keptRun(run.sessionId);
     if (!target) return undefined;
     // A turn of its own carries its instructions; inserted text reaches the running turn alone, and would lose them.
-    if (run.instructions?.required && !this.adoptable(run, target)) return { blocked: 'instructions' };
+    if (run.instructions?.required && !this.adoptable(target)) return { blocked: 'instructions' };
     if (run.model && run.model !== (target.model ?? this.getSession(run.sessionId)?.model)) return { blocked: 'model' };
     if (run.effort && run.effort !== target.effort) return { blocked: 'effort' };
     // An inserted instruction runs with the active turn's tools, approvals and secret credential. They follow origin,
@@ -759,7 +759,7 @@ export class RunManager extends EventEmitter {
     if (!sameDelegation(run.delegation, target.delegation)) return { blocked: 'delegation' };
     const adapter = this.stdio.get(target.id) ?? this.bridged.get(target.id) ?? this.owned.get(target.id)?.claude;
     // A kept process takes a run only as a turn of its own, between the turns Claude starts there by itself.
-    if (FINISHED.has(target.status) && !this.adoptable(run, target)) return { blocked: 'starting' };
+    if (FINISHED.has(target.status) && !this.adoptable(target)) return { blocked: 'starting' };
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : { blocked: 'starting' };
   }
 
@@ -774,17 +774,23 @@ export class RunManager extends EventEmitter {
 
   /**
    * Whether `run` goes into `target`'s Claude process as a turn of its own: the process is kept after `target` ended,
-   * and runs no turn now. Only the owner's runs end before their background processes, so only theirs are kept.
+   * and runs no turn now. `steering` already requires the same origin and calling turn (the process's tools and
+   * credentials are theirs).
    */
-  private adoptable(run: Run, target: Run): boolean {
-    return FINISHED.has(target.status) && target.origin?.kind === 'owner' && run.origin?.kind === 'owner' && Boolean(this.owned.get(target.id)?.canAdopt?.());
+  private adoptable(target: Run): boolean {
+    return FINISHED.has(target.status) && Boolean(this.owned.get(target.id)?.canAdopt?.());
   }
 
   /** The run the Claude process started for `runId` serves now: a turn's tool credentials follow its process. */
   servingRun(runId: string): Run | undefined {
+    const id = this.servedBy(runId);
+    return this.list().find(run => run.id === id);
+  }
+
+  private servedBy(runId: string): string {
     let id = runId;
     for (let hops = 0; this.handedOver.has(id) && hops < 1000; hops++) id = this.handedOver.get(id)!;
-    return this.list().find(run => run.id === id);
+    return id;
   }
 
   /** `targetRunId` inserts only into that turn: a decision made about one turn never lands in the next. */
@@ -821,7 +827,7 @@ export class RunManager extends EventEmitter {
       const current = this.steeringTarget(run);
       this.admissions.add(run.id);
       if (!current || current.target !== selected.target || current.adapter !== selected.adapter || (options.whileWaiting && !current.target.backgroundWait)) throw new SteeringError('The active turn changed before delivery.', 'rejected');
-      if (selected.adapter instanceof ClaudeControl && this.adoptable(run, selected.target)) {
+      if (selected.adapter instanceof ClaudeControl && this.adoptable(selected.target)) {
         submitted = await this.adopt(run, selected.target, attachments);
         return this.list().find(item => item.id === runId)!;
       }
@@ -878,7 +884,7 @@ export class RunManager extends EventEmitter {
     this.changed(run);
     await this.flush();
     const owned = this.owned.get(target.id);
-    const delivery = !this.storageHeld && !this.pendingAdmission() && !this.stopping && owned && run.status === 'running' && this.adoptable(run, target) ? owned.adopt?.(run, attachments) : undefined;
+    const delivery = !this.storageHeld && !this.pendingAdmission() && !this.stopping && owned && run.status === 'running' && this.adoptable(target) ? owned.adopt?.(run, attachments) : undefined;
     if (!owned || !delivery) {
       if (run.status === 'running') { delete run.startedAt; run.status = 'queued'; this.changed(run); }
       throw new SteeringError('The conversation\'s Claude process changed before delivery.', 'rejected');
@@ -1158,7 +1164,9 @@ export class RunManager extends EventEmitter {
     for (const run of this.runs.values()) {
       if (run.status !== 'queued' || seen.has(run.sessionId)) continue;
       seen.add(run.sessionId);
-      if (run.permissionNotice || run.origin?.kind !== 'owner' || run.scheduled || !this.steeringTarget(run)?.target.backgroundWait) continue;
+      const target = run.permissionNotice || run.scheduled ? undefined : this.steeringTarget(run)?.target;
+      // Into a turn that still waits only the owner's own message goes; a kept process takes its origin's next run.
+      if (!target?.backgroundWait || (run.origin?.kind !== 'owner' && !FINISHED.has(target.status))) continue;
       // steer reserves the run synchronously, so a later pass cannot insert it twice.
       void this.steer(run.id, { whileWaiting: true }).catch(() => {});
     }
@@ -1272,7 +1280,8 @@ export class RunManager extends EventEmitter {
       this.locallySettled.delete(session.id);
       this.locallySettled.set(session.id, Date.now());
       if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
-      for (const [from, to] of [...this.handedOver]) if (to === run.id || !this.owned.has(to)) this.handedOver.delete(from);
+      // The credentials of this process serve nothing any more (see servingRun).
+      for (const from of [...this.handedOver.keys()]) if (this.servedBy(from) === run.id) this.handedOver.delete(from);
       const { code, signal, sawCompletion, sawSessionId, waitTimedOut, outstanding, noticePending } = summary;
       let streamError = summary.streamError;
       // Its last run already ended at its answer (see answered); the process was kept only for background work.

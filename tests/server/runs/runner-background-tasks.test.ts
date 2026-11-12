@@ -52,7 +52,8 @@ createInterface({ input: process.stdin }).on('line', line => {
   sendAll(script.onMessage ?? []);
   setTimeout(() => sendAll([{ type: 'user', isReplay: true, uuid: message.uuid, parent_tool_use_id: null, message: message.message },
     ...(script.reply ?? []), { type: 'result', is_error: false, result: 'reply done' }]), script.replyDelay ?? 0);
-}).on('close', () => { log({ end: true }); process.exit(0); });
+// Claude Code does not end while a background command runs, even with its input closed (lingerOnClose).
+}).on('close', () => { log({ end: true }); if (!script.lingerOnClose) process.exit(0); });
 `;
 
 // Background work a run waits for whoever started it: a background agent. A background command or monitor (`process`)
@@ -267,15 +268,32 @@ test("background work still running at the limit ends the owner's turn as an err
   assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Run the reviews', 'How is it going?']);
 });
 
-test('background work still running at the limit ends work others read together with its process', async t => {
-  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1')] }, { waitMaxMs: 200 });
+test('work others read ends at the limit as an error, and its process takes the same origin\'s next run', async t => {
+  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1')], reply: [says('Checked.')] }, { waitMaxMs: 200 });
   t.after(cleanup);
-  const run = await manager.enqueue(SESSION, 'Start the dev server', {}, { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
+  const trigger = { origin: { kind: 'trigger' as const, triggerId: 'daily' }, unattended: true };
+  const run = await manager.enqueue(SESSION, 'Start the dev server', {}, trigger);
   const done = await settled(manager, run.id);
   assert.equal(done.status, 'error');
   assert.match(done.error ?? '', /background work did not finish/);
-  assert.equal(ownedTurn(manager, run.id), undefined, 'the process was stopped');
-  assert.deepEqual((await entries()).flatMap(entry => entry.user ?? []), ['Start the dev server']);
+  assert.ok(ownedTurn(manager, run.id), 'the work keeps running in its process');
+  const next = await manager.enqueue(SESSION, 'Nightly check', {}, trigger);
+  assert.equal((await settled(manager, next.id)).status, 'completed');
+  assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Start the dev server', 'Nightly check']);
+});
+
+test('a failed turn whose server keeps running ends as an error and keeps the process for the next message', async t => {
+  // Closing input would not end Claude while the server runs: the run must not wait for an exit that never comes.
+  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1'), { ...result, is_error: true, errors: ['Model overloaded'] }],
+    noResult: true, lingerOnClose: true, reply: [says('Here is the answer.')] });
+  t.after(cleanup);
+  const first = await manager.enqueue(SESSION, 'Start the sample server', {}, { origin: { kind: 'owner' } });
+  const done = await settled(manager, first.id);
+  assert.equal(done.status, 'error');
+  assert.match(done.error ?? '', /Model overloaded/);
+  const next = await manager.enqueue(SESSION, 'Try again', {}, { origin: { kind: 'owner' } });
+  assert.equal((await settled(manager, next.id)).status, 'completed');
+  assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Start the sample server', 'Try again']);
 });
 
 test("an owner's turn ends at its answer while a server it started keeps running, and the next messages are runs of their own", async t => {

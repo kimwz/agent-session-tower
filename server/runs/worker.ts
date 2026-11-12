@@ -255,6 +255,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     return options.ledger.once(controllerId, operation, admitted.requestId, content, execute, record, replay);
   };
   const findRun = (id: string) => options.runs.list().find(run => run.id === id);
+  /** The run a calling-turn credential serves now: the one its Claude process serves (see RunManager.servingRun). */
+  const callerRun = (id: string) => options.runs.servingRun(id);
   // Kept on each delegated turn when it is admitted, so its later turns keep their secret tools after its callers leave history.
   // Read at each use: a worker that started on its diagnostic host gets its secrets only when it is activated.
   const publicChain = (delegation: RunDelegation) => options.secrets?.publicChain(delegation);
@@ -273,10 +275,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     if (token === undefined) return { ...admitted, ...(admitted.heartbeat ? { validate: heartbeatValidate } : {}) };
     if (typeof token !== 'string' || admitted.origin?.controllerId) throw new TowerError('forbidden', 'Invalid local calling-turn credential.');
     const caller = capabilities.resolve(token);
-    const callingRun = caller?.kind === 'caller-run' ? findRun(caller.runId) : undefined;
+    const callingRun = caller?.kind === 'caller-run' ? callerRun(caller.runId) : undefined;
     const corrective = callingRun?.heartbeat;
     const validate = () => {
-      heartbeatValidate(); callerDelegation(capabilities, findRun, token);
+      heartbeatValidate(); callerDelegation(capabilities, callerRun, token);
       if (corrective) {
         const current = findRun(callingRun!.id);
         const target = targetSessionId && options.runs.getSession(targetSessionId);
@@ -292,7 +294,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       }
     };
     validate();
-    return { ...admitted, ...(corrective ? { origin: { kind: 'agent' as const } } : {}), delegation: callerDelegation(capabilities, findRun, token, publicChain), validate };
+    return { ...admitted, ...(corrective ? { origin: { kind: 'agent' as const } } : {}), delegation: callerDelegation(capabilities, callerRun, token, publicChain), validate };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
