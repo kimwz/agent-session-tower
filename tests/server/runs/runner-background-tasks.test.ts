@@ -668,12 +668,15 @@ test('only clearly long-lived services count as services; agent CLIs, builds and
     'python3 -m http.server 8770', 'cd sample && python3 serve.py', 'node ./scripts/dev-server.mjs', 'uvicorn app:app --reload',
     'python manage.py runserver', 'flask run', 'bundle exec rails s', 'php -S 0.0.0.0:8000', 'docker compose up', 'tail -f log.txt',
     'tsc --watch', 'nodemon index.js', 'npx serve dist', 'python3 -m uvicorn app:app', '.venv/bin/python3 -m http.server 8000',
-    './node_modules/.bin/vite --port 5173', 'gunicorn app:app']) assert.equal(longLivedService(command), true, command);
+    './node_modules/.bin/vite --port 5173', 'gunicorn app:app', 'PORT=8795 node bin/agent-session-tower.mjs run --port 8795 --state-dir /tmp/s --no-open',
+    'cd sample && nohup python3 serve.py > serve.log 2>&1', 'export NODE_ENV=development && npm run dev']) assert.equal(longLivedService(command), true, command);
   for (const command of ['codex exec --ephemeral -m gpt-6.1-sol "start the server on 8080" < /dev/null', 'claude -p --no-session-persistence < prompt.md',
     'cd game && codex exec "run npm run dev and check"', 'npm test', 'npm run build', 'pytest -x', 'sleep 300', 'docker compose up -d',
     'make reviews', './run-reviews.sh', 'npm run typecheck', 'python3 train.py', "printf 'npm run dev'; npm run build",
     'echo "start with: npm run dev" && npm test', 'jest --watch=false', 'npx vite build', 'vite build --mode production',
-    'pip install uvicorn && pytest', 'npx vite --mode production build', 'rg -- --watch server && npm test', 'pytest tests/test_server.py', 'cat > notes.md <<EOF\nnpm run dev\nEOF',
+    'pip install uvicorn && pytest', 'npm run dev >dev.log 2>&1 & npm test', 'npm run dev-check', 'npm run start:test',
+    'docker compose up --exit-code-from tests', 'docker compose up --wait', 'gh pr checks 236 --watch', 'kubectl rollout status deploy/app --watch',
+    'python observe.py', 'python scripts/test_server.py', 'bash scripts/deploy-server.sh', 'node scripts/check-server.mjs', 'npx vite --mode production build', 'rg -- --watch server && npm test', 'pytest tests/test_server.py', 'cat > notes.md <<EOF\nnpm run dev\nEOF',
     `${'x'.repeat(2100)} && npm run dev`, `npm run dev <<'EOF'\n${'prompt '.repeat(700)}\nEOF\ncodex exec -`]) assert.equal(longLivedService(command), false, command);
 });
 
@@ -725,11 +728,12 @@ test('the tracker classifies each task by its own Bash call, in any order, and m
   const call = (id: string, command: string) => ({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }] } });
   tracker.observe(call('t-server', 'npm run dev'));
   tracker.observe(call('t-worker', 'codex exec "fix it" < /dev/null'));
-  tracker.observe(call('t-feed', 'tail -f app.log'));
+  // A Monitor is its own tool, not a Bash call: what it runs is never looked at.
+  tracker.observe({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: 't-feed', name: 'Monitor', input: { command: 'tail -f app.log' } }] } });
   // Started in the other order; the feed is a Monitor's.
   tracker.observe(started('worker', { task_type: 'local_bash', tool_use_id: 't-worker' }));
   tracker.observe(started('server', { task_type: 'local_bash', tool_use_id: 't-server' }));
-  tracker.observe(started('feed', { task_type: 'local_bash', kind: 'monitor', tool_use_id: 't-feed' }));
+  tracker.observe(started('feed', { task_type: 'local_bash', tool_use_id: 't-feed' }));
   assert.equal(tracker.holding(false), 2, 'the worker and the monitor');
   assert.equal(tracker.holding(true), 3);
   // A foreground server moved to the background keeps its kind.
