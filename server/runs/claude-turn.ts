@@ -115,7 +115,7 @@ interface ClaudeLaunch {
 
 /**
  * One Claude Code process, started for one run: its output parsing, background work, master replies and identity. A run
- * ends at its answer when only processes it does not wait for still run (see BackgroundTaskTracker.holding); the process
+ * ends at its answer when only services it does not wait for still run (see BackgroundTaskTracker.holding); the process
  * is then kept for them, and the conversation's next run that may go into it becomes its run (see `adopt`).
  */
 function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boolean, { executable, args, env, input, privateConfig }: ClaudeLaunch) {
@@ -158,11 +158,11 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   // it runs; the run itself stays until the work it waits for has ended and Claude has taken each notice in a
   // follow-up turn of this same run.
   const tasks = new BackgroundTaskTracker();
-  // Whoever reads a run's result as "done" (an agent, a master, a trigger, Slack) also waits for its background
-  // processes. The owner reads the conversation, where Claude still reports them from the kept process.
-  const waitsForProcesses = (served: Run) => served.origin?.kind !== 'owner' || served.sender === 'master' || Boolean(served.delegation);
+  // Whoever reads a run's result as "done" (an agent, a master, a trigger, Slack) also waits for the long-lived services
+  // it started. The owner reads the conversation: a dev server keeps running after the owner's run, which ends.
+  const waitsForServices = (served: Run) => served.origin?.kind !== 'owner' || served.sender === 'master' || Boolean(served.delegation);
   /** What keeps the current run open after its answer. */
-  const holding = (served: Run) => tasks.holding(waitsForProcesses(served)) + tasks.unreadCount + (noticeId ? 1 : 0);
+  const holding = (served: Run) => tasks.holding(waitsForServices(served)) + tasks.unreadCount + (noticeId ? 1 : 0);
   const followUpMs = host.options.backgroundFollowUpMs ?? BACKGROUND_FOLLOW_UP_MS;
   const waitMaxMs = host.options.backgroundWaitMaxMs ?? BACKGROUND_WAIT_MAX_MS;
   const finishRecheckMs = host.options.claudeFinishRecheckMs ?? CLAUDE_FINISH_RECHECK_MS;
@@ -275,7 +275,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       waitTimedOut = true;
       const minutes = Math.round(waitMaxMs / 60_000);
       // Work an earlier run left (the owner's server) is not this run's to end.
-      if (waitsForProcesses(current) && !tasks.detachedCount) {
+      if (waitsForServices(current) && !tasks.detachedCount) {
         // Its result is read as the work's end, and no later run of its origin could take the process (a trigger's
         // next event is another origin), so the work ends with it, as the owner's Stop does. Closing input alone no
         // longer ends Claude while background work runs.
@@ -320,7 +320,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
           if (!streamError || current !== served || turnActive || child.stdin.writableEnded) return;
           if (!tasks.runningCount && !tasks.detachedCount) { endWait(); closeInput(); return; }
           // The owner's process is kept for its work; work others read ends with its failed turn.
-          if (waitsForProcesses(served) && !tasks.detachedCount) { closeInput(); host.stop(last.id, owned); return; }
+          if (waitsForServices(served) && !tasks.detachedCount) { closeInput(); host.stop(last.id, owned); return; }
           const failure = streamError; streamError = undefined;
           release(failure); owned.finishInput?.();
         }, finishRecheckMs);
@@ -336,7 +336,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
           if (identitySaving) { void identitySaved.then(() => owned.finishInput?.()); return; }
           // It failed meanwhile (its identity could not be saved): never released as a success.
           if (streamError) { owned.finishInput?.(); return; }
-          // Processes it does not wait for, and work an earlier run left, keep the process after the run.
+          // Services it does not wait for, and work an earlier run left, keep the process after the run.
           if (tasks.runningCount || tasks.detachedCount) { release(); owned.finishInput?.(); return; }
           endWait(); closeInput();
         }, finishRecheckMs);
@@ -344,7 +344,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       }
       clearFinishTimer();
       if (tasks.unreadCount && !followUpTimer) arm('followUp', followUpMs);
-      const waiting = tasks.holding(waitsForProcesses(served));
+      const waiting = tasks.holding(waitsForServices(served));
       if (!served.backgroundWait) {
         served.backgroundWait = { since: new Date().toISOString(), tasks: waiting };
         note(waiting ? `\n[Tower] Waiting for ${waiting} background task${waiting === 1 ? '' : 's'} before this turn ends.\n`
