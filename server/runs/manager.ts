@@ -879,10 +879,20 @@ export class RunManager extends EventEmitter {
   private async adopt(run: Run, target: Run, attachments: Awaited<ReturnType<AttachmentStore['resolve']>>): Promise<boolean> {
     // The notes every turn gets (see TurnNotes), as a launch adds them.
     const session = this.getSession(run.sessionId);
-    if (session) await this.notes.add(run, session, false);
+    if (!session) throw new SteeringError('Session no longer exists.', 'rejected');
+    await this.notes.add(run, session, false);
+    // A turn of its own starts like a launch: the same looks and gate (a trigger switched off, permissions, an update).
+    await this.prepareLaunch(run);
+    if (run.status !== 'queued' || this.refusedAtLaunch(run, session)) throw new SteeringError('The run may not start now.', 'rejected');
     run.status = 'running'; run.startedAt = new Date().toISOString(); run.output = '';
     this.changed(run);
     await this.flush();
+    // Saving yielded: the gate answers once more right before the message goes.
+    const refused = run.status === 'running' ? this.launchGate?.(run) : undefined;
+    if (refused) {
+      run.status = 'cancelled'; run.error = refused; run.finishedAt = new Date().toISOString(); this.changed(run);
+      throw new SteeringError('The run may not start now.', 'rejected');
+    }
     const owned = this.owned.get(target.id);
     const delivery = !this.storageHeld && !this.pendingAdmission() && !this.stopping && owned && run.status === 'running' && this.adoptable(target) ? owned.adopt?.(run, attachments) : undefined;
     if (!owned || !delivery) {

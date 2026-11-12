@@ -282,6 +282,20 @@ test('work others read ends at the limit as an error, and its process takes the 
   assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Start the dev server', 'Nightly check']);
 });
 
+test('a run going into a kept process passes the launch gate first', async t => {
+  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1')] }, { waitMaxMs: 200 });
+  t.after(cleanup);
+  const trigger = { origin: { kind: 'trigger' as const, triggerId: 'daily' }, unattended: true };
+  const run = await manager.enqueue(SESSION, 'Start the dev server', {}, trigger);
+  assert.equal((await settled(manager, run.id)).status, 'error');
+  manager.setLaunchGate(item => item.origin?.kind === 'trigger' ? 'The trigger was turned off before this run started, so it did not run.' : undefined);
+  const next = await manager.enqueue(SESSION, 'Nightly check', {}, trigger);
+  const refused = await settled(manager, next.id);
+  assert.equal(refused.status, 'cancelled');
+  assert.match(refused.error ?? '', /turned off/);
+  assert.deepEqual((await entries()).flatMap(entry => entry.user ?? []), ['Start the dev server']);
+});
+
 test('a failed turn whose server keeps running ends as an error and keeps the process for the next message', async t => {
   // Closing input would not end Claude while the server runs: the run must not wait for an exit that never comes.
   const { manager, entries, cleanup } = await fixture({ first: [process_('server-1'), { ...result, is_error: true, errors: ['Model overloaded'] }],
