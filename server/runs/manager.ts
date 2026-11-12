@@ -763,6 +763,12 @@ export class RunManager extends EventEmitter {
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : { blocked: 'starting' };
   }
 
+  /** Whether a Claude process Tower started still lives for this conversation: never start a second one beside it. */
+  private liveProcess(sessionId: string): boolean {
+    for (const id of this.owned.keys()) if (this.runs.get(id)?.sessionId === sessionId) return true;
+    return false;
+  }
+
   /** The Claude process kept for background work after its last run ended (see claudeProcess), as that run. */
   private keptRun(sessionId: string): Run | undefined {
     for (const id of this.owned.keys()) {
@@ -883,14 +889,17 @@ export class RunManager extends EventEmitter {
     await this.notes.add(run, session, false);
     // A turn of its own starts like a launch: the same looks and gate (a trigger switched off, permissions, an update).
     await this.prepareLaunch(run);
-    if (run.status !== 'queued' || this.refusedAtLaunch(run, session)) throw new SteeringError('The run may not start now.', 'rejected');
+    // The conversation stays reserved for the process it goes into, whatever the look decides.
+    const refused = run.status !== 'queued' || this.refusedAtLaunch(run, session);
+    this.reservedSessions.add(session.id);
+    if (refused) throw new SteeringError('The run may not start now.', 'rejected');
     run.status = 'running'; run.startedAt = new Date().toISOString(); run.output = '';
     this.changed(run);
     await this.flush();
     // Saving yielded: the gate answers once more right before the message goes.
-    const refused = run.status === 'running' ? this.launchGate?.(run) : undefined;
-    if (refused) {
-      run.status = 'cancelled'; run.error = refused; run.finishedAt = new Date().toISOString(); this.changed(run);
+    const gated = run.status === 'running' ? this.launchGate?.(run) : undefined;
+    if (gated) {
+      run.status = 'cancelled'; run.error = gated; run.finishedAt = new Date().toISOString(); this.changed(run);
       throw new SteeringError('The run may not start now.', 'rejected');
     }
     const owned = this.owned.get(target.id);
@@ -1120,7 +1129,7 @@ export class RunManager extends EventEmitter {
         try {
           if (!session) throw new RunError('Session no longer exists.', 'not-found');
           if (!creating) this.validateSession(session);
-          if (this.isWorking(session) || this.reservedSessions.has(session.id) || this.keptRun(session.id)) {
+          if (this.isWorking(session) || this.reservedSessions.has(session.id) || this.liveProcess(session.id)) {
             const reason = this.waitReason(session);
             if (run.output !== reason) { run.output = reason; this.changed(run); }
             continue;
