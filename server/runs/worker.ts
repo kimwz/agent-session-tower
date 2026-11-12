@@ -1218,7 +1218,8 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
     const capabilities = new CapabilityRegistry(capability => {
       if (capability.kind !== 'owner-run' && capability.kind !== 'caller-run' && capability.kind !== 'secret-run') return true;
       const run = runs.servingRun(capability.runId);
-      return run?.status === 'running' || run?.status === 'queued';
+      // A process kept for background work keeps its credentials for the run it takes next.
+      return run?.status === 'running' || run?.status === 'queued' || runs.holdsProcess(capability.runId);
     });
     capabilities.grant(await sessionToolsKey(stateDir), { kind: 'session-reader' });
     const secretService = new SecretService({ stateDir });

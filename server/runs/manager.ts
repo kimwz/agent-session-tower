@@ -793,6 +793,9 @@ export class RunManager extends EventEmitter {
     return this.list().find(run => run.id === id);
   }
 
+  /** Whether the Claude process a run's credentials were issued to still lives (they are kept while it does). */
+  holdsProcess(runId: string): boolean { return this.owned.has(this.servedBy(runId)); }
+
   private servedBy(runId: string): string {
     let id = runId;
     for (let hops = 0; this.handedOver.has(id) && hops < 1000; hops++) id = this.handedOver.get(id)!;
@@ -910,13 +913,19 @@ export class RunManager extends EventEmitter {
     }
     // Held under the run it serves from here; the message's write is still under way, Claude's replay comes later.
     if (target.towerTools) run.towerTools = target.towerTools;
-    this.owned.delete(target.id); this.owned.set(run.id, owned); this.handedOver.set(target.id, run.id);
+    this.owned.delete(target.id); this.owned.set(run.id, owned);
+    // Every credential of the process points straight at the run it serves (see servingRun).
+    for (const [from, to] of this.handedOver) if (to === target.id) this.handedOver.set(from, run.id);
+    this.handedOver.set(target.id, run.id);
     this.drain.noteHandedOver(run);
     this.admissions.delete(run.id);
     this.changed(run);
     void delivery.then(() => {}, error => {
       // Claude never took it: the process goes back to being kept for its background work, under the run it served.
-      if (this.owned.get(run.id) === owned && owned.disown?.(run, target)) { this.owned.delete(run.id); this.owned.set(target.id, owned); this.handedOver.delete(target.id); }
+      if (this.owned.get(run.id) === owned && owned.disown?.(run, target)) {
+        this.owned.delete(run.id); this.owned.set(target.id, owned); this.handedOver.delete(target.id);
+        for (const [from, to] of this.handedOver) if (to === run.id) this.handedOver.set(from, target.id);
+      }
       if (FINISHED.has(run.status)) return;
       if (error instanceof SteeringError && error.disposition === 'rejected') { delete run.startedAt; run.status = 'queued'; run.output = ''; }
       else { run.status = 'error'; run.finishedAt = new Date().toISOString(); run.error = `Delivery could not be confirmed. Check the conversation before sending again. ${errorMessage(error)}`; }
@@ -1425,7 +1434,14 @@ export class RunManager extends EventEmitter {
   updateDrainStatus(): { startedAt: string; deadline: string; running: number } | undefined { return this.drain.status(); }
 
   /** Called about once a second while a forced update waits: wrap-up requests, Codex app submissions, the deadline. */
-  driveUpdateDrain(now = Date.now()): void { this.drain.drive(now); }
+  driveUpdateDrain(now = Date.now()): void {
+    this.drain.drive(now);
+    // No turn holds a process kept for background work: at the deadline it stops like the turns, or the worker
+    // could never hand over. The run it served keeps its outcome.
+    const status = this.drain.status();
+    if (!status || now < Date.parse(status.deadline)) return;
+    for (const [id, owned] of [...this.owned]) { const run = this.runs.get(id); if (run && FINISHED.has(run.status)) this.stopOwned(id, owned); }
+  }
 
   private supersede(run: Run, reason: string): void {
     run.status = 'cancelled'; run.finishedAt = new Date().toISOString(); run.output = `Scheduled continuation not started: ${reason}`;

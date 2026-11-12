@@ -151,6 +151,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   let modeNoted = false;
   let contextInput: { model: string; usedTokens: number } | undefined;
   let identitySaved: Promise<void> = Promise.resolve();
+  /** A new conversation's identity is being saved: no run of it may succeed before that is durable. */
+  let identitySaving = false;
   const wakeups = new WakeupTracker(MAX_PROMPT);
   // A turn ends at its result, but background work it started keeps running in this process. Input stays open while
   // it runs; the run itself stays until the work it waits for has ended and Claude has taken each notice in a
@@ -313,6 +315,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
           finishTimer = undefined;
           if (!idle() || current !== served || owned.claude?.hasPendingSteers()) return;
           if (holding(served)) { owned.finishInput?.(); return; }
+          // A run ends here only once a new conversation's identity is saved, as at an exit (see the close handler).
+          if (identitySaving) { void identitySaved.then(() => owned.finishInput?.()); return; }
           // Processes it does not wait for, and work an earlier run left, keep the process after the run.
           if (tasks.runningCount || tasks.detachedCount) { release(); owned.finishInput?.(); return; }
           endWait(); closeInput();
@@ -368,10 +372,11 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         host.registry.confirm(session.id, actualId);
         session.nativeId = actualId;
         host.changed(run);
+        identitySaving = true;
         identitySaved = host.persistNativeIdentity(run).then(() => {}).catch(error => {
           streamError = `Cannot save the new conversation identity: ${errorMessage(error)}`;
           host.stop(last.id, owned);
-        });
+        }).finally(() => { identitySaving = false; });
       }
       if (actualId === session.nativeId) sawSessionId = true;
       // Claude reports the mode it actually runs in before doing anything, for example the one it falls back to

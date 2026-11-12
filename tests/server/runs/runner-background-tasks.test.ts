@@ -282,6 +282,21 @@ test('work others read ends at the limit as an error, and its process takes the 
   assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Start the dev server', 'Nightly check']);
 });
 
+test('a forced update stops a kept process at its deadline and keeps the outcome of the run it served', async t => {
+  const { manager, cleanup } = await fixture({ first: [process_('server-1'), says('Server up.')] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Start the sample server', {}, { origin: { kind: 'owner' } });
+  assert.equal((await settled(manager, run.id)).status, 'completed');
+  assert.ok(ownedTurn(manager, run.id));
+  manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  manager.driveUpdateDrain();
+  assert.ok(ownedTurn(manager, run.id), 'kept until the deadline');
+  manager.driveUpdateDrain(Date.now() + 61_000);
+  await until(() => !ownedTurn(manager, run.id));
+  assert.equal(manager.busy(), false);
+  assert.equal(find(manager, run.id).status, 'completed');
+});
+
 test('a run going into a kept process passes the launch gate first', async t => {
   const { manager, entries, cleanup } = await fixture({ first: [process_('server-1')] }, { waitMaxMs: 200 });
   t.after(cleanup);
