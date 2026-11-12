@@ -889,10 +889,10 @@ export class RunManager extends EventEmitter {
     await this.notes.add(run, session, false);
     // A turn of its own starts like a launch: the same looks and gate (a trigger switched off, permissions, an update).
     await this.prepareLaunch(run);
-    // The conversation stays reserved for the process it goes into, whatever the look decides.
+    // The conversation stays reserved for the process it goes into while that lives, whatever the look decides.
     const refused = run.status !== 'queued' || this.refusedAtLaunch(run, session);
-    this.reservedSessions.add(session.id);
-    if (refused) throw new SteeringError('The run may not start now.', 'rejected');
+    if (this.liveProcess(session.id)) this.reservedSessions.add(session.id);
+    if (refused || !this.owned.has(target.id)) throw new SteeringError('The run may not start now.', 'rejected');
     run.status = 'running'; run.startedAt = new Date().toISOString(); run.output = '';
     this.changed(run);
     await this.flush();
