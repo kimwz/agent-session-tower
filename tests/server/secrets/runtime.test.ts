@@ -42,7 +42,7 @@ async function fixture() {
   const sessions = new Map<string, Session>(); const runs = new Map<string, Run>(); const origins = new Map<string, SessionOrigin>();
   const session = sessionRecord(alias); sessions.set(session.id, session); origins.set(session.id, { kind: 'owner', untrustedInput: false });
   const registry = {
-    list: () => [...runs.values()], getSession: (id: string) => sessions.get(id), sessionOrigin: (id: string) => origins.get(id),
+    list: () => [...runs.values()], servingRun: (id: string) => runs.get(id), getSession: (id: string) => sessions.get(id), sessionOrigin: (id: string) => origins.get(id),
   };
   const notices: (string | undefined)[] = [];
   const runtime = new SecretRuntime({ stateDir, service, runs: registry, onConnect: id => { notices.push(id); } });
@@ -607,7 +607,7 @@ test('locked session closure survives runtime restart and removes task-only secr
     for (const privateInput of [f.session.id, f.session.nativeId, canary, password, token, secret.id, target.taskId]) assert.equal(closureText.includes(privateInput), false);
     const { stat } = await import('node:fs/promises'); assert.equal((await stat(closurePath)).mode & 0o777, 0o600);
     const restarted = await secretService(f.stateDir, { now: f.now }); assert.equal(restarted.status().locked, true);
-    const registry = { list: () => [...f.runs.values()], getSession: (id: string) => f.sessions.get(id), sessionOrigin: (id: string) => f.origins.get(id) };
+    const registry = { list: () => [...f.runs.values()], servingRun: (id: string) => f.runs.get(id), getSession: (id: string) => f.sessions.get(id), sessionOrigin: (id: string) => f.origins.get(id) };
     restartedRuntime = new SecretRuntime({ stateDir: f.stateDir, service: restarted, runs: registry });
     const capabilities = new CapabilityRegistry(); const context: McpContext = { capabilities, run: id => f.runs.get(id), secretTools: SECRET_TOOLS, secretAuthorize: capability => restartedRuntime!.authorizeCapability(capability), secretTool: (capability, name, args) => restartedRuntime!.tool(capability, name, args) };
     await assert.rejects(handleMcpRequest(context, token, { method: 'tools/call', name: 'secrets_list', arguments: {} }), { kind: 'forbidden' });
@@ -656,7 +656,7 @@ test('rotated values and rules an older build edits apply to an open task at onc
 test('a tool that fails because the Vault locked meanwhile is answered as locked only when the failure has no status', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'tower-secret-runtime-status-'));
   const state = { locked: false };
-  const runtime = new SecretRuntime({ stateDir: directory, service: { status: () => ({ locked: state.locked }) } as unknown as SecretService, runs: { list: () => [], getSession: () => undefined, sessionOrigin: () => undefined } });
+  const runtime = new SecretRuntime({ stateDir: directory, service: { status: () => ({ locked: state.locked }) } as unknown as SecretService, runs: { list: () => [], servingRun: () => undefined, getSession: () => undefined, sessionOrigin: () => undefined } });
   try {
     let thrown: unknown;
     const inner = runtime as unknown as { unlockedTool: () => Promise<unknown>; lockedTool: () => Promise<unknown> };

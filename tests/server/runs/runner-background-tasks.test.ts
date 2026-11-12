@@ -8,6 +8,7 @@ import { isSavedRun } from '../../../server/runs/saved-state.js';
 import { BackgroundTaskTracker } from '../../../server/runs/background-tasks.js';
 import { CLAUDE_FINISH_RECHECK_MS } from '../../../server/runs/claude-turn.js';
 import { RunManager } from './sql-fixture.js';
+import { projectSessionStates } from '../../../server/sessions/snapshot.js';
 import { WakeupTracker } from '../../../server/runs/wakeup.js';
 import type { Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
@@ -51,10 +52,14 @@ createInterface({ input: process.stdin }).on('line', line => {
   sendAll(script.onMessage ?? []);
   setTimeout(() => sendAll([{ type: 'user', isReplay: true, uuid: message.uuid, parent_tool_use_id: null, message: message.message },
     ...(script.reply ?? []), { type: 'result', is_error: false, result: 'reply done' }]), script.replyDelay ?? 0);
-}).on('close', () => { log({ end: true }); process.exit(0); });
+// Claude Code does not end while a background command runs, even with its input closed (lingerOnClose).
+}).on('close', () => { log({ end: true }); if (!script.lingerOnClose) process.exit(0); });
 `;
 
-const started = (taskId: string, extra: Record<string, unknown> = {}) => ({ type: 'system', subtype: 'task_started', task_id: taskId, task_type: 'local_bash', description: 'Run the reviews', ...extra });
+// Background work a run waits for whoever started it: a background agent. A background command or monitor (`process`)
+// may be a service that never ends; only work read by someone other than the owner waits for those.
+const started = (taskId: string, extra: Record<string, unknown> = {}) => ({ type: 'system', subtype: 'task_started', task_id: taskId, task_type: 'local_agent', description: 'Run the reviews', ...extra });
+const process_ = (taskId: string, extra: Record<string, unknown> = {}) => started(taskId, { task_type: 'local_bash', description: 'Start the sample server', ...extra });
 const notified = (taskId: string, status = 'completed') => ({ type: 'system', subtype: 'task_notification', task_id: taskId, status, summary: 'Background command "Run the reviews" completed (exit code 0)', output_file: '/tmp/reviews.out' });
 const says = (text: string, id?: string) => ({ type: 'assistant', message: { ...(id ? { id } : {}), content: [{ type: 'text', text }] } });
 // Claude replays each notice it takes into the conversation.
@@ -62,14 +67,16 @@ const takes = (taskId: string) => ({ type: 'user', isReplay: true, parent_tool_u
   message: { role: 'user', content: `<task-notification>\n<task-id>${taskId}</task-id>\n<status>completed</status>\n</task-notification>` } });
 const result = { type: 'result', is_error: false, result: 'follow-up done' };
 
+const fixtureSession: Session = { id: SESSION, nativeId: ID, provider: 'claude', title: 'Background fixture', cwd: '/fixture', project: 'fixture', status: 'completed', statusReason: '',
+  createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
+
 async function fixture(script: Record<string, unknown>, options: { followUpMs?: number; waitMaxMs?: number; recoveryMs?: number; finishRecheckMs?: number; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools'] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-background-'));
   const provider = join(directory, 'provider.mjs');
   const log = join(directory, 'provider.log');
   await writeFile(provider, PROVIDER);
   await writeFile(log, '');
-  const session: Session = { id: SESSION, nativeId: ID, provider: 'claude', title: 'Background fixture', cwd: directory, project: 'fixture', status: 'completed', statusReason: '',
-    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
+  const session: Session = { ...fixtureSession, cwd: directory, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
   const manager = new RunManager({ getSession: id => id === SESSION ? session : undefined, refreshSessions: async () => {}, stateDir: join(directory, 'state'), pollMs: 20,
     findExecutable: async provider => `/fixture/${provider}`, env: { LOG: log, SCRIPT: JSON.stringify(script) }, resolveRunTools: options.resolveRunTools,
     backgroundRecoveryMs: options.recoveryMs ?? 100, ...('finishRecheckMs' in options ? { claudeFinishRecheckMs: options.finishRecheckMs } : {}),
@@ -246,14 +253,163 @@ test("Tower's notice holds the turn open until Claude takes it, even if another 
   assert.match(done.output, /Something else\.[\s\S]*Summarised the reviews\./);
 });
 
-test('background work still running at the limit closes the turn and is not reported as success', async t => {
-  const { manager, entries, cleanup } = await fixture({ first: [started('server-1')] }, { waitMaxMs: 200 });
+test("background work still running at the limit ends the owner's turn as an error and keeps the work running", async t => {
+  const { manager, entries, cleanup } = await fixture({ first: [started('review-1')], reply: [says('Still reviewing.')] }, { waitMaxMs: 200 });
   t.after(cleanup);
-  const run = await manager.enqueue(SESSION, 'Start the dev server', {}, { origin: { kind: 'owner' } });
+  const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'owner' } });
   const done = await settled(manager, run.id);
   assert.equal(done.status, 'error');
   assert.match(done.error ?? '', /background work did not finish/);
-  assert.ok((await entries()).some(entry => entry.end));
+  assert.match(done.output, /keeps running/);
+  // Closing input no longer ends Claude while its work runs; the process stays and takes the next message.
+  assert.equal((await entries()).some(entry => entry.end), false);
+  const next = await manager.enqueue(SESSION, 'How is it going?', {}, { origin: { kind: 'owner' } });
+  assert.equal((await settled(manager, next.id)).status, 'completed');
+  assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Run the reviews', 'How is it going?']);
+});
+
+test('work others read ends at the limit together with its process', async t => {
+  // A trigger's next event is another origin: a process kept for it could take no later run and would hold the
+  // conversation, so it stops (closing input alone no longer ends Claude while the work runs).
+  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1')], lingerOnClose: true }, { waitMaxMs: 200 });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Start the dev server', {}, { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'error');
+  assert.match(done.error ?? '', /background work did not finish/);
+  assert.equal(ownedTurn(manager, run.id), undefined, 'the process was stopped');
+  assert.deepEqual((await entries()).flatMap(entry => entry.user ?? []), ['Start the dev server']);
+});
+
+test("a master's message waits for its background processes like other work read by someone else", async t => {
+  const { manager, release, cleanup } = await fixture({ first: [process_('reviews-1'), says('I will report when the reviews finish.')],
+    later: [{ when: 'done', frames: [notified('reviews-1'), takes('reviews-1'), says('All reviews passed.'), result] }] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'owner' }, sender: 'master' });
+  await until(() => find(manager, run.id).backgroundWait);
+  assert.equal(find(manager, run.id).status, 'running');
+  await release('done');
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /All reviews passed\./);
+});
+
+test('Stop on a run whose process was kept ends that work and keeps the run\'s outcome', async t => {
+  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1'), says('Server up.')] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Start the sample server', {}, { origin: { kind: 'owner' } });
+  assert.equal((await settled(manager, run.id)).status, 'completed');
+  assert.equal(manager.keepsProcess(), true, 'the worker stays for it (idle shutdown)');
+  await manager.cancel(run.id);
+  await until(() => !ownedTurn(manager, run.id));
+  assert.equal(manager.keepsProcess(), false);
+  await until(() => !find(manager, run.id).backgroundWait);
+  assert.equal(find(manager, run.id).status, 'completed');
+  assert.deepEqual((await entries()).flatMap(entry => entry.user ?? []), ['Start the sample server']);
+});
+
+test('a forced update stops a kept process at its deadline and keeps the outcome of the run it served', async t => {
+  const { manager, cleanup } = await fixture({ first: [process_('server-1'), says('Server up.')] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Start the sample server', {}, { origin: { kind: 'owner' } });
+  assert.equal((await settled(manager, run.id)).status, 'completed');
+  assert.ok(ownedTurn(manager, run.id));
+  manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  manager.driveUpdateDrain();
+  assert.ok(ownedTurn(manager, run.id), 'kept until the deadline');
+  manager.driveUpdateDrain(Date.now() + 61_000);
+  await until(() => !ownedTurn(manager, run.id));
+  await until(() => !manager.busy());
+  assert.equal(find(manager, run.id).status, 'completed');
+});
+
+test('a run going into a kept process passes the launch gate first', async t => {
+  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1'), says('Server up.')] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Start the dev server', {}, { origin: { kind: 'owner' } });
+  assert.equal((await settled(manager, run.id)).status, 'completed');
+  manager.setLaunchGate(item => item.prompt === 'Nightly check' ? 'The trigger was turned off before this run started, so it did not run.' : undefined);
+  const next = await manager.enqueue(SESSION, 'Nightly check', {}, { origin: { kind: 'owner' } });
+  const refused = await settled(manager, next.id);
+  assert.equal(refused.status, 'cancelled');
+  assert.match(refused.error ?? '', /turned off/);
+  assert.deepEqual((await entries()).flatMap(entry => entry.user ?? []), ['Start the dev server']);
+});
+
+test('a failed turn whose server keeps running ends as an error and keeps the process for the next message', async t => {
+  // Closing input would not end Claude while the server runs: the run must not wait for an exit that never comes.
+  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1'), { ...result, is_error: true, errors: ['Model overloaded'] }],
+    noResult: true, lingerOnClose: true, reply: [says('Here is the answer.')] });
+  t.after(cleanup);
+  const first = await manager.enqueue(SESSION, 'Start the sample server', {}, { origin: { kind: 'owner' } });
+  const done = await settled(manager, first.id);
+  assert.equal(done.status, 'error');
+  assert.match(done.error ?? '', /Model overloaded/);
+  const next = await manager.enqueue(SESSION, 'Try again', {}, { origin: { kind: 'owner' } });
+  assert.equal((await settled(manager, next.id)).status, 'completed');
+  assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Start the sample server', 'Try again']);
+});
+
+test("an owner's turn ends at its answer while a server it started keeps running, and the next messages are runs of their own", async t => {
+  // Issue #234: the server never ends. The answer ends the run; the process stays, so the server is not killed.
+  const { manager, entries, release, cleanup } = await fixture({ first: [process_('server-1'), says('The sample server is up on port 8770.')],
+    reply: [says('Here is the answer.')], replyDelay: 150,
+    later: [{ when: 'stopped', frames: [notified('server-1', 'killed'), takes('server-1'), says('The server stopped.'), result] }] });
+  t.after(cleanup);
+  const first = await manager.enqueue(SESSION, 'Start the sample server', {}, { origin: { kind: 'owner' } });
+  const done = await settled(manager, first.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /port 8770[\s\S]*1 background task keeps running/);
+  assert.equal(done.output.includes('Waiting for'), false);
+  assert.equal(projectSessionStates([{ ...fixtureSession, status: 'idle' }], manager.list())[0].status, 'idle', 'the conversation is not shown as working');
+  assert.ok(ownedTurn(manager, first.id), 'the process is kept for the server');
+  assert.equal((await entries()).some(entry => entry.end), false, 'input stays open: the server keeps running');
+
+  for (const prompt of ['Is it still running?', 'Write the handover notes.']) {
+    const next = await manager.enqueue(SESSION, prompt, {}, { origin: { kind: 'owner' } });
+    // The process's tool credentials, issued for the first run, serve the run it serves now, while that run works.
+    const serving = await until(() => { const run = manager.servingRun(first.id); return run?.id === next.id && run.status === 'running' ? run : undefined; });
+    assert.equal(serving.sessionId, SESSION);
+    const answered = await settled(manager, next.id);
+    assert.equal(answered.status, 'completed');
+    assert.equal(answered.steering, undefined, 'a turn of its own, not an insert');
+    assert.match(answered.output, /Here is the answer\./);
+    assert.match(answered.output, /keeps running/);
+  }
+  assert.equal(find(manager, first.id).output.includes('Here is the answer.'), false, "later answers are not the first run's output");
+  assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Start the sample server', 'Is it still running?', 'Write the handover notes.']);
+
+  // Claude reports the server's end by itself, in a turn no run waits for; then the process ends.
+  const before = manager.list().map(run => [run.id, run.status, run.output]);
+  await release('stopped');
+  await until(async () => (await entries()).some(entry => entry.end));
+  assert.deepEqual(manager.list().map(run => [run.id, run.status, run.output]), before);
+  await until(() => manager.list().every(run => !run.backgroundWait));
+});
+
+test('a run others read waits for its background processes as before', async t => {
+  const { manager, release, cleanup } = await fixture({ first: [process_('reviews-1'), says('I will report when the reviews finish.')],
+    later: [{ when: 'done', frames: [notified('reviews-1'), takes('reviews-1'), says('All reviews passed.'), result] }] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
+  const waiting = await until(() => find(manager, run.id).backgroundWait);
+  assert.equal(waiting.tasks, 1);
+  assert.equal(find(manager, run.id).status, 'running');
+  await release('done');
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /All reviews passed\./);
+});
+
+test('a run that cannot go into a kept process waits for it instead of starting a second Claude', async t => {
+  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1'), says('Server up.')] });
+  t.after(cleanup);
+  const first = await manager.enqueue(SESSION, 'Start the sample server', {}, { origin: { kind: 'owner' } });
+  assert.equal((await settled(manager, first.id)).status, 'completed');
+  const other = await manager.enqueue(SESSION, 'Nightly check', {}, { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
+  await until(() => /still runs background work/.test(find(manager, other.id).output));
+  assert.equal(find(manager, other.id).status, 'queued');
+  assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Start the sample server']);
 });
 
 test("the owner's next message goes straight into a turn that only waits for background work", async t => {

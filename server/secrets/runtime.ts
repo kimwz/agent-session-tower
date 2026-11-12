@@ -91,7 +91,7 @@ const alignInput = z.object({ routeId: z.string().min(1).max(256), direction: z.
 const SHARE_NOTICE_MS = 10 * 60_000;
 const closedView = (status: VaultStatus, error: SecretSessionError): SecretSessionView => ({ status, available: [], connectable: [], usage: [], unavailableSources: [], updatePendingSources: [], error, permanent: PERMANENT.has(error) });
 const closureId = (sessionId: string) => createHash('sha256').update('tower-secret-session-close-v1:' + sessionId).digest('hex');
-interface Runs { list(): Run[]; getSession(id: string): Session | undefined; sessionOrigin(id: string): SessionOrigin | undefined }
+interface Runs { list(): Run[]; servingRun(runId: string): Run | undefined; getSession(id: string): Session | undefined; sessionOrigin(id: string): SessionOrigin | undefined }
 
 /** Owns the security task independently of conversation summaries and binds it once per run. */
 export class SecretRuntime {
@@ -224,11 +224,12 @@ export class SecretRuntime {
   async remoteTarget(sessionId: string, create = true): Promise<SecretTarget | undefined> { return create ? this.target(sessionId) : this.peekTarget(sessionId); }
   /**
    * The running turn a credential was issued for, and its session as it may use secrets now (see access.ts); decided again
-   * on every call, whoever started the turn and whatever other tools it has. A credential never serves another run.
+   * on every call, whoever started the turn and whatever other tools it has. A credential serves no other process: only
+   * the run its own Claude process serves now (RunManager.servingRun), which has the same origin and calling turn.
    */
   private async runSubject(capability: Extract<Capability, { kind: 'secret-run' }>, stage: SecretStage = 'use'): Promise<{ run: Run; session: Session & { cwd: string; subject: SecretSubjectMode } }> {
     if (this.blocked) throw fail('보관함 잠금 해제를 완료하지 못했습니다.', 'unavailable');
-    const run = this.options.runs.list().find(item => item.id === capability.runId);
+    const run = this.options.runs.servingRun(capability.runId);
     if (!run || run.sessionId !== capability.sessionId || run.status !== 'running') throw fail('이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.', 'forbidden');
     return { run, session: await this.session(run.sessionId, run, stage) };
   }

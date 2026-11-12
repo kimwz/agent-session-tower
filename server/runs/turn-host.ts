@@ -18,6 +18,15 @@ export interface OwnedProcess {
   killTimer?: ReturnType<typeof setTimeout>;
   claude?: ClaudeControl;
   finishInput?: () => void;
+  /** Whether `adopt` would take a run now. */
+  canAdopt?: () => boolean;
+  /**
+   * Makes `run` the process's run and sends it as a turn of its own, if no turn is under way in it (see claudeProcess);
+   * the promise settles when Claude takes it. Undefined when the process cannot take it now.
+   */
+  adopt?: (run: Run, attachments: Awaited<ReturnType<AttachmentStore['resolve']>>) => Promise<void> | undefined;
+  /** An adopted run's message did not reach Claude: the process serves none again, `previous` was its last. */
+  disown?: (run: Run, previous: Run) => boolean;
 }
 
 /** What a turn module may read of the manager's options. */
@@ -63,6 +72,11 @@ export interface TurnHost {
   release(sessionId: string): void;
   /** The only way a turn reports its end (see TurnExit). */
   exited(exit: TurnExit): void;
+  /**
+   * A Claude run ended at its answer while its process stays for background work no run waits for (`error` when it
+   * stopped waiting at the limit). The process's own end is still reported through `exited`, for the last run it served.
+   */
+  answered(run: Run, owned: OwnedProcess, error?: string): void;
   runTools(run: Run, session: Session): RunTools;
   executable(provider: Provider): Promise<string | undefined>;
   getSession(id: string): Session | undefined;

@@ -255,6 +255,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     return options.ledger.once(controllerId, operation, admitted.requestId, content, execute, record, replay);
   };
   const findRun = (id: string) => options.runs.list().find(run => run.id === id);
+  /** The run a calling-turn credential serves now: the one its Claude process serves (see RunManager.servingRun). */
+  const callerRun = (id: string) => options.runs.servingRun(id);
   // Kept on each delegated turn when it is admitted, so its later turns keep their secret tools after its callers leave history.
   // Read at each use: a worker that started on its diagnostic host gets its secrets only when it is activated.
   const publicChain = (delegation: RunDelegation) => options.secrets?.publicChain(delegation);
@@ -273,10 +275,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     if (token === undefined) return { ...admitted, ...(admitted.heartbeat ? { validate: heartbeatValidate } : {}) };
     if (typeof token !== 'string' || admitted.origin?.controllerId) throw new TowerError('forbidden', 'Invalid local calling-turn credential.');
     const caller = capabilities.resolve(token);
-    const callingRun = caller?.kind === 'caller-run' ? findRun(caller.runId) : undefined;
+    const callingRun = caller?.kind === 'caller-run' ? callerRun(caller.runId) : undefined;
     const corrective = callingRun?.heartbeat;
     const validate = () => {
-      heartbeatValidate(); callerDelegation(capabilities, findRun, token);
+      heartbeatValidate(); callerDelegation(capabilities, callerRun, token);
       if (corrective) {
         const current = findRun(callingRun!.id);
         const target = targetSessionId && options.runs.getSession(targetSessionId);
@@ -292,7 +294,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       }
     };
     validate();
-    return { ...admitted, ...(corrective ? { origin: { kind: 'agent' as const } } : {}), delegation: callerDelegation(capabilities, findRun, token, publicChain), validate };
+    return { ...admitted, ...(corrective ? { origin: { kind: 'agent' as const } } : {}), delegation: callerDelegation(capabilities, callerRun, token, publicChain), validate };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
@@ -563,7 +565,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const mcp = { api: mcpApi(), capabilities, publicChain, secretTools: options.secrets ? SECRET_TOOLS : undefined, secretAuthorize: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>) => options.secrets!.authorizeCapability(capability) : undefined, secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
     githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined,
     heartbeatAllowed: (run: Run) => { const origin = options.runs.sessionOrigin(run.sessionId); return !origin?.untrustedInput && (!origin || origin.kind === 'owner'); },
-    run: (runId: string) => options.runs.list().find(run => run.id === runId) };
+    run: (runId: string) => options.runs.servingRun(runId) };
   const server = createServer(async (req, res) => {
     // Tool servers attached to provider turns hold a capability, not the worker credential; it opens only /mcp.
     const capability = req.headers.authorization?.match(/^Capability ([a-f\d]{64})$/)?.[1];
@@ -729,6 +731,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         // A handoff past its quiet check owns shutdown until it hands off or resumes: the state stays locked meanwhile.
         if (!options.onIdle || closing || draining || pending || Date.now() - lastRequest < (options.idleMs ?? 30_000)) return;
         if (options.runs.list().some(run => run.status === 'running' || run.status === 'queued')) return;
+        // A Claude process kept for background work (a dev server) after its run ended lives in this worker too.
+        if (options.runs.keepsProcess()) return;
         if (options.autoPrompts?.list().some(job => !['completed', 'error', 'cancelled'].includes(job.status))) return;
         if (options.terminals?.hasActive()) return;
         if (options.slack?.hasActive()) return;
@@ -1213,8 +1217,12 @@ export async function runRunnerWorker(stateDir: string, testing: Pick<RunnerHost
     coordinators = () => new Set([...slack.coordinatorSessionIds(), ...github.coordinatorSessionIds()]);
     // A delegated task's run stays until its coordinator has finished with it, across pruning and restarts.
     runs.setRetained(() => [...slack.automation.retainedRuns(), ...github.automation.retainedRuns()]);
-    const capabilities = new CapabilityRegistry(capability => (capability.kind !== 'owner-run' && capability.kind !== 'caller-run' && capability.kind !== 'secret-run')
-      || runs.list().some(run => run.id === capability.runId && (run.status === 'running' || run.status === 'queued')));
+    const capabilities = new CapabilityRegistry(capability => {
+      if (capability.kind !== 'owner-run' && capability.kind !== 'caller-run' && capability.kind !== 'secret-run') return true;
+      const run = runs.servingRun(capability.runId);
+      // A process kept for background work keeps its credentials for the run it takes next.
+      return run?.status === 'running' || run?.status === 'queued' || runs.holdsProcess(capability.runId);
+    });
     capabilities.grant(await sessionToolsKey(stateDir), { kind: 'session-reader' });
     const secretService = new SecretService({ stateDir });
     await secretService.start();
