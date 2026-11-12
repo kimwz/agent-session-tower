@@ -672,12 +672,14 @@ test('only clearly long-lived services count as services; agent CLIs, builds and
     'cd sample && nohup python3 serve.py > serve.log 2>&1', 'rm -rf /tmp/t; mkdir -p /tmp/t/home; cd x && node bin/agent-session-tower.mjs run --port 8795',
     'pkill -f x; sleep 0.5; cd d && exec python3 -m http.server 8765', 'npm run build 2>&1 | tail -1 && node bin/agent-session-tower.mjs run --port 8796',
     'source .venv/bin/activate && python -m http.server', 'npm run dev 2>&1 | tee dev.log', 'cd app && npm i && npm run dev',
-    'kubectl port-forward svc/db 5432:5432', 'ngrok http 3000', 'ssh -N -L 5432:localhost:5432 db-host', 'tsx watch src/index.ts', 'npm run dev>dev.log 2>&1', 'npm run dev>>dev.log 2>&1', 'python3 -m http.server 8000</dev/null', 'export NODE_ENV=development && npm run dev']) assert.equal(longLivedService(command), true, command);
+    'kubectl port-forward svc/db 5432:5432', 'ngrok http 3000', 'tsx watch src/index.ts', 'cd "my app" && npm run dev', 'npm run dev # local only', 'npm run dev>dev.log 2>&1', 'npm run dev>>dev.log 2>&1', 'python3 -m http.server 8000</dev/null', 'export NODE_ENV=development && npm run dev']) assert.equal(longLivedService(command), true, command);
   for (const command of ['codex exec --ephemeral -m gpt-6.1-sol "start the server on 8080" < /dev/null', 'claude -p --no-session-persistence < prompt.md',
     'cd game && codex exec "run npm run dev and check"', 'npm test', 'npm run build', 'pytest -x', 'sleep 300', 'docker compose up -d',
     'make reviews', './run-reviews.sh', 'npm run typecheck', 'python3 train.py', "printf 'npm run dev'; npm run build",
     'echo "start with: npm run dev" && npm test', 'jest --watch=false', 'npx vite build', 'vite build --mode production',
-    'pip install uvicorn && pytest', 'bash build-server.sh', 'node scripts/build-server.mjs', 'python3 setup-server.py', 'sh server.sh stop',
+    'pip install uvicorn && pytest', 'npm test || npm run dev', 'npm run build || python3 -m http.server 8000', 'npm run dev"-check"',
+    'docker compose up "--exit-code-from" tests', 'python3 server.py "migrate"', 'tail -f "--pid=123" run.log', 'tail --pid=1 -f run.log',
+    'pip install \\\n  fastapi \\\n  uvicorn', 'npm test # build; npm run dev', 'ssh host mysql -N -e "select 1"', 'npm run dev & RESULT=$(pytest)', 'bash build-server.sh', 'node scripts/build-server.mjs', 'python3 setup-server.py', 'sh server.sh stop',
     'python3 server.py migrate', 'npm test --watch', 'argo submit wf.yaml --watch', 'tail -f --pid=123 run.log', 'tail -f run.log --pid 123', 'npm run dev2>dev.log 2>&1', 'npm run dev2>>dev.log 2>&1', 'npm run dev & source ./run-tests.sh', 'npm run dev >dev.log 2>&1 & npm test', 'npm run dev-check', 'npm run start:test',
     'docker compose up --exit-code-from tests', 'docker compose up --wait', 'gh pr checks 236 --watch', 'kubectl rollout status deploy/app --watch',
     'python observe.py', 'python scripts/test_server.py', 'bash scripts/deploy-server.sh', 'node scripts/check-server.mjs', 'npx vite --mode production build', 'rg -- --watch server && npm test', 'pytest tests/test_server.py', 'cat > notes.md <<EOF\nnpm run dev\nEOF',

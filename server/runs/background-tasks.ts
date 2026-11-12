@@ -33,16 +33,18 @@ const SERVICES = [
   // A Tower of its own, as agents start one to look at a change.
   /^node\s+(?:\S*\/)?agent-session-tower(?:\.mjs)?\s+run(?=\s|$)/,
   /^docker(?:-compose|\s+compose)\s+up(?=\s|$)(?!.*\s(?:-d|--detach|--wait|--no-start|--exit-code-from|--abort-on-container-exit|--abort-on-container-failure)(?=\s|=|$))/,
-  /^kubectl\s+port-forward(?=\s|$)|^ssh\s+(?:\S+\s+)*-\w*N/,
-  /^tail\s+(?!.*\s--pid(?=[=\s]))(?:-\S+\s+)*-[fF](?=\s|$)/,
+  /^kubectl\s+port-forward(?=\s|$)/,
+  /^tail\s+(?!(?:.*\s)?--pid(?=[=\s]))(?:-\S+\s+)*-[fF](?=\s|$)/,
   // A watch mode of a tool known to keep watching.
   /^(?:(?:npx|bunx)\s+)?(?:tsc|node|deno|bun|vitest|jest|webpack|esbuild|rollup|sass|tailwindcss|postcss)\s.*--watch(?!=(?:false|0)\b)(?=\s|=|$)/,
 ];
 /** What may come after the command that runs, without deciding how long it runs. */
 const TRAILING = /^(?:(?:cd|pushd|export|set|ulimit|umask|echo|printf|mkdir|sleep|tee|nvm\s+use)(?=\s|$)|true$|:$|$)/;
 const PREFIXES = /^(?:(?:nohup|exec|env|sudo|time)\s+|\w+=\S*\s+)+/;
+/** Stands for a quoted string while a command is read. */
+const QUOTED = '\u0001';
 /** A segment as its program runs it: no redirections, prefixes and program directory dropped, nothing after `--`. */
-const program = (segment: string) => segment.replace(/\s>\s*[^\s>]*/g, ' ').trim().replace(PREFIXES, '').replace(/^\w+=\S*$/, '').replace(/^\S*\//, '').replace(/\s--(?=\s|$)[\s\S]*$/, '');
+const program = (segment: string) => segment.replace(/\s>\s*[^\s>]*/g, ' ').trim().replace(PREFIXES, '').replace(/^\w+=(?!\S*[$`])\S*$/, '').replace(/^\S*\//, '').replace(/\s--(?=\s|$)[\s\S]*$/, '');
 /**
  * Whether a background command is clearly a long-lived service. Commands run one after another, so the last one that
  * is not a trailing `echo`, `sleep`, `tee`… decides how long the whole runs. Anything uncertain is work, which a run
@@ -50,12 +52,17 @@ const program = (segment: string) => segment.replace(/\s>\s*[^\s>]*/g, ' ').trim
  */
 export function longLivedService(command: string): boolean {
   if (command.length > MAX_SERVICE_COMMAND || AGENT_CLI.test(command)) return false;
-  // What is quoted, or written into a heredoc, is text the command prints or passes on, not what it runs; a
-  // redirection's `&` (`2>&1`, `&>`) separates nothing.
-  const runs = command.replace(/<<-?\s*['"]?(\w+)['"]?[^\n]*\n[\s\S]*?(?:\n\1(?=\n|$)|$)/g, ' ').replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ' ')
+  // A heredoc is text passed on, not run; a line continuation joins one command. What is quoted becomes one opaque
+  // token (QUOTED), so it splits nothing but still stands where it was; a comment runs nothing; a redirection's `&`
+  // (`2>&1`, `&>`) separates nothing.
+  const runs = command.replace(/<<-?\s*['"]?(\w+)['"]?[^\n]*\n[\s\S]*?(?:\n\1(?=\n|$)|$)/g, ' ').replace(/\\\n/g, ' ')
+    .replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, QUOTED).replace(/(^|\s)#[^\n]*/g, '$1')
     .replace(/(^|\s)\d+(?=[<>])/g, '$1').replace(/>>?&\d*-?|&>>?|>>?|</g, ' > ');
-  const last = runs.split(/&&|\|\||[;|\n&]/).map(program).filter(segment => !TRAILING.test(segment)).at(-1);
-  return last !== undefined && SERVICES.some(pattern => pattern.test(last));
+  // After `||` the service may never run: the command may end with what came before.
+  if (runs.includes('||')) return false;
+  const last = runs.split(/&&|[;|\n&]/).map(program).filter(segment => !TRAILING.test(segment)).at(-1);
+  // A quoted word in the command that decides can be any name or option (`dev"-check"`, `"--exit-code-from"`): work.
+  return last !== undefined && !last.includes(QUOTED) && SERVICES.some(pattern => pattern.test(last));
 }
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200;
 const text = (value: unknown, max: number): string | undefined => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
