@@ -25,9 +25,9 @@ const MAX_SERVICE_COMMAND = 2000;
 /** A service is what a command segment runs: its program first, after `cd`-free prefixes like `nohup` or `VAR=1`. */
 const SERVICES = [
   /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|preview|watch)\b/,
-  /^(?:(?:npx|bunx)\s+|pnpm\s+(?:dlx|exec)\s+)?(?:vite(?!\s+(?:build|optimize)\b)|http-server|live-server|serve|webpack-dev-server|nodemon|watchexec)(?=\s|$)/,
+  /^(?:(?:npx|bunx)\s+|pnpm\s+(?:dlx|exec)\s+)?(?:vite(?!.*\s(?:build|optimize)(?=\s|$))|http-server|live-server|serve|webpack-dev-server|nodemon|watchexec)(?=\s|$)/,
   /^(?:(?:npx|bunx)\s+)?(?:next\s+(?:dev|start)|nuxt\s+dev|astro\s+dev|ng\s+serve|webpack\s+serve|hugo\s+server|jekyll\s+serve)\b|^cargo\s+watch\b/,
-  /^python[\d.]*\s+(?:-\S+\s+)*-m\s+http\.server\b|^(?:uvicorn|gunicorn|hypercorn)\s|^flask\s+run\b|^(?:bundle\s+exec\s+)?rails\s+s(?:erver)?\b|^php\s+-S\b/,
+  /^(?:python[\d.]*\s+(?:-\S+\s+)*-m\s+)?(?:http\.server|uvicorn|gunicorn|hypercorn|flask\s+run)(?=\s|$)|^(?:bundle\s+exec\s+)?rails\s+s(?:erver)?\b|^php\s+-S\b/,
   // An interpreter running a script named for serving: serve.py, dev-server.mjs, manage.py runserver.
   /^(?:python[\d.]*|node|bun|tsx|ts-node|deno\s+run|ruby|bash|sh)\s+(?:-\S+\s+)*(?:\S*\/)?(?:[\w-]*serve[\w-]*\.(?:py|js|mjs|cjs|ts|rb|sh)|manage\.py\s+runserver)(?=\s|$)/,
   /^docker(?:-compose|\s+compose)\s+up\b(?!.*\s(?:-d|--detach)\b)/,
@@ -35,13 +35,14 @@ const SERVICES = [
   /\s--watch(?!=(?:false|0)\b)(?=\s|=|$)/,
 ];
 const PREFIXES = /^(?:(?:nohup|exec|env|sudo|time)\s+|\w+=\S*\s+)+/;
+/** A segment as its program runs it: prefixes dropped, the program's directory dropped, nothing after `--`. */
+const program = (segment: string) => segment.trim().replace(PREFIXES, '').replace(/^\S*\//, '').replace(/\s--(?=\s|$)[\s\S]*$/, '');
 /** Whether a background command is clearly a long-lived service. Anything uncertain is work, which a run waits for. */
 export function longLivedService(command: string): boolean {
   if (command.length > MAX_SERVICE_COMMAND || AGENT_CLI.test(command)) return false;
   // What is quoted, or written into a heredoc, is text the command prints or passes on, not what it runs.
   const runs = command.replace(/<<-?\s*['"]?(\w+)['"]?[^\n]*\n[\s\S]*?(?:\n\1(?=\n|$)|$)/g, ' ').replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ' ');
-  return runs.split(/&&|\|\||[;|\n&]/).map(segment => segment.trim().replace(PREFIXES, ''))
-    .some(segment => SERVICES.some(pattern => pattern.test(segment)));
+  return runs.split(/&&|\|\||[;|\n&]/).map(program).some(segment => SERVICES.some(pattern => pattern.test(segment)));
 }
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200;
 const text = (value: unknown, max: number): string | undefined => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;

@@ -667,12 +667,13 @@ test('only clearly long-lived services count as services; agent CLIs, builds and
   for (const command of ['npm run dev', 'pnpm dev', 'yarn start', 'bun run preview', 'npx vite --port 5173', 'vite', 'next dev -p 3000',
     'python3 -m http.server 8770', 'cd sample && python3 serve.py', 'node ./scripts/dev-server.mjs', 'uvicorn app:app --reload',
     'python manage.py runserver', 'flask run', 'bundle exec rails s', 'php -S 0.0.0.0:8000', 'docker compose up', 'tail -f log.txt',
-    'tsc --watch', 'nodemon index.js', 'npx serve dist']) assert.equal(longLivedService(command), true, command);
+    'tsc --watch', 'nodemon index.js', 'npx serve dist', 'python3 -m uvicorn app:app', '.venv/bin/python3 -m http.server 8000',
+    './node_modules/.bin/vite --port 5173', 'gunicorn app:app']) assert.equal(longLivedService(command), true, command);
   for (const command of ['codex exec --ephemeral -m gpt-6.1-sol "start the server on 8080" < /dev/null', 'claude -p --no-session-persistence < prompt.md',
     'cd game && codex exec "run npm run dev and check"', 'npm test', 'npm run build', 'pytest -x', 'sleep 300', 'docker compose up -d',
     'make reviews', './run-reviews.sh', 'npm run typecheck', 'python3 train.py', "printf 'npm run dev'; npm run build",
     'echo "start with: npm run dev" && npm test', 'jest --watch=false', 'npx vite build', 'vite build --mode production',
-    'pip install uvicorn && pytest', 'pytest tests/test_server.py', 'cat > notes.md <<EOF\nnpm run dev\nEOF',
+    'pip install uvicorn && pytest', 'npx vite --mode production build', 'rg -- --watch server && npm test', 'pytest tests/test_server.py', 'cat > notes.md <<EOF\nnpm run dev\nEOF',
     `${'x'.repeat(2100)} && npm run dev`, `npm run dev <<'EOF'\n${'prompt '.repeat(700)}\nEOF\ncodex exec -`]) assert.equal(longLivedService(command), false, command);
 });
 
