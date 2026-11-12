@@ -26,11 +26,13 @@ const SERVICES = [
   /\b(?:next\s+(?:dev|start)|nuxt\s+dev|astro\s+dev|ng\s+serve|webpack\s+serve|hugo\s+server|jekyll\s+serve|cargo\s+watch)\b/,
   /\bhttp\.server\b|\brunserver\b|\b(?:uvicorn|gunicorn|hypercorn)\b|\bflask\s+run\b|\brails\s+s(?:erver)?\b|\bphp\s+-S\b/,
   /[\w./-]*serve[\w-]*\.(?:py|js|mjs|cjs|ts|rb|go|sh)\b/,
-  /\btail\s+-[fF]\b|--watch\b/,
+  /\btail\s+-[fF]\b|--watch(?!=(?:false|0)\b)\b/,
 ];
 /** Whether a background command is clearly a long-lived service. Anything uncertain is work, which a run waits for. */
 export function longLivedService(command: string): boolean {
   if (AGENT_CLI.test(command)) return false;
+  // What is quoted is text the command prints or passes on, not what it runs.
+  command = command.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ' ');
   if (/\bdocker(?:-compose|\s+compose)\s+up\b/.test(command) && !/\s(?:-d|--detach)\b/.test(command)) return true;
   return SERVICES.some(pattern => pattern.test(command));
 }

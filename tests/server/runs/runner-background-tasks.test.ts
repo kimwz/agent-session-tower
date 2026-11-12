@@ -670,7 +670,8 @@ test('only clearly long-lived services count as services; agent CLIs, builds and
     'tsc --watch', 'nodemon index.js', 'npx serve dist']) assert.equal(longLivedService(command), true, command);
   for (const command of ['codex exec --ephemeral -m gpt-6.1-sol "start the server on 8080" < /dev/null', 'claude -p --no-session-persistence < prompt.md',
     'cd game && codex exec "run npm run dev and check"', 'npm test', 'npm run build', 'pytest -x', 'sleep 300', 'docker compose up -d',
-    'make reviews', './run-reviews.sh', 'npm run typecheck', 'python3 train.py']) assert.equal(longLivedService(command), false, command);
+    'make reviews', './run-reviews.sh', 'npm run typecheck', 'python3 train.py', "printf 'npm run dev'; npm run build",
+    'echo "start with: npm run dev" && npm test', 'jest --watch=false']) assert.equal(longLivedService(command), false, command);
 });
 
 test("an orchestrator's background agent workers hold the owner's run; a server started beside them does not", async t => {
@@ -696,6 +697,20 @@ test('a background command Tower did not see is waited for', async t => {
     later: [{ when: 'done', frames: [notified('unknown-1'), takes('unknown-1'), says('Done.'), result] }] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Run it', {}, { origin: { kind: 'owner' } });
+  await until(() => find(manager, run.id).backgroundWait);
+  assert.equal(find(manager, run.id).status, 'running');
+  await release('done');
+  assert.equal((await settled(manager, run.id)).status, 'completed');
+});
+
+test("a subagent's Bash call does not decide what a main-conversation task is", async t => {
+  // The subagent ran a server command with the same tool use id shape; the task the main conversation started is work.
+  const { manager, release, cleanup } = await fixture({
+    first: [{ type: 'assistant', parent_tool_use_id: 'agent-1', message: { content: [{ type: 'tool_use', id: 'tool-shared', name: 'Bash', input: { command: 'npm run dev' } }] } },
+      started('build-1', { task_type: 'local_bash', tool_use_id: 'tool-shared' })],
+    later: [{ when: 'done', frames: [notified('build-1'), takes('build-1'), says('Built.'), result] }] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Build it', {}, { origin: { kind: 'owner' } });
   await until(() => find(manager, run.id).backgroundWait);
   assert.equal(find(manager, run.id).status, 'running');
   await release('done');

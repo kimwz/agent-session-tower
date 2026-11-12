@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.182.1] - 2026-11-12
+
+- **백그라운드로 띄운 작업자를 기다리는 턴이 다시 "작업중"으로 보입니다.** 1.182.0은 백그라운드로 실행한 명령을 모두 "끝나지 않는 서버일 수 있는 것"으로 보아 소유자의 턴을 답에서 끝냈습니다. 그래서 `codex exec` 작업자를 백그라운드로 여럿 띄우고 결과를 기다리는 대화가 작업 중인데도 끝난 것으로 보였고, 작업자가 끝난 뒤 Claude가 이어서 하는 턴은 어느 실행에도 속하지 않아 Tower 도구를 쓸 수 없고 권한 요청이 거부됐습니다. 이제 Tower는 Claude가 실행한 명령을 보고, 개발 서버·정적 서버·감시 프로세스처럼 분명히 계속 떠 있는 것(`npm run dev`, `vite`, `python -m http.server`, `…serve.py`, `uvicorn`, `docker compose up`, `tail -f`, `--watch` 등)만 소유자의 턴을 붙잡지 않게 합니다. 에이전트 실행(`codex`, `claude` 등), 빌드·테스트, 그 밖에 판단이 서지 않는 명령은 1.181.0처럼 끝날 때까지 턴을 열어 둡니다. 1.182.0의 나머지(대기 한도, 다음 메시지가 남은 프로세스의 자기 실행이 되는 것, 백그라운드 작업 중지)는 그대로입니다.
+
 ## [1.182.0] - 2026-11-12
 
 - **서버를 띄운 턴이 "작업중"에 머물지 않습니다.** 에이전트가 개발 서버·감시 프로세스처럼 끝나지 않는 명령을 백그라운드로 띄우고 답하면, Tower는 그 명령이 끝날 때까지 턴을 열어 두어 세션이 계속 작업중으로 보였습니다. 그 사이 보낸 메시지도 그 턴에 합쳐져 끝나지 않았고, 2시간 한도에 닿아도 Claude가 백그라운드 명령을 기다리느라 종료하지 않아 영영 끝나지 않을 수 있었습니다. 이제 소유자가 보낸 턴은 답이 오면 끝납니다. Claude 프로세스는 그 명령을 위해 그대로 남아 서버가 꺼지지 않고, 명령이 끝나면 Claude가 같은 대화에 스스로 알립니다.
