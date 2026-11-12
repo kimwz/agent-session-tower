@@ -274,7 +274,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       // Never reported as success.
       waitTimedOut = true;
       const minutes = Math.round(waitMaxMs / 60_000);
-      if (waitsForProcesses(current)) {
+      // Work an earlier run left (the owner's server) is not this run's to end.
+      if (waitsForProcesses(current) && !tasks.detachedCount) {
         // Its result is read as the work's end, and no later run of its origin could take the process (a trigger's
         // next event is another origin), so the work ends with it, as the owner's Stop does. Closing input alone no
         // longer ends Claude while background work runs.
@@ -319,7 +320,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
           if (!streamError || current !== served || turnActive || child.stdin.writableEnded) return;
           if (!tasks.runningCount && !tasks.detachedCount) { endWait(); closeInput(); return; }
           // The owner's process is kept for its work; work others read ends with its failed turn.
-          if (waitsForProcesses(served)) { closeInput(); host.stop(last.id, owned); return; }
+          if (waitsForProcesses(served) && !tasks.detachedCount) { closeInput(); host.stop(last.id, owned); return; }
           const failure = streamError; streamError = undefined;
           release(failure); owned.finishInput?.();
         }, finishRecheckMs);
@@ -333,6 +334,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
           if (holding(served)) { owned.finishInput?.(); return; }
           // A run ends here only once a new conversation's identity is saved, as at an exit (see the close handler).
           if (identitySaving) { void identitySaved.then(() => owned.finishInput?.()); return; }
+          // It failed meanwhile (its identity could not be saved): never released as a success.
+          if (streamError) { owned.finishInput?.(); return; }
           // Processes it does not wait for, and work an earlier run left, keep the process after the run.
           if (tasks.runningCount || tasks.detachedCount) { release(); owned.finishInput?.(); return; }
           endWait(); closeInput();
