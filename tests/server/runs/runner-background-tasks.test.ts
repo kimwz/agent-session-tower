@@ -669,7 +669,7 @@ test('only clearly long-lived services count as services; agent CLIs, builds and
     'python manage.py runserver', 'flask run', 'bundle exec rails s', 'php -S 0.0.0.0:8000', 'docker compose up', 'tail -f log.txt',
     'tsc --watch', 'nodemon index.js', 'npx serve dist', 'python3 -m uvicorn app:app', '.venv/bin/python3 -m http.server 8000',
     './node_modules/.bin/vite --port 5173', 'gunicorn app:app', 'PORT=8795 node bin/agent-session-tower.mjs run --port 8795 --state-dir /tmp/s --no-open',
-    'cd sample && nohup python3 serve.py > serve.log 2>&1', 'export NODE_ENV=development && npm run dev']) assert.equal(longLivedService(command), true, command);
+    'cd sample && nohup python3 serve.py > serve.log 2>&1', 'npm run dev>dev.log 2>&1', 'npm run dev>>dev.log 2>&1', 'python3 -m http.server 8000</dev/null', 'export NODE_ENV=development && npm run dev']) assert.equal(longLivedService(command), true, command);
   for (const command of ['codex exec --ephemeral -m gpt-6.1-sol "start the server on 8080" < /dev/null', 'claude -p --no-session-persistence < prompt.md',
     'cd game && codex exec "run npm run dev and check"', 'npm test', 'npm run build', 'pytest -x', 'sleep 300', 'docker compose up -d',
     'make reviews', './run-reviews.sh', 'npm run typecheck', 'python3 train.py', "printf 'npm run dev'; npm run build",

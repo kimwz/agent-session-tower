@@ -52,7 +52,7 @@ export function longLivedService(command: string): boolean {
   // What is quoted, or written into a heredoc, is text the command prints or passes on, not what it runs; a
   // redirection's `&` (`2>&1`, `&>`) separates nothing.
   const runs = command.replace(/<<-?\s*['"]?(\w+)['"]?[^\n]*\n[\s\S]*?(?:\n\1(?=\n|$)|$)/g, ' ').replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ' ')
-    .replace(/\d*>>?&\d*-?|&>>?/g, ' > ');
+    .replace(/\d*>>?&\d*-?|&>>?/g, ' > ').replace(/\d*>>?|</g, ' > ');
   const segments = runs.split(/&&|\|\||[;|\n&]/).map(program);
   return segments.some(segment => SERVICES.some(pattern => pattern.test(segment)))
     && segments.every(segment => SETUP.test(segment) || SERVICES.some(pattern => pattern.test(segment)));
