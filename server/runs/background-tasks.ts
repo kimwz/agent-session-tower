@@ -12,12 +12,28 @@ const TERMINAL = new Set(['completed', 'failed', 'killed', 'stopped']);
 /** Teammates idle between assignments and never finish on their own. */
 const OPEN_ENDED_TYPES = new Set(['in_process_teammate']);
 /**
- * Processes left running: a command run in the background or a monitor's feed. They may be services (a dev server, a
- * watcher) that never end, unlike a background agent. Claude Code groups the same task types as processes.
+ * `service`: a long-lived service run in the background (a dev server, a watcher), which never ends by itself. Only an
+ * owner's run ends before those (see claudeProcess). Everything else is `work` a run waits for: background agents,
+ * monitors (bounded by their timeout) and any other command, such as an agent CLI, a build or tests.
  */
-const PROCESS_TYPES = new Set(['local_bash', 'monitor_mcp', 'monitor_ws']);
-type Kind = 'process' | 'work';
-const kindOf = (event: Message): Kind => PROCESS_TYPES.has(event.task_type) ? 'process' : 'work';
+type Kind = 'service' | 'work';
+/** Main-conversation Bash commands kept to classify the tasks they start; the most recent ones are enough. */
+const MAX_COMMANDS = 200;
+const AGENT_CLI = /(?:^|[\s;&|(`/])(?:codex|claude|gemini|opencode|aider)(?=\s|$)/;
+const SERVICES = [
+  /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|preview|watch)\b/,
+  /(?:^|[\s;&|(])(?:npx\s+)?(?:vite|http-server|live-server|serve|webpack-dev-server|nodemon|watchexec)(?=\s|$)/,
+  /\b(?:next\s+(?:dev|start)|nuxt\s+dev|astro\s+dev|ng\s+serve|webpack\s+serve|hugo\s+server|jekyll\s+serve|cargo\s+watch)\b/,
+  /\bhttp\.server\b|\brunserver\b|\b(?:uvicorn|gunicorn|hypercorn)\b|\bflask\s+run\b|\brails\s+s(?:erver)?\b|\bphp\s+-S\b/,
+  /[\w./-]*serve[\w-]*\.(?:py|js|mjs|cjs|ts|rb|go|sh)\b/,
+  /\btail\s+-[fF]\b|--watch\b/,
+];
+/** Whether a background command is clearly a long-lived service. Anything uncertain is work, which a run waits for. */
+export function longLivedService(command: string): boolean {
+  if (AGENT_CLI.test(command)) return false;
+  if (/\bdocker(?:-compose|\s+compose)\s+up\b/.test(command) && !/\s(?:-d|--detach)\b/.test(command)) return true;
+  return SERVICES.some(pattern => pattern.test(command));
+}
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200;
 const text = (value: unknown, max: number): string | undefined => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
 const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -43,6 +59,8 @@ export class BackgroundTaskTracker {
    * that reply was found too close to tell); `unsure` marks a notice only such a close reply may have taken.
    */
   private readonly unread = new Map<string, { task: FinishedTask; endedAt: number; reply: number; unsure?: true; detached?: true }>();
+  /** Bash commands of the main conversation, by tool use id, to classify the tasks they start. */
+  private readonly commands = new Map<string, string>();
   /** Model replies of the main conversation seen so far, and the one under way. */
   private replies = 0;
   private reply?: string;
@@ -50,7 +68,24 @@ export class BackgroundTaskTracker {
 
   constructor(options: { now?: () => number } = {}) { this.now = options.now ?? Date.now; }
 
+  private kindOf(event: Message): Kind {
+    if (event.task_type !== 'local_bash' || event.kind === 'monitor') return 'work';
+    const command = validId(event.tool_use_id) ? this.commands.get(event.tool_use_id) : undefined;
+    return command !== undefined && longLivedService(command) ? 'service' : 'work';
+  }
+
+  /** A main-conversation Bash call names the command its task runs: a task starts after its tool use. */
+  private observeToolUses(event: Message): void {
+    if (event.parent_tool_use_id != null) return;
+    for (const block of Array.isArray(event.message?.content) ? event.message.content : []) {
+      if (block?.type !== 'tool_use' || block.name !== 'Bash' || !validId(block.id) || typeof block.input?.command !== 'string') continue;
+      this.commands.delete(block.id); this.commands.set(block.id, block.input.command.slice(0, 4000));
+      if (this.commands.size > MAX_COMMANDS) this.commands.delete(this.commands.keys().next().value!);
+    }
+  }
+
   observe(event: Message): TaskChange {
+    if (event?.type === 'assistant') { this.observeToolUses(event); return undefined; }
     if (event?.type !== 'system') return undefined;
     const id = event.task_id;
     if (!validId(id)) return undefined;
@@ -59,8 +94,8 @@ export class BackgroundTaskTracker {
       // tasks report to that subagent; the background agent itself stands for them.
       if (event.ambient === true || event.skip_transcript === true || event.owned_by_subagent === true || OPEN_ENDED_TYPES.has(event.task_type)
         || this.running.has(id) || this.foreground.has(id) || this.detached.has(id)) return undefined;
-      if (event.is_backgrounded === false) { this.foreground.set(id, kindOf(event)); return undefined; }
-      this.running.set(id, kindOf(event));
+      if (event.is_backgrounded === false) { this.foreground.set(id, this.kindOf(event)); return undefined; }
+      this.running.set(id, this.kindOf(event));
       return 'started';
     }
     let moved = false;
@@ -113,8 +148,8 @@ export class BackgroundTaskTracker {
   }
 
   get runningCount(): number { return this.running.size; }
-  /** Running tasks a run waits for: background work, and processes too when `processes` (see PROCESS_TYPES). */
-  holding(processes: boolean): number { return processes ? this.running.size : [...this.running.values()].filter(kind => kind === 'work').length; }
+  /** Running tasks a run waits for: its work, and services too when `services` (see Kind). */
+  holding(services: boolean): number { return services ? this.running.size : [...this.running.values()].filter(kind => kind === 'work').length; }
   /** Tasks still running, or ended without Claude having taken the notice, that a run waits for. */
   get outstanding(): number { return this.running.size + this.unreadCount; }
   get unreadCount(): number { return [...this.unread.values()].filter(entry => !entry.detached).length; }

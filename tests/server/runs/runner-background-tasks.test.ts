@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { isSavedRun } from '../../../server/runs/saved-state.js';
-import { BackgroundTaskTracker } from '../../../server/runs/background-tasks.js';
+import { BackgroundTaskTracker, longLivedService } from '../../../server/runs/background-tasks.js';
 import { CLAUDE_FINISH_RECHECK_MS } from '../../../server/runs/claude-turn.js';
 import { RunManager } from './sql-fixture.js';
 import { projectSessionStates } from '../../../server/sessions/snapshot.js';
@@ -59,7 +59,12 @@ createInterface({ input: process.stdin }).on('line', line => {
 // Background work a run waits for whoever started it: a background agent. A background command or monitor (`process`)
 // may be a service that never ends; only work read by someone other than the owner waits for those.
 const started = (taskId: string, extra: Record<string, unknown> = {}) => ({ type: 'system', subtype: 'task_started', task_id: taskId, task_type: 'local_agent', description: 'Run the reviews', ...extra });
-const process_ = (taskId: string, extra: Record<string, unknown> = {}) => started(taskId, { task_type: 'local_bash', description: 'Start the sample server', ...extra });
+/** A background Bash command as Claude runs it: its tool use names the command, then its task starts. */
+const bash = (taskId: string, command: string) => [
+  { type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: `tool-${taskId}`, name: 'Bash', input: { command, run_in_background: true } }] } },
+  started(taskId, { task_type: 'local_bash', tool_use_id: `tool-${taskId}`, description: command })];
+/** A long-lived service (a dev server): it never ends by itself. */
+const service = (taskId: string) => bash(taskId, 'cd sample && python3 serve.py');
 const notified = (taskId: string, status = 'completed') => ({ type: 'system', subtype: 'task_notification', task_id: taskId, status, summary: 'Background command "Run the reviews" completed (exit code 0)', output_file: '/tmp/reviews.out' });
 const says = (text: string, id?: string) => ({ type: 'assistant', message: { ...(id ? { id } : {}), content: [{ type: 'text', text }] } });
 // Claude replays each notice it takes into the conversation.
@@ -271,7 +276,7 @@ test("background work still running at the limit ends the owner's turn as an err
 test('work others read ends at the limit together with its process', async t => {
   // A trigger's next event is another origin: a process kept for it could take no later run and would hold the
   // conversation, so it stops (closing input alone no longer ends Claude while the work runs).
-  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1')], lingerOnClose: true }, { waitMaxMs: 200 });
+  const { manager, entries, cleanup } = await fixture({ first: [...service('server-1')], lingerOnClose: true }, { waitMaxMs: 200 });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Start the dev server', {}, { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
   const done = await settled(manager, run.id);
@@ -282,7 +287,7 @@ test('work others read ends at the limit together with its process', async t => 
 });
 
 test("a master's message waits for its background processes like other work read by someone else", async t => {
-  const { manager, release, cleanup } = await fixture({ first: [process_('reviews-1'), says('I will report when the reviews finish.')],
+  const { manager, release, cleanup } = await fixture({ first: [...service('reviews-1'), says('I will report when the reviews finish.')],
     later: [{ when: 'done', frames: [notified('reviews-1'), takes('reviews-1'), says('All reviews passed.'), result] }] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'owner' }, sender: 'master' });
@@ -295,7 +300,7 @@ test("a master's message waits for its background processes like other work read
 });
 
 test('Stop on a run whose process was kept ends that work and keeps the run\'s outcome', async t => {
-  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1'), says('Server up.')] });
+  const { manager, entries, cleanup } = await fixture({ first: [...service('server-1'), says('Server up.')] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Start the sample server', {}, { origin: { kind: 'owner' } });
   assert.equal((await settled(manager, run.id)).status, 'completed');
@@ -309,7 +314,7 @@ test('Stop on a run whose process was kept ends that work and keeps the run\'s o
 });
 
 test('a forced update stops a kept process at its deadline and keeps the outcome of the run it served', async t => {
-  const { manager, cleanup } = await fixture({ first: [process_('server-1'), says('Server up.')] });
+  const { manager, cleanup } = await fixture({ first: [...service('server-1'), says('Server up.')] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Start the sample server', {}, { origin: { kind: 'owner' } });
   assert.equal((await settled(manager, run.id)).status, 'completed');
@@ -324,7 +329,7 @@ test('a forced update stops a kept process at its deadline and keeps the outcome
 });
 
 test('a run going into a kept process passes the launch gate first', async t => {
-  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1'), says('Server up.')] });
+  const { manager, entries, cleanup } = await fixture({ first: [...service('server-1'), says('Server up.')] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Start the dev server', {}, { origin: { kind: 'owner' } });
   assert.equal((await settled(manager, run.id)).status, 'completed');
@@ -338,7 +343,7 @@ test('a run going into a kept process passes the launch gate first', async t => 
 
 test('a failed turn whose server keeps running ends as an error and keeps the process for the next message', async t => {
   // Closing input would not end Claude while the server runs: the run must not wait for an exit that never comes.
-  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1'), { ...result, is_error: true, errors: ['Model overloaded'] }],
+  const { manager, entries, cleanup } = await fixture({ first: [...service('server-1'), { ...result, is_error: true, errors: ['Model overloaded'] }],
     noResult: true, lingerOnClose: true, reply: [says('Here is the answer.')] });
   t.after(cleanup);
   const first = await manager.enqueue(SESSION, 'Start the sample server', {}, { origin: { kind: 'owner' } });
@@ -352,7 +357,7 @@ test('a failed turn whose server keeps running ends as an error and keeps the pr
 
 test("an owner's turn ends at its answer while a server it started keeps running, and the next messages are runs of their own", async t => {
   // Issue #234: the server never ends. The answer ends the run; the process stays, so the server is not killed.
-  const { manager, entries, release, cleanup } = await fixture({ first: [process_('server-1'), says('The sample server is up on port 8770.')],
+  const { manager, entries, release, cleanup } = await fixture({ first: [...service('server-1'), says('The sample server is up on port 8770.')],
     reply: [says('Here is the answer.')], replyDelay: 150,
     later: [{ when: 'stopped', frames: [notified('server-1', 'killed'), takes('server-1'), says('The server stopped.'), result] }] });
   t.after(cleanup);
@@ -388,7 +393,7 @@ test("an owner's turn ends at its answer while a server it started keeps running
 });
 
 test('a run others read waits for its background processes as before', async t => {
-  const { manager, release, cleanup } = await fixture({ first: [process_('reviews-1'), says('I will report when the reviews finish.')],
+  const { manager, release, cleanup } = await fixture({ first: [...service('reviews-1'), says('I will report when the reviews finish.')],
     later: [{ when: 'done', frames: [notified('reviews-1'), takes('reviews-1'), says('All reviews passed.'), result] }] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
@@ -402,7 +407,7 @@ test('a run others read waits for its background processes as before', async t =
 });
 
 test('a run that cannot go into a kept process waits for it instead of starting a second Claude', async t => {
-  const { manager, entries, cleanup } = await fixture({ first: [process_('server-1'), says('Server up.')] });
+  const { manager, entries, cleanup } = await fixture({ first: [...service('server-1'), says('Server up.')] });
   t.after(cleanup);
   const first = await manager.enqueue(SESSION, 'Start the sample server', {}, { origin: { kind: 'owner' } });
   assert.equal((await settled(manager, first.id)).status, 'completed');
@@ -656,4 +661,43 @@ test('a repeated result is not evidence that Claude consumed a pending task noti
   assert.equal((await settled(manager, run.id)).status, 'completed');
   assert.match((await entries())[1].user!, /Background work you started/);
   assert.match(find(manager, run.id).output, /Read the review/);
+});
+
+test('only clearly long-lived services count as services; agent CLIs, builds and anything unsure are work', () => {
+  for (const command of ['npm run dev', 'pnpm dev', 'yarn start', 'bun run preview', 'npx vite --port 5173', 'vite', 'next dev -p 3000',
+    'python3 -m http.server 8770', 'cd sample && python3 serve.py', 'node ./scripts/dev-server.mjs', 'uvicorn app:app --reload',
+    'python manage.py runserver', 'flask run', 'bundle exec rails s', 'php -S 0.0.0.0:8000', 'docker compose up', 'tail -f log.txt',
+    'tsc --watch', 'nodemon index.js', 'npx serve dist']) assert.equal(longLivedService(command), true, command);
+  for (const command of ['codex exec --ephemeral -m gpt-6.1-sol "start the server on 8080" < /dev/null', 'claude -p --no-session-persistence < prompt.md',
+    'cd game && codex exec "run npm run dev and check"', 'npm test', 'npm run build', 'pytest -x', 'sleep 300', 'docker compose up -d',
+    'make reviews', './run-reviews.sh', 'npm run typecheck', 'python3 train.py']) assert.equal(longLivedService(command), false, command);
+});
+
+test("an orchestrator's background agent workers hold the owner's run; a server started beside them does not", async t => {
+  // Session 9f383bba on 1.182.0: five `codex exec` workers and a sample server; the run must wait for the workers only.
+  const { manager, entries, release, cleanup } = await fixture({
+    first: [...bash('worker-1', 'codex exec --ephemeral -m gpt-6-astra "Build the props" < /dev/null'), ...service('server-1'), says('The worker is running.')],
+    later: [{ when: 'worker', frames: [notified('worker-1'), takes('worker-1'), says('The props are done.'), result] }] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Build the props with a worker', {}, { origin: { kind: 'owner' } });
+  const waiting = await until(() => find(manager, run.id).backgroundWait);
+  assert.equal(waiting.tasks, 1, 'waits for the worker, not the server');
+  assert.equal(find(manager, run.id).status, 'running');
+  await release('worker');
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /The props are done\.[\s\S]*1 background task keeps running/);
+  assert.ok(ownedTurn(manager, run.id), 'the server keeps running in the kept process');
+  assert.equal((await entries()).some(entry => entry.end), false);
+});
+
+test('a background command Tower did not see is waited for', async t => {
+  const { manager, release, cleanup } = await fixture({ first: [started('unknown-1', { task_type: 'local_bash', tool_use_id: 'missing' })],
+    later: [{ when: 'done', frames: [notified('unknown-1'), takes('unknown-1'), says('Done.'), result] }] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Run it', {}, { origin: { kind: 'owner' } });
+  await until(() => find(manager, run.id).backgroundWait);
+  assert.equal(find(manager, run.id).status, 'running');
+  await release('done');
+  assert.equal((await settled(manager, run.id)).status, 'completed');
 });
