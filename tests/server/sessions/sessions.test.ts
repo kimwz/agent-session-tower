@@ -622,7 +622,7 @@ test('an open Claude window waiting for input while its background shell runs is
 
 test('a slash command Claude answers is the request and its answer the work, as with a typed request', async (t) => {
   const { service, claude } = await fixture(t);
-  const start = Date.now() - 60_000;
+  const start = Date.now() - 10_000; // well inside the two minutes a log turn stays fresh
   const at = (seconds: number) => new Date(start + seconds * 1000).toISOString();
   const base = { sessionId: rootId, cwd: '/work/game', entrypoint: 'cli' };
   const rows = [
