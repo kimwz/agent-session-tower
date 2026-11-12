@@ -56,8 +56,8 @@ createInterface({ input: process.stdin }).on('line', line => {
 }).on('close', () => { log({ end: true }); if (!script.lingerOnClose) process.exit(0); });
 `;
 
-// Background work a run waits for whoever started it: a background agent. A background command or monitor (`process`)
-// may be a service that never ends; only work read by someone other than the owner waits for those.
+// Background work a run waits for whoever started it: a background agent, or a command that is not a long-lived
+// service. A service (a dev server) never ends; only a run someone other than the owner reads waits for it.
 const started = (taskId: string, extra: Record<string, unknown> = {}) => ({ type: 'system', subtype: 'task_started', task_id: taskId, task_type: 'local_agent', description: 'Run the reviews', ...extra });
 /** A background Bash command as Claude runs it: its tool use names the command, then its task starts. */
 const bash = (taskId: string, command: string) => [
@@ -286,9 +286,9 @@ test('work others read ends at the limit together with its process', async t => 
   assert.deepEqual((await entries()).flatMap(entry => entry.user ?? []), ['Start the dev server']);
 });
 
-test("a master's message waits for its background processes like other work read by someone else", async t => {
-  const { manager, release, cleanup } = await fixture({ first: [...service('reviews-1'), says('I will report when the reviews finish.')],
-    later: [{ when: 'done', frames: [notified('reviews-1'), takes('reviews-1'), says('All reviews passed.'), result] }] });
+test("a master's message waits even for a service it started, like other work read by someone else", async t => {
+  const { manager, release, cleanup } = await fixture({ first: [...service('server-1'), says('The server is up; I will report when it stops.')],
+    later: [{ when: 'done', frames: [notified('server-1'), takes('server-1'), says('All reviews passed.'), result] }] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'owner' }, sender: 'master' });
   await until(() => find(manager, run.id).backgroundWait);
@@ -392,9 +392,9 @@ test("an owner's turn ends at its answer while a server it started keeps running
   await until(() => manager.list().every(run => !run.backgroundWait));
 });
 
-test('a run others read waits for its background processes as before', async t => {
-  const { manager, release, cleanup } = await fixture({ first: [...service('reviews-1'), says('I will report when the reviews finish.')],
-    later: [{ when: 'done', frames: [notified('reviews-1'), takes('reviews-1'), says('All reviews passed.'), result] }] });
+test('a run others read waits even for a service it started, as before', async t => {
+  const { manager, release, cleanup } = await fixture({ first: [...service('server-1'), says('The server is up; I will report when it stops.')],
+    later: [{ when: 'done', frames: [notified('server-1'), takes('server-1'), says('All reviews passed.'), result] }] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
   const waiting = await until(() => find(manager, run.id).backgroundWait);
@@ -669,12 +669,16 @@ test('only clearly long-lived services count as services; agent CLIs, builds and
     'python manage.py runserver', 'flask run', 'bundle exec rails s', 'php -S 0.0.0.0:8000', 'docker compose up', 'tail -f log.txt',
     'tsc --watch', 'nodemon index.js', 'npx serve dist', 'python3 -m uvicorn app:app', '.venv/bin/python3 -m http.server 8000',
     './node_modules/.bin/vite --port 5173', 'gunicorn app:app', 'PORT=8795 node bin/agent-session-tower.mjs run --port 8795 --state-dir /tmp/s --no-open',
-    'cd sample && nohup python3 serve.py > serve.log 2>&1', 'npm run dev>dev.log 2>&1', 'npm run dev>>dev.log 2>&1', 'python3 -m http.server 8000</dev/null', 'export NODE_ENV=development && npm run dev']) assert.equal(longLivedService(command), true, command);
+    'cd sample && nohup python3 serve.py > serve.log 2>&1', 'rm -rf /tmp/t; mkdir -p /tmp/t/home; cd x && node bin/agent-session-tower.mjs run --port 8795',
+    'pkill -f x; sleep 0.5; cd d && exec python3 -m http.server 8765', 'npm run build 2>&1 | tail -1 && node bin/agent-session-tower.mjs run --port 8796',
+    'source .venv/bin/activate && python -m http.server', 'npm run dev 2>&1 | tee dev.log', 'cd app && npm i && npm run dev',
+    'kubectl port-forward svc/db 5432:5432', 'ngrok http 3000', 'ssh -N -L 5432:localhost:5432 db-host', 'tsx watch src/index.ts', 'npm run dev>dev.log 2>&1', 'npm run dev>>dev.log 2>&1', 'python3 -m http.server 8000</dev/null', 'export NODE_ENV=development && npm run dev']) assert.equal(longLivedService(command), true, command);
   for (const command of ['codex exec --ephemeral -m gpt-6.1-sol "start the server on 8080" < /dev/null', 'claude -p --no-session-persistence < prompt.md',
     'cd game && codex exec "run npm run dev and check"', 'npm test', 'npm run build', 'pytest -x', 'sleep 300', 'docker compose up -d',
     'make reviews', './run-reviews.sh', 'npm run typecheck', 'python3 train.py', "printf 'npm run dev'; npm run build",
     'echo "start with: npm run dev" && npm test', 'jest --watch=false', 'npx vite build', 'vite build --mode production',
-    'pip install uvicorn && pytest', 'npm run dev2>dev.log 2>&1', 'npm run dev2>>dev.log 2>&1', 'npm run dev & source ./run-tests.sh', 'npm run dev >dev.log 2>&1 & npm test', 'npm run dev-check', 'npm run start:test',
+    'pip install uvicorn && pytest', 'bash build-server.sh', 'node scripts/build-server.mjs', 'python3 setup-server.py', 'sh server.sh stop',
+    'python3 server.py migrate', 'npm test --watch', 'argo submit wf.yaml --watch', 'tail -f --pid=123 run.log', 'tail -f run.log --pid 123', 'npm run dev2>dev.log 2>&1', 'npm run dev2>>dev.log 2>&1', 'npm run dev & source ./run-tests.sh', 'npm run dev >dev.log 2>&1 & npm test', 'npm run dev-check', 'npm run start:test',
     'docker compose up --exit-code-from tests', 'docker compose up --wait', 'gh pr checks 236 --watch', 'kubectl rollout status deploy/app --watch',
     'python observe.py', 'python scripts/test_server.py', 'bash scripts/deploy-server.sh', 'node scripts/check-server.mjs', 'npx vite --mode production build', 'rg -- --watch server && npm test', 'pytest tests/test_server.py', 'cat > notes.md <<EOF\nnpm run dev\nEOF',
     `${'x'.repeat(2100)} && npm run dev`, `npm run dev <<'EOF'\n${'prompt '.repeat(700)}\nEOF\ncodex exec -`]) assert.equal(longLivedService(command), false, command);
@@ -736,10 +740,18 @@ test('the tracker classifies each task by its own Bash call, in any order, and m
   tracker.observe(started('feed', { task_type: 'local_bash', tool_use_id: 't-feed' }));
   assert.equal(tracker.holding(false), 2, 'the worker and the monitor');
   assert.equal(tracker.holding(true), 3);
+  // A persistent monitor never ends by itself.
+  tracker.observe({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id: 't-watch', name: 'Monitor', input: { command: 'tail -f a.log', persistent: true } }] } });
+  tracker.observe(started('watch', { task_type: 'local_bash', tool_use_id: 't-watch' }));
+  assert.equal(tracker.holding(false), 2);
   // A foreground server moved to the background keeps its kind.
   tracker.observe(call('t-fg', 'python3 -m http.server 8000'));
   tracker.observe(started('fg', { task_type: 'local_bash', tool_use_id: 't-fg', is_backgrounded: false }));
   tracker.observe({ type: 'system', subtype: 'task_updated', task_id: 'fg', patch: { is_backgrounded: true } });
   assert.equal(tracker.holding(false), 2);
-  assert.equal(tracker.holding(true), 4);
+  assert.equal(tracker.holding(true), 5);
+  // A task whose call comes after it started stays work.
+  tracker.observe(started('late', { task_type: 'local_bash', tool_use_id: 't-late' }));
+  tracker.observe(call('t-late', 'npm run dev'));
+  assert.equal(tracker.holding(false), 3);
 });

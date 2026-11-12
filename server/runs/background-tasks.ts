@@ -22,30 +22,31 @@ const MAX_COMMANDS = 200;
 const AGENT_CLI = /(?:^|[\s;&|(`/])(?:codex|claude|gemini|opencode|aider)(?=\s|$)/;
 /** Longer commands (a heredoc prompt, a script) are not a service started on its own: work. */
 const MAX_SERVICE_COMMAND = 2000;
-/** A service is what a command segment runs: its program first, after `cd`-free prefixes like `nohup` or `VAR=1`. */
+/** A service is what a command runs last: its program first, after prefixes like `nohup` or `VAR=1`. */
 const SERVICES = [
   /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|preview|watch)(?=\s|$)/,
-  /^(?:(?:npx|bunx)\s+|pnpm\s+(?:dlx|exec)\s+)?(?:vite(?!.*\s(?:build|optimize)(?=\s|$))|http-server|live-server|serve|webpack-dev-server|nodemon|watchexec)(?=\s|$)/,
-  /^(?:(?:npx|bunx)\s+)?(?:next\s+(?:dev|start)|nuxt\s+dev|astro\s+dev|ng\s+serve|webpack\s+serve|hugo\s+server|jekyll\s+serve)(?=\s|$)|^cargo\s+watch(?=\s|$)/,
+  /^(?:(?:npx|bunx)\s+|pnpm\s+(?:dlx|exec)\s+)?(?:vite(?!.*\s(?:build|optimize)(?=\s|$))|http-server|live-server|serve|webpack-dev-server|nodemon|watchexec|ngrok)(?=\s|$)/,
+  /^(?:(?:npx|bunx)\s+)?(?:next\s+(?:dev|start)|nuxt\s+dev|astro\s+dev|ng\s+serve|webpack\s+serve|hugo\s+server|jekyll\s+serve|tsx\s+watch)(?=\s|$)|^cargo\s+watch(?=\s|$)/,
   /^(?:python[\d.]*\s+(?:-\S+\s+)*-m\s+)?(?:http\.server|uvicorn|gunicorn|hypercorn|flask\s+run)(?=\s|$)|^(?:bundle\s+exec\s+)?rails\s+s(?:erver)?(?=\s|$)|^php\s+-S(?=\s|$)/,
-  // An interpreter running a script named for serving (serve.py, dev-server.mjs, manage.py runserver), not one that
-  // checks, tests or deploys a server.
-  /^(?:python[\d.]*|node|bun|tsx|ts-node|deno\s+run|ruby|bash|sh)\s+(?:-\S+\s+)*(?:\S*\/)?(?:(?![\w-]*(?:test|check|deploy))(?:[\w-]*[-_])?server?(?:[-_][\w-]*)?\.(?:py|js|mjs|cjs|ts|rb|sh)|manage\.py\s+runserver)(?=\s|$)/,
+  // An interpreter running a script named for serving, with nothing after it but options.
+  /^(?:python[\d.]*|node|bun|tsx|ts-node|deno\s+run|ruby|bash|sh)\s+(?:-\S+\s+)*(?:\S*\/)?(?:(?:dev[-_]?)?server?\.(?:py|js|mjs|cjs|ts|rb|sh)|manage\.py\s+runserver)(?:\s+-\S+)*\s*$/,
   // A Tower of its own, as agents start one to look at a change.
   /^node\s+(?:\S*\/)?agent-session-tower(?:\.mjs)?\s+run(?=\s|$)/,
   /^docker(?:-compose|\s+compose)\s+up(?=\s|$)(?!.*\s(?:-d|--detach|--wait|--no-start|--exit-code-from|--abort-on-container-exit|--abort-on-container-failure)(?=\s|=|$))/,
-  /^tail\s+(?:-\S+\s+)*-[fF](?=\s|$)/,
-  // A tool's own watch mode; `gh … --watch` and `kubectl … --watch` wait for a result and end.
-  /^(?!(?:gh|kubectl|oc)\s)\S+.*\s--watch(?!=(?:false|0)\b)(?=\s|=|$)/,
+  /^kubectl\s+port-forward(?=\s|$)|^ssh\s+(?:\S+\s+)*-\w*N/,
+  /^tail\s+(?!.*\s--pid(?=[=\s]))(?:-\S+\s+)*-[fF](?=\s|$)/,
+  // A watch mode of a tool known to keep watching.
+  /^(?:(?:npx|bunx)\s+)?(?:tsc|node|deno|bun|vitest|jest|webpack|esbuild|rollup|sass|tailwindcss|postcss)\s.*--watch(?!=(?:false|0)\b)(?=\s|=|$)/,
 ];
-/** What may stand beside a service in the same command without being work of its own. */
-const SETUP = /^(?:(?:cd|pushd|export|set|ulimit|umask|echo|printf|mkdir|sleep|nvm\s+use)(?=\s|$)|true$|:$|$)/;
+/** What may come after the command that runs, without deciding how long it runs. */
+const TRAILING = /^(?:(?:cd|pushd|export|set|ulimit|umask|echo|printf|mkdir|sleep|tee|nvm\s+use)(?=\s|$)|true$|:$|$)/;
 const PREFIXES = /^(?:(?:nohup|exec|env|sudo|time)\s+|\w+=\S*\s+)+/;
-/** A segment as its program runs it: prefixes dropped, the program's directory dropped, nothing after `--`. */
-const program = (segment: string) => segment.trim().replace(PREFIXES, '').replace(/^\w+=\S*$/, '').replace(/^\S*\//, '').replace(/\s--(?=\s|$)[\s\S]*$/, '');
+/** A segment as its program runs it: no redirections, prefixes and program directory dropped, nothing after `--`. */
+const program = (segment: string) => segment.replace(/\s>\s*[^\s>]*/g, ' ').trim().replace(PREFIXES, '').replace(/^\w+=\S*$/, '').replace(/^\S*\//, '').replace(/\s--(?=\s|$)[\s\S]*$/, '');
 /**
- * Whether a background command is clearly a long-lived service: it runs a service and nothing else but setup (`cd`,
- * `export`…). Anything uncertain, or a service started together with other work, is work, which a run waits for.
+ * Whether a background command is clearly a long-lived service. Commands run one after another, so the last one that
+ * is not a trailing `echo`, `sleep`, `tee`… decides how long the whole runs. Anything uncertain is work, which a run
+ * waits for.
  */
 export function longLivedService(command: string): boolean {
   if (command.length > MAX_SERVICE_COMMAND || AGENT_CLI.test(command)) return false;
@@ -53,9 +54,8 @@ export function longLivedService(command: string): boolean {
   // redirection's `&` (`2>&1`, `&>`) separates nothing.
   const runs = command.replace(/<<-?\s*['"]?(\w+)['"]?[^\n]*\n[\s\S]*?(?:\n\1(?=\n|$)|$)/g, ' ').replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ' ')
     .replace(/(^|\s)\d+(?=[<>])/g, '$1').replace(/>>?&\d*-?|&>>?|>>?|</g, ' > ');
-  const segments = runs.split(/&&|\|\||[;|\n&]/).map(program);
-  return segments.some(segment => SERVICES.some(pattern => pattern.test(segment)))
-    && segments.every(segment => SETUP.test(segment) || SERVICES.some(pattern => pattern.test(segment)));
+  const last = runs.split(/&&|\|\||[;|\n&]/).map(program).filter(segment => !TRAILING.test(segment)).at(-1);
+  return last !== undefined && SERVICES.some(pattern => pattern.test(last));
 }
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200;
 const text = (value: unknown, max: number): string | undefined => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
@@ -92,7 +92,7 @@ export class BackgroundTaskTracker {
   constructor(options: { now?: () => number } = {}) { this.now = options.now ?? Date.now; }
 
   private kindOf(event: Message): Kind {
-    if (event.task_type !== 'local_bash' || event.kind === 'monitor') return 'work';
+    if (event.task_type !== 'local_bash') return 'work';
     return (validId(event.tool_use_id) && this.commands.get(event.tool_use_id)) || 'work';
   }
 
@@ -100,8 +100,12 @@ export class BackgroundTaskTracker {
   private observeToolUses(event: Message): void {
     if (event.parent_tool_use_id != null) return;
     for (const block of Array.isArray(event.message?.content) ? event.message.content : []) {
-      if (block?.type !== 'tool_use' || block.name !== 'Bash' || !validId(block.id) || typeof block.input?.command !== 'string') continue;
-      this.commands.delete(block.id); this.commands.set(block.id, longLivedService(block.input.command) ? 'service' : 'work');
+      if (block?.type !== 'tool_use' || !validId(block.id)) continue;
+      // A monitor ends at its timeout unless it was made persistent.
+      const kind: Kind | undefined = block.name === 'Bash' && typeof block.input?.command === 'string' ? longLivedService(block.input.command) ? 'service' : 'work'
+        : block.name === 'Monitor' && block.input?.persistent === true ? 'service' : undefined;
+      if (!kind) continue;
+      this.commands.delete(block.id); this.commands.set(block.id, kind);
       if (this.commands.size > MAX_COMMANDS) this.commands.delete(this.commands.keys().next().value!);
     }
   }
