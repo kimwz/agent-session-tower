@@ -671,7 +671,9 @@ test('only clearly long-lived services count as services; agent CLIs, builds and
   for (const command of ['codex exec --ephemeral -m gpt-6.1-sol "start the server on 8080" < /dev/null', 'claude -p --no-session-persistence < prompt.md',
     'cd game && codex exec "run npm run dev and check"', 'npm test', 'npm run build', 'pytest -x', 'sleep 300', 'docker compose up -d',
     'make reviews', './run-reviews.sh', 'npm run typecheck', 'python3 train.py', "printf 'npm run dev'; npm run build",
-    'echo "start with: npm run dev" && npm test', 'jest --watch=false']) assert.equal(longLivedService(command), false, command);
+    'echo "start with: npm run dev" && npm test', 'jest --watch=false', 'npx vite build', 'vite build --mode production',
+    'pip install uvicorn && pytest', 'pytest tests/test_server.py', 'cat > notes.md <<EOF\nnpm run dev\nEOF',
+    `${'x'.repeat(2100)} && npm run dev`, `npm run dev <<'EOF'\n${'prompt '.repeat(700)}\nEOF\ncodex exec -`]) assert.equal(longLivedService(command), false, command);
 });
 
 test("an orchestrator's background agent workers hold the owner's run; a server started beside them does not", async t => {
@@ -715,4 +717,24 @@ test("a subagent's Bash call does not decide what a main-conversation task is", 
   assert.equal(find(manager, run.id).status, 'running');
   await release('done');
   assert.equal((await settled(manager, run.id)).status, 'completed');
+});
+
+test('the tracker classifies each task by its own Bash call, in any order, and monitors as work', () => {
+  const tracker = new BackgroundTaskTracker();
+  const call = (id: string, command: string) => ({ type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }] } });
+  tracker.observe(call('t-server', 'npm run dev'));
+  tracker.observe(call('t-worker', 'codex exec "fix it" < /dev/null'));
+  tracker.observe(call('t-feed', 'tail -f app.log'));
+  // Started in the other order; the feed is a Monitor's.
+  tracker.observe(started('worker', { task_type: 'local_bash', tool_use_id: 't-worker' }));
+  tracker.observe(started('server', { task_type: 'local_bash', tool_use_id: 't-server' }));
+  tracker.observe(started('feed', { task_type: 'local_bash', kind: 'monitor', tool_use_id: 't-feed' }));
+  assert.equal(tracker.holding(false), 2, 'the worker and the monitor');
+  assert.equal(tracker.holding(true), 3);
+  // A foreground server moved to the background keeps its kind.
+  tracker.observe(call('t-fg', 'python3 -m http.server 8000'));
+  tracker.observe(started('fg', { task_type: 'local_bash', tool_use_id: 't-fg', is_backgrounded: false }));
+  tracker.observe({ type: 'system', subtype: 'task_updated', task_id: 'fg', patch: { is_backgrounded: true } });
+  assert.equal(tracker.holding(false), 2);
+  assert.equal(tracker.holding(true), 4);
 });

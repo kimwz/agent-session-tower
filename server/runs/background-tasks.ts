@@ -17,24 +17,31 @@ const OPEN_ENDED_TYPES = new Set(['in_process_teammate']);
  * monitors (bounded by their timeout) and any other command, such as an agent CLI, a build or tests.
  */
 type Kind = 'service' | 'work';
-/** Main-conversation Bash commands kept to classify the tasks they start; the most recent ones are enough. */
+/** Main-conversation Bash calls kept to classify the tasks they start; the most recent ones are enough. */
 const MAX_COMMANDS = 200;
 const AGENT_CLI = /(?:^|[\s;&|(`/])(?:codex|claude|gemini|opencode|aider)(?=\s|$)/;
+/** Longer commands (a heredoc prompt, a script) are not a service started on its own: work. */
+const MAX_SERVICE_COMMAND = 2000;
+/** A service is what a command segment runs: its program first, after `cd`-free prefixes like `nohup` or `VAR=1`. */
 const SERVICES = [
-  /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|preview|watch)\b/,
-  /(?:^|[\s;&|(])(?:npx\s+)?(?:vite|http-server|live-server|serve|webpack-dev-server|nodemon|watchexec)(?=\s|$)/,
-  /\b(?:next\s+(?:dev|start)|nuxt\s+dev|astro\s+dev|ng\s+serve|webpack\s+serve|hugo\s+server|jekyll\s+serve|cargo\s+watch)\b/,
-  /\bhttp\.server\b|\brunserver\b|\b(?:uvicorn|gunicorn|hypercorn)\b|\bflask\s+run\b|\brails\s+s(?:erver)?\b|\bphp\s+-S\b/,
-  /[\w./-]*serve[\w-]*\.(?:py|js|mjs|cjs|ts|rb|go|sh)\b/,
-  /\btail\s+-[fF]\b|--watch(?!=(?:false|0)\b)\b/,
+  /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|preview|watch)\b/,
+  /^(?:(?:npx|bunx)\s+|pnpm\s+(?:dlx|exec)\s+)?(?:vite(?!\s+(?:build|optimize)\b)|http-server|live-server|serve|webpack-dev-server|nodemon|watchexec)(?=\s|$)/,
+  /^(?:(?:npx|bunx)\s+)?(?:next\s+(?:dev|start)|nuxt\s+dev|astro\s+dev|ng\s+serve|webpack\s+serve|hugo\s+server|jekyll\s+serve)\b|^cargo\s+watch\b/,
+  /^python[\d.]*\s+(?:-\S+\s+)*-m\s+http\.server\b|^(?:uvicorn|gunicorn|hypercorn)\s|^flask\s+run\b|^(?:bundle\s+exec\s+)?rails\s+s(?:erver)?\b|^php\s+-S\b/,
+  // An interpreter running a script named for serving: serve.py, dev-server.mjs, manage.py runserver.
+  /^(?:python[\d.]*|node|bun|tsx|ts-node|deno\s+run|ruby|bash|sh)\s+(?:-\S+\s+)*(?:\S*\/)?(?:[\w-]*serve[\w-]*\.(?:py|js|mjs|cjs|ts|rb|sh)|manage\.py\s+runserver)(?=\s|$)/,
+  /^docker(?:-compose|\s+compose)\s+up\b(?!.*\s(?:-d|--detach)\b)/,
+  /^tail\s+(?:-\S+\s+)*-[fF]\b/,
+  /\s--watch(?!=(?:false|0)\b)(?=\s|=|$)/,
 ];
+const PREFIXES = /^(?:(?:nohup|exec|env|sudo|time)\s+|\w+=\S*\s+)+/;
 /** Whether a background command is clearly a long-lived service. Anything uncertain is work, which a run waits for. */
 export function longLivedService(command: string): boolean {
-  if (AGENT_CLI.test(command)) return false;
-  // What is quoted is text the command prints or passes on, not what it runs.
-  command = command.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ' ');
-  if (/\bdocker(?:-compose|\s+compose)\s+up\b/.test(command) && !/\s(?:-d|--detach)\b/.test(command)) return true;
-  return SERVICES.some(pattern => pattern.test(command));
+  if (command.length > MAX_SERVICE_COMMAND || AGENT_CLI.test(command)) return false;
+  // What is quoted, or written into a heredoc, is text the command prints or passes on, not what it runs.
+  const runs = command.replace(/<<-?\s*['"]?(\w+)['"]?[^\n]*\n[\s\S]*?(?:\n\1(?=\n|$)|$)/g, ' ').replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ' ');
+  return runs.split(/&&|\|\||[;|\n&]/).map(segment => segment.trim().replace(PREFIXES, ''))
+    .some(segment => SERVICES.some(pattern => pattern.test(segment)));
 }
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200;
 const text = (value: unknown, max: number): string | undefined => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
@@ -61,8 +68,8 @@ export class BackgroundTaskTracker {
    * that reply was found too close to tell); `unsure` marks a notice only such a close reply may have taken.
    */
   private readonly unread = new Map<string, { task: FinishedTask; endedAt: number; reply: number; unsure?: true; detached?: true }>();
-  /** Bash commands of the main conversation, by tool use id, to classify the tasks they start. */
-  private readonly commands = new Map<string, string>();
+  /** What each Bash call of the main conversation runs, by tool use id, classified from its whole command. */
+  private readonly commands = new Map<string, Kind>();
   /** Model replies of the main conversation seen so far, and the one under way. */
   private replies = 0;
   private reply?: string;
@@ -72,8 +79,7 @@ export class BackgroundTaskTracker {
 
   private kindOf(event: Message): Kind {
     if (event.task_type !== 'local_bash' || event.kind === 'monitor') return 'work';
-    const command = validId(event.tool_use_id) ? this.commands.get(event.tool_use_id) : undefined;
-    return command !== undefined && longLivedService(command) ? 'service' : 'work';
+    return (validId(event.tool_use_id) && this.commands.get(event.tool_use_id)) || 'work';
   }
 
   /** A main-conversation Bash call names the command its task runs: a task starts after its tool use. */
@@ -81,7 +87,7 @@ export class BackgroundTaskTracker {
     if (event.parent_tool_use_id != null) return;
     for (const block of Array.isArray(event.message?.content) ? event.message.content : []) {
       if (block?.type !== 'tool_use' || block.name !== 'Bash' || !validId(block.id) || typeof block.input?.command !== 'string') continue;
-      this.commands.delete(block.id); this.commands.set(block.id, block.input.command.slice(0, 4000));
+      this.commands.delete(block.id); this.commands.set(block.id, longLivedService(block.input.command) ? 'service' : 'work');
       if (this.commands.size > MAX_COMMANDS) this.commands.delete(this.commands.keys().next().value!);
     }
   }
