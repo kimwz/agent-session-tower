@@ -651,6 +651,12 @@ test('a slash command Claude does not answer is no newer instruction for a waiti
   const goal = await latestNativeUserMessage(mapper, 'claude:fixture', page([request, { role: 'assistant', text: 'Waiting for approval.' },
     { role: 'user', text: '<command-name>/goal</command-name><command-args>Do it differently</command-args>' }, { role: 'assistant', text: 'On it.' }]));
   assert.equal(goal?.text, '<command-name>/goal</command-name><command-args>Do it differently</command-args>');
+  // Claude may answer with a tool call alone.
+  const tool = await latestNativeUserMessage(mapper, 'claude:fixture', async () => ({ messages: [
+    { id: '0', role: 'user' as const, text: 'Deploy it', timestamp: at(0) },
+    { id: '1', role: 'user' as const, text: '<command-name>/goal</command-name><command-args>Do it differently</command-args>', timestamp: at(1) },
+    { id: '2', role: 'tool' as const, toolName: 'Bash', text: '{}', timestamp: at(2) }] }));
+  assert.equal(tool?.text, '<command-name>/goal</command-name><command-args>Do it differently</command-args>');
 });
 
 test('an approved continuation is consumed when its still-running parent finishes the goal', async t => {

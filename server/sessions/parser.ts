@@ -1,6 +1,6 @@
 import { parseExecLaunch, promptDigest, type ExecLaunch } from './exec-lineage.js';
 import { isTaskNotification, taskNotice, TASK_NOTICE } from '../../shared/task-notification.js';
-import { isLocalCommand } from '../../shared/local-command.js';
+import { isCommandOutput, isLocalCommand } from '../../shared/local-command.js';
 import { readdir, stat } from 'node:fs/promises';
 import { compressedTranscript, transcriptChunks } from './transcript-file.js';
 import { basename, dirname, isAbsolute, join } from 'node:path';
@@ -407,7 +407,7 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
   const requestTime = s.provider === 'codex' && typeof createdTime === 'number' ? validTime(createdTime * 1000) ?? rowTime : rowTime;
   // A command's record becomes the request when Claude answers it before the person types anything else.
   if (messages.some(isRequestMessage)) { s.lastRequestAt = latestTime(s.lastRequestAt, requestTime); delete state.commandAt; }
-  else if (messages.some(message => message.role === 'user') && requestTime && row.type === 'user') state.commandAt ??= requestTime;
+  else if (row.type === 'user' && requestTime && messages.some(message => message.role === 'user' && !isCommandOutput(message.text))) state.commandAt = requestTime;
   else if (row.type === 'assistant' && row.message && !row.isMeta && state.commandAt) { s.lastRequestAt = latestTime(s.lastRequestAt, state.commandAt); delete state.commandAt; }
 
   const setActivity = (activity: Activity) => { state.activity = activity; state.activityAt = at; };

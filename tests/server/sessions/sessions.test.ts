@@ -629,6 +629,8 @@ test('a slash command Claude answers is the request and its answer the work, as 
     { ...base, type: 'user', timestamp: at(0), message: { role: 'user', content: 'continue' } },
     { ...base, type: 'assistant', timestamp: at(1), message: { role: 'assistant', model: 'claude-fable-5-2', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Done.' }] } },
     { ...base, type: 'system', subtype: 'turn_duration', timestamp: at(1) },
+    { ...base, type: 'user', timestamp: at(3), message: { role: 'user', content: '<command-name>/effort</command-name>' } },
+    { ...base, type: 'user', timestamp: at(3), message: { role: 'user', content: '<local-command-stdout>Cancelled</local-command-stdout>' } },
     { ...base, type: 'user', timestamp: at(5), message: { role: 'user', content: '<command-name>/goal</command-name>\n<command-args>Ship it</command-args>' } },
     { ...base, type: 'system', subtype: 'local_command', timestamp: at(5), content: '<local-command-stdout>Goal set: Ship it</local-command-stdout>' },
     { ...base, type: 'user', isMeta: true, timestamp: at(5), message: { role: 'user', content: 'Work toward the goal: Ship it' } },
@@ -640,7 +642,12 @@ test('a slash command Claude answers is the request and its answer the work, as 
   await appendFile(claude, lines([{ ...base, type: 'assistant', timestamp: at(6), message: { role: 'assistant', model: 'claude-fable-5-2', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] } }]));
   await service.refresh();
   assert.equal(service.get(`claude:${rootId}`)?.status, 'working');
+  // The latest command before the answer is the request, not the /effort before it.
   assert.equal(service.get(`claude:${rootId}`)?.lastRequestAt, at(5));
+  // A page that holds only the answer names the command it answers as the request before it.
+  const page = await service.detail(`claude:${rootId}`, undefined, 1);
+  assert.equal(page?.messages.at(-1)?.toolName, 'Bash');
+  assert.equal(page?.previousUser?.text, '<command-name>/goal</command-name>\n<command-args>Ship it</command-args>');
 });
 
 test("Tower's hand-over of finished background work reads as a notice, not as the owner speaking", () => {
