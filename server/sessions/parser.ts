@@ -1,5 +1,6 @@
 import { parseExecLaunch, promptDigest, type ExecLaunch } from './exec-lineage.js';
 import { isTaskNotification, taskNotice, TASK_NOTICE } from '../../shared/task-notification.js';
+import { isLocalCommand } from '../../shared/local-command.js';
 import { readdir, stat } from 'node:fs/promises';
 import { compressedTranscript, transcriptChunks } from './transcript-file.js';
 import { basename, dirname, isAbsolute, join } from 'node:path';
@@ -42,6 +43,8 @@ export interface RecordState {
   historyStartOffset?: number;
   /** The latest user requests, newest first and shortened; they say what a session is working on. */
   recentRequests?: string[];
+  /** When a slash command the person typed was recorded, until Claude answers it (then it was a request) or they type on. */
+  commandAt?: string;
   /** The Claude answer whose rows stated the session's effort. */
   effortAnswer?: string;
 }
@@ -96,10 +99,7 @@ function isTowerInstructions(block: unknown): boolean {
   const value = block && typeof block === 'object' ? (block as { text?: unknown }).text : undefined;
   return typeof value === 'string' && value.startsWith(TOWER_INSTRUCTIONS_OPEN) && value.endsWith(TOWER_INSTRUCTIONS_CLOSE);
 }
-/** A slash command's own record (`<command-name>`, `<local-command-stdout>`, …), not something the person asked Claude. */
-function isLocalCommand(value: string): boolean {
-  return /^<(?:command-name|command-message|command-args|local-command-(?:stdout|stderr|caveat))>/.test(value.trimStart());
-}
+function isRequestMessage(message: ChatMessage): boolean { return message.role === 'user' && !isLocalCommand(message.text); }
 function isInjectedUser(value: string): boolean {
   return /^(?:# AGENTS\.md instructions|<environment_context>|<recommended_plugins>|<INSTRUCTIONS>|<system-reminder>|<in-app-browser-context|\[Request interrupted by user)/.test(value.trim());
 }
@@ -405,7 +405,10 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
   const rowTime = validTime(row.timestamp);
   const createdTime = row.payload?.internal_chat_message_metadata_passthrough?.create_time;
   const requestTime = s.provider === 'codex' && typeof createdTime === 'number' ? validTime(createdTime * 1000) ?? rowTime : rowTime;
-  if (messages.some(message => message.role === 'user' && !isLocalCommand(message.text))) s.lastRequestAt = latestTime(s.lastRequestAt, requestTime);
+  // A command's record becomes the request when Claude answers it before the person types anything else.
+  if (messages.some(isRequestMessage)) { s.lastRequestAt = latestTime(s.lastRequestAt, requestTime); delete state.commandAt; }
+  else if (messages.some(message => message.role === 'user') && requestTime && row.type === 'user') state.commandAt ??= requestTime;
+  else if (row.type === 'assistant' && row.message && !row.isMeta && state.commandAt) { s.lastRequestAt = latestTime(s.lastRequestAt, state.commandAt); delete state.commandAt; }
 
   const setActivity = (activity: Activity) => { state.activity = activity; state.activityAt = at; };
   const setCompleted = (activity: 'completed' | 'error') => {
@@ -426,9 +429,8 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
       else if (state.explicitTurn && ['function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output', 'message'].includes(value.type)) setActivity('working');
     }
   } else {
-    // A slash command Claude Code runs itself, and its output, starts no turn; a command that prompts Claude is followed
-    // by Claude's answer, which does.
-    if (row.type === 'user' && row.message && !row.isMeta && messages.some(message => !isLocalCommand(message.text))) setActivity('working');
+    // A slash command's record starts no turn by itself; Claude's answer to one that prompts it does (shared/local-command.ts).
+    if (row.type === 'user' && row.message && !row.isMeta && messages.some(isRequestMessage)) setActivity('working');
     if (row.type === 'assistant' && row.message && !row.isMeta) {
       if (['end_turn', 'stop_sequence'].includes(row.message.stop_reason)) setCompleted('completed');
       else if (row.message.stop_reason === 'max_tokens') setCompleted('error');

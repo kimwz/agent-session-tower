@@ -617,7 +617,30 @@ test('an open Claude window waiting for input while its background shell runs is
   await writeFile(claude, terminalCommandRows());
   await service.refresh();
   assert.equal(service.get(`claude:${rootId}`)?.status, 'idle');
-  assert.equal(service.get(`claude:${rootId}`)?.activeProcess, true);
+  assert.equal(service.get(`claude:${rootId}`)?.statusReason, 'Claude process is waiting for input while a background shell runs');
+});
+
+test('a slash command Claude answers is the request and its answer the work, as with a typed request', async (t) => {
+  const { service, claude } = await fixture(t);
+  const start = Date.now() - 60_000;
+  const at = (seconds: number) => new Date(start + seconds * 1000).toISOString();
+  const base = { sessionId: rootId, cwd: '/work/game', entrypoint: 'cli' };
+  const rows = [
+    { ...base, type: 'user', timestamp: at(0), message: { role: 'user', content: 'continue' } },
+    { ...base, type: 'assistant', timestamp: at(1), message: { role: 'assistant', model: 'claude-fable-5-2', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Done.' }] } },
+    { ...base, type: 'system', subtype: 'turn_duration', timestamp: at(1) },
+    { ...base, type: 'user', timestamp: at(5), message: { role: 'user', content: '<command-name>/goal</command-name>\n<command-args>Ship it</command-args>' } },
+    { ...base, type: 'system', subtype: 'local_command', timestamp: at(5), content: '<local-command-stdout>Goal set: Ship it</local-command-stdout>' },
+    { ...base, type: 'user', isMeta: true, timestamp: at(5), message: { role: 'user', content: 'Work toward the goal: Ship it' } },
+  ];
+  await writeFile(claude, lines(rows));
+  await service.refresh();
+  assert.equal(service.get(`claude:${rootId}`)?.status, 'completed', 'no answer yet: the command alone starts nothing');
+  assert.equal(service.get(`claude:${rootId}`)?.lastRequestAt, at(0));
+  await appendFile(claude, lines([{ ...base, type: 'assistant', timestamp: at(6), message: { role: 'assistant', model: 'claude-fable-5-2', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] } }]));
+  await service.refresh();
+  assert.equal(service.get(`claude:${rootId}`)?.status, 'working');
+  assert.equal(service.get(`claude:${rootId}`)?.lastRequestAt, at(5));
 });
 
 test("Tower's hand-over of finished background work reads as a notice, not as the owner speaking", () => {

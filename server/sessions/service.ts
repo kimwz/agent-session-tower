@@ -10,6 +10,7 @@ import { matchLaunchMarks, readLaunchMarks, type LaunchMark } from './launch-mar
 import { inspectProcesses, type ProcessSnapshot } from './processes.js';
 import { appendFile, applyStatus, initial, ownHistory, parseMessages, walk, CHUNK, MAX_LINE, type RecordState } from './parser.js';
 import { compressedTranscript, openTranscript, type TranscriptFile } from './transcript-file.js';
+import { isLocalCommand } from '../../shared/local-command.js';
 
 /**
  * Every term is lowercase; times are milliseconds, `until` excluded. Tool calls and results are searched only with `tools`.
@@ -431,7 +432,7 @@ export class SessionService extends EventEmitter {
     const userOn = (line: Buffer, start: number): ChatMessage | undefined => {
       try {
         const row = JSON.parse(line.toString('utf8'));
-        return ownHistory(state, row, start) ? parseMessages(state.session.provider, row, start, state.session.createdAt).filter(message => message.role === 'user').at(-1) : undefined;
+        return ownHistory(state, row, start) ? parseMessages(state.session.provider, row, start, state.session.createdAt).filter(message => message.role === 'user' && !isLocalCommand(message.text)).at(-1) : undefined;
       } catch { return undefined; }
     };
     let position = from;

@@ -1,4 +1,5 @@
 import type { ChatMessage } from '../../shared/types.js';
+import { latestRequest } from '../../shared/local-command.js';
 
 /** Reads the provider history through Tower's synthetic-to-native mapping, including newly created sessions. */
 export async function latestNativeUserMessage(
@@ -7,6 +8,7 @@ export async function latestNativeUserMessage(
 ): Promise<ChatMessage | undefined> {
   const history = await detail(mapper.nativeSessionId(sessionId));
   if (!history || (history.skipped ?? 0) > 0) throw new Error('Native user history could not be read completely.');
-  const users = [...(history?.previousUser ? [history.previousUser] : []), ...(history?.messages ?? []).filter(message => message.role === 'user')];
+  const latest = latestRequest(history.messages);
+  const users = [...(history.previousUser ? [history.previousUser] : []), ...(latest ? [latest] : [])];
   return users.sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))[0];
 }

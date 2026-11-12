@@ -45,6 +45,12 @@ test('the last turn is the last owner message and what the agent wrote after it'
   assert.deepEqual(lastTurn([message('user', 'Old'), message('assistant', 'Old answer'), message('user', 'Deploy'), message('tool', '', 'Bash'), message('assistant', 'Done.')]),
     { request: 'Deploy', output: '[Bash]\n\nDone.' });
   assert.deepEqual(lastTurn([message('assistant', 'Hello')]), { request: '', output: 'Hello' });
+  // A slash command Claude Code answers itself is no new turn; one Claude answers is the request.
+  assert.deepEqual(lastTurn([message('user', 'Deploy'), message('assistant', 'Done.'), message('user', '<command-name>/model</command-name>'),
+    message('user', '<local-command-stdout>Kept model as `Fable 5.2`</local-command-stdout>')]), { request: 'Deploy', output: 'Done.' });
+  assert.deepEqual(lastTurn([message('user', 'Deploy'), message('assistant', 'Done.'), message('user', '<command-name>/goal</command-name><command-args>ship it</command-args>'),
+    message('user', '<local-command-stdout>Goal set</local-command-stdout>'), message('assistant', 'Shipping.')]),
+  { request: '<command-name>/goal</command-name><command-args>ship it</command-args>', output: 'Shipping.' });
 });
 
 test('a judged outcome shows only while the turn it read is still the last one and the feature is on', async t => {
