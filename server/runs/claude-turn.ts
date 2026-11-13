@@ -427,6 +427,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       }
       if ((event.session_id === undefined || event.session_id === session.nativeId) && tasks.observe(event) && !turnActive) owned.finishInput?.();
       if (mainContext && event.type === 'system' && event.subtype === 'compact_boundary') contextInput = undefined;
+      if (event.type === 'system' && event.subtype === 'task_started' && event.is_backgrounded === false && (event.session_id === undefined || event.session_id === session.nativeId)) owned.claude?.foregroundStarted();
       if (mainContext) wakeups.observe(event);
       if (mainContext && event.type === 'stream_event' && event.event?.type === 'message_start') tasks.observeReply(event.event.message?.id);
       if (mainContext && event.type === 'assistant' && !event.isMeta && !event.is_meta) {

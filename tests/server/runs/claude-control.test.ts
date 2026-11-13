@@ -126,7 +126,7 @@ test('steering sends once at next priority and waits for the matching conversati
 
 test('an instruction sent now moves the running turn\'s foreground work to the background right after it', async t => {
   const f = fixture(); t.after(() => f.control.close()); f.initialize();
-  void f.control.steer({ ...f.input, uuid: 'steer-now' }, { now: true }).catch(() => {});
+  void f.control.steer({ ...f.input, uuid: 'steer-now' }, { background: true }).catch(() => {});
   await until(() => f.written.length === 4);
   assert.deepEqual(f.written[2], { ...f.input, uuid: 'steer-now', priority: 'next' });
   assert.deepEqual(f.written[3].request, { subtype: 'background_tasks' });
@@ -154,7 +154,7 @@ test('the background request goes only once the instruction is written, and its 
     control.start({ type: 'user', session_id: 'native-session', parent_tool_use_id: null, message: { role: 'user', content: 'hi' } });
     control.handle({ type: 'control_response', response: { subtype: 'success', request_id: written[0].request_id } });
     const input = { type: 'user', session_id: 'native-session', parent_tool_use_id: null, uuid: 'steer-held', message: { role: 'user', content: 'now' } };
-    const sent = control.steer(input, { now: true });
+    const sent = control.steer(input, { background: true });
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(written.some(message => message.request?.subtype === 'background_tasks'), false, 'not before the instruction is written');
     release();
@@ -165,14 +165,35 @@ test('the background request goes only once the instruction is written, and its 
   }
 });
 
-test('nothing is moved to the background between turns or for an instruction that waits for the step underway', async t => {
+test('nothing is moved to the background for an instruction that waits for the step underway, or between turns', async t => {
   const f = fixture(); t.after(() => f.control.close()); f.initialize();
   void f.control.steer({ ...f.input, uuid: 'steer-next' }).catch(() => {});
+  await until(() => f.written.length === 3);
+  await new Promise(resolve => setImmediate(resolve));
+  // The turn is still running here: only the missing option keeps the request back.
+  f.control.foregroundStarted();
+  assert.deepEqual(f.written.slice(2).map(message => message.uuid), ['steer-next']);
   f.control.setTurnIdle(true);
-  void f.control.steer({ ...f.input, uuid: 'steer-idle' }, { now: true }).catch(() => {});
+  void f.control.steer({ ...f.input, uuid: 'steer-idle' }, { background: true }).catch(() => {});
   await until(() => f.written.length === 4);
   await new Promise(resolve => setImmediate(resolve));
+  f.control.foregroundStarted();
   assert.deepEqual(f.written.slice(2).map(message => message.uuid), ['steer-next', 'steer-idle']);
+});
+
+test('foreground work started before Claude takes the instruction is moved aside too, and none after it took it', async t => {
+  const f = fixture(); t.after(() => f.control.close()); f.initialize();
+  // Sent while Claude was still writing: nothing ran in the foreground yet.
+  const sent = f.control.steer({ ...f.input, uuid: 'steer-early' }, { background: true });
+  await until(() => f.written.length === 4);
+  f.control.foregroundStarted();
+  await until(() => f.written.length === 5);
+  assert.deepEqual(f.written[4].request, { subtype: 'background_tasks' });
+  assert.equal(f.control.handle({ ...f.input, uuid: 'steer-early', isReplay: true }), true);
+  await sent;
+  f.control.foregroundStarted();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.written.length, 5, 'Claude took it: later work stays in the foreground');
 });
 
 test('steering rejects a different session without writing', async t => {

@@ -82,6 +82,9 @@ test('Claude result before steering replay keeps stdin open through the subseque
   // As in the terminal, what runs in the foreground moves to the background so Claude takes the message now.
   await until(() => f.received.some(frame => frame.request?.subtype === 'background_tasks'));
   assert.ok(f.received.findIndex(frame => frame.request?.subtype === 'background_tasks') > f.received.indexOf(input));
+  // Claude starts a foreground command before it takes the message: that one is moved aside too.
+  f.emit({ type: 'system', subtype: 'task_started', session_id: nativeId, task_id: 'b1', tool_use_id: 'tool-1', description: 'wait', task_type: 'local_bash', is_backgrounded: false });
+  await until(() => f.received.filter(frame => frame.request?.subtype === 'background_tasks').length === 2);
   f.emit({ type: 'result', session_id: nativeId, is_error: false });
   assert.equal(f.child.stdin.writableEnded, false);
   assert.equal((await pending).steering?.state, 'sending', 'answered once handed over');
