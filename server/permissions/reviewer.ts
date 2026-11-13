@@ -5,7 +5,7 @@ import { autoReviewBlock, MAX_REVIEW_REASON, MAX_REVIEWED_FILES, type Permission
 import { writePrivateJson } from '../stores/private-json.js';
 import { REVIEW_SCHEMA, REVIEW_SYSTEM, ReviewSkip, reviewInput, type ReviewSources } from './context.js';
 import { changedFiles, deniedPaths, folderBinding, readLog, reviewedFiles, REVIEW_TOOL_NAMES, REVIEW_TOOLS_SERVER, reviewScope, type ReadEntry } from './inspect.js';
-import { UNDELIVERED, type PermissionReviewResult, type PermissionService } from './service.js';
+import { ONE_SHOT_SUGGESTION, UNDELIVERED, type PermissionReviewResult, type PermissionService } from './service.js';
 
 /** Long enough to read the scripts a command runs, and the ones they start, before deciding. */
 const REVIEW_TIMEOUT_MS = 6 * 60 * 1000;
@@ -144,11 +144,14 @@ export class PermissionReviewer {
         else result = { ...result, files };
       }
       if (result.verdict === 'approve' && request.rule.kind === 'command') {
-        const limit = autoReviewBlock({ kind: 'command', value: result.rule?.value ?? request.rule.value }, request.cwd);
+        const value = result.rule?.value ?? request.rule.value;
+        // An owner's overlapping rule would leave a reviewer's rule unused: the one command, run once, is what helps.
+        const limit = autoReviewBlock({ kind: 'command', value }, request.cwd)
+          ?? (service.ownerCommandRuleOverlaps(value, request) ? '겹치는 소유자 규칙이 이미 있어 새 규칙을 더하지 않습니다.' : undefined);
         const unsupported = result.scope === 'conversation' && (request.provider === 'codex' || request.rule.providers.includes('codex'));
         if (limit || unsupported) result = { ...result, verdict: 'narrow',
           reason: `${result.reason} (${limit ?? 'Codex는 대화 한정 규칙을 지원하지 않습니다.'})`,
-          suggestion: `Ask permissions_run for the exact command needed for this task, with every argument; no lasting rule is required.` };
+          suggestion: ONE_SHOT_SUGGESTION };
       }
       // An MCP tool rule cannot be narrowed by its arguments, and permissions_run runs only shell commands: an agent sent
       // back could not follow either, so the owner decides (#217).

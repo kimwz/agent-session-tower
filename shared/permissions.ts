@@ -421,23 +421,70 @@ const MCP_TOOL = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/;
 const MCP_DANGER = new Set(['send', 'post', 'publish', 'deploy', 'delete', 'remove', 'drop', 'destroy', 'purge', 'truncate', 'exec', 'execute', 'sql', 'transfer', 'pay', 'charge', 'upload', 'invite']);
 const inside = (path: string, folder: string) => path === folder || path.startsWith(folder.endsWith('/') ? folder : `${folder}/`);
 
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'su']);
+/** Options of each wrapper that take the next word as their value (`sudo -u root`, `env -C dir`; sudo's `-S` takes none). */
+const VALUE_OPTIONS: Record<string, Set<string>> = {
+  sudo: new Set(['-u', '-g', '-C', '-D', '-h', '-p', '-r', '-t', '-T', '-U', '--user', '--group', '--chdir', '--host', '--prompt', '--role', '--type', '--close-from', '--other-user']),
+  doas: new Set(['-u', '-C']),
+  // env's -S splits its value into the command itself: what follows is the program.
+  env: new Set(['-u', '-C', '--unset', '--chdir']),
+};
+
+/**
+ * Whether a download is handed to a shell: piped into one (through wrappers and their options: `| sudo -E bash -`,
+ * `| sudo -u root sh`, `| sudo env bash`, `| sudo su -`), into a wrapper's own shell (`| sudo -s` with nothing after it),
+ * or given to a shell as its script (`bash -lc "$(curl …)"`, ``bash -c "`curl …`"``, `bash <(curl …)`). Only the
+ * program a wrapper runs counts: `| sudo tee /tmp/bash` saves a file.
+ */
+function downloadIntoShell(command: string): boolean {
+  if (/(^|[\s;&|(`'"])(\S*\/)?(sh|bash|zsh|dash|ksh)\s+(-[a-z]+\s+)*(-[a-z]*c\s+["']?(\$\(|`)|<\()\s*(curl|wget)\b/i.test(command)) return true;
+  for (const match of command.matchAll(/(?:^|[^\w-])(?:curl|wget)\b[^\n|]*\|(?!\|)\s*([^|;&\n]*)/gi)) {
+    // The words of the pipe's next step, quotes dropped; a word left by a quote that closes an ssh command ends it too.
+    const words = match[1]!.replace(/["'`)]/g, ' ').trim().split(/\s+/).filter(Boolean);
+    let index = 0, ownShell = false;
+    // Variables set for the program (`| INSTALL_K3S_VERSION=v1.30 sh -`) are no program.
+    while (index < words.length && /^\w+=/.test(words[index]!)) index++;
+    while (index < words.length) {
+      const name = words[index]!.replace(/^.*\//, '');
+      if (!['sudo', 'doas', 'env'].includes(name)) break;
+      index++;
+      while (index < words.length && (words[index]!.startsWith('-') || /^\w+=/.test(words[index]!))) {
+        const word = words[index]!;
+        index++;
+        if (word === '--shell' || word === '--login') { if (name !== 'env') ownShell = true; continue; }
+        if (word.startsWith('--')) { if (VALUE_OPTIONS[name]!.has(word)) index++; continue; }
+        if (!word.startsWith('-')) continue;
+        // Short options read as getopt does: letters in turn, the first that takes a value takes the rest of the word
+        // (`-uroot`) or else the next word (`-Hu deploy`). Options keep their case: sudo `-s` runs a shell, `-S` only reads a password.
+        for (let at = 1; at < word.length; at++) {
+          if (name !== 'env' && (word[at] === 's' || word[at] === 'i')) ownShell = true;
+          if (VALUE_OPTIONS[name]!.has(`-${word[at]}`)) { if (at === word.length - 1) index++; break; }
+        }
+      }
+    }
+    const program = words[index]?.replace(/^.*\//, '').toLowerCase();
+    if (program === undefined ? ownShell : SHELLS.has(program)) return true;
+  }
+  return false;
+}
+
 /**
  * Why Tower's reviewer may not decide this rule for work in `cwd`, or undefined when it may. Broad rules, Bash rules
  * written as Claude rules, file rules outside the project and the never-allowed commands always wait for the owner.
  */
 /**
- * Why Tower's reviewer may not allow running this exact command once, or undefined when it may: raising privileges,
- * acting on the whole machine, or running a download straight into a shell always wait for the owner. The rest is the
- * reviewer's to judge, the whole command in view (a specific `kill 13229` or `rm dist/old.log` can be fine).
+ * Why Tower's reviewer may not allow running this exact command once, or undefined when it may: acting on the whole
+ * machine or running a download straight into a shell always wait for the owner. The rest is the reviewer's to judge,
+ * the whole command in view (a specific `kill 13229` or `rm dist/old.log` can be fine). `sudo` is judged too: it is
+ * mostly a deploy step on a server reached by ssh, and the reviewer tells that from raising privileges on this computer.
  */
 export function runBlock(command: string): string | undefined {
   // Lines joined by a backslash are one command to the shell; the command itself runs as written.
   const text = command.toLowerCase().replace(/\\\r?\n/g, ' ');
-  // A program may be named by its path (/usr/bin/sudo) too.
-  if (/(^|[\s;&|(`$'"{])(\S*\/)?(sudo|doas|su)(\s|$|["';&|)`])/.test(text)) return '권한을 올리는 명령(sudo 등)은 소유자가 정합니다.';
+  // A program may be named by its path (/sbin/shutdown) too.
   if (/(^|[\s;&|(`$'"{])(\S*\/)?(shutdown|reboot|halt|poweroff|mkfs[\w.]*|diskutil|fdisk)(\s|$|["';&|)`])/.test(text)) return '컴퓨터 전체에 영향을 주는 명령은 소유자가 정합니다.';
   if (/(^|[\s;&|(`$'"{])(\S*\/)?dd(\s|$|["';&|)`])[^\n]*\bof=["']?\/dev\//.test(text)) return '장치에 직접 쓰는 명령은 소유자가 정합니다.';
-  if (/(curl|wget)\b[^\n|]*\|\s*(\S*\/)?((sudo|env)\s+)?(\S*\/)?(sh|bash|zsh|dash|ksh)\b/.test(text)) return '내려받은 것을 바로 셸로 실행하는 명령은 소유자가 정합니다.';
+  if (downloadIntoShell(command.replace(/\\\r?\n/g, ' '))) return '내려받은 것을 바로 셸로 실행하는 명령은 소유자가 정합니다.';
   return undefined;
 }
 

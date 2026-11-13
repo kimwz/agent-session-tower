@@ -8,7 +8,7 @@ import { PermissionSQLFixture } from '../permissions/storage-fixture.js';
 
 const at='2026-10-10T00:00:00.000Z';
 const rule={ id:'r',kind:'command' as const,value:'git status',providers:['claude' as const],scope:'global' as const,source:'owner' as const,createdAt:at,updatedAt:at };
-const request={ id:'q',status:'pending' as const,rule:{ kind:'run' as const,value:'sudo rm -rf /unsafe-original',providers:['codex' as const],scope:'project' as const,cwd:'/fixture' },reason:'original',sessionId:'codex:fixture',provider:'codex' as const,cwd:'/fixture',createdAt:at,key:'key:original',keyExplicit:true,timeoutSeconds:10,review:{ status:'queued' as const,at } };
+const request={ id:'q',status:'pending' as const,rule:{ kind:'run' as const,value:'diskutil eraseDisk APFS unsafe-original disk2',providers:['codex' as const],scope:'project' as const,cwd:'/fixture' },reason:'original',sessionId:'codex:fixture',provider:'codex' as const,cwd:'/fixture',createdAt:at,key:'key:original',keyExplicit:true,timeoutSeconds:10,review:{ status:'queued' as const,at } };
 const state=():PermissionState=>({ version:1,rules:[{ ...rule }],requests:[structuredClone(request)],codex:[],autoReview:{ enabled:true,resume:true },lost:'original preserved' });
 function fixture(t:TestContext) { const f=new PermissionSQLFixture(); t.after(()=>f.close()); return f; }
 async function seed(f:PermissionSQLFixture,source:PermissionState) {
