@@ -800,3 +800,20 @@ test('cold inspection failure blocks maintenance while ordinary hot session refr
   assert.equal(service.retentionRecords().complete,false);assert.ok(service.retentionRecords().issues.some(issue=>issue.includes('cold inspection failure')));
   service.setColdRegistry([],[],async()=>({complete:true,issues:[]}));await service.refresh(true);assert.equal(service.retentionRecords().complete,true);
 });
+
+test('Claude\'s narration shows in the conversation but leaves the session\'s count and last message as they were', async t => {
+  const { service, claude } = await fixture(t);
+  const at = (second: number) => new Date(Date.now() + second * 1000).toISOString();
+  const message = (type: string, content: unknown, second: number) => ({ type, uuid: `${type}-${second}`, sessionId: rootId, cwd: '/work', timestamp: at(second), message: { role: type, content } });
+  await writeFile(claude, lines([message('user', 'Wait for both workers', 1),
+    message('assistant', [{ type: 'text', text: 'Waiting.' }], 2),
+    message('assistant', [{ type: 'thinking', thinking: 'Both still run; I will report when they finish.', signature: thinkingSignature('narration') }], 3),
+  ]));
+  await service.refresh();
+  const id = `claude:${rootId}`;
+  // Counting it would mark every older conversation with narration unread, and reset its outcome, on the first read.
+  assert.equal(service.get(id)?.messageCount, 2);
+  assert.equal(service.get(id)?.lastMessage, 'Waiting.');
+  assert.deepEqual((await service.detail(id))?.messages.map(item => [item.text, item.summary]),
+    [['Wait for both workers', undefined], ['Waiting.', undefined], ['Both still run; I will report when they finish.', true]]);
+});

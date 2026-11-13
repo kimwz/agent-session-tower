@@ -995,7 +995,7 @@ export class MasterSession {
         if (answer) {
           // Outcome is a judgment of the session's latest turn, not necessarily the run we are reporting.
           const latestTurn = next < 0 && !detail.hasMore && detail.session?.status !== 'working'
-            && detail.session?.messageCount === messages.length && detail.session?.lastRequestAt === messages[request].timestamp
+            && detail.session?.messageCount === messages.filter(message => !message.summary).length && detail.session?.lastRequestAt === messages[request].timestamp
             && !!detail.session?.lastMessage && normalize(answer.text).startsWith(normalize(detail.session.lastMessage));
           return { text: answer.text, followedBy: next >= 0, ...(latestTurn && detail.session.outcome ? { outcome: detail.session.outcome } : {}) };
         }

@@ -397,6 +397,8 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
     }
   }
   for (const message of messages) {
+    // Narration is shown, but counting it would change every older conversation's count (read marks, outcome marks).
+    if (message.summary) continue;
     s.messageCount++;
     if (message.role === 'user' && !state.titleSet) {
       s.title = compact(message.text, 100); state.titleSet = true;
