@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { AutoPromptJob, Run, Session, Snapshot } from '../../../shared/types.js';
 import type { ExclusionMatcher } from '../../../server/remote/exclusions.js';
-import { remoteSnapshot, remoteWorkingSnapshot, type RemoteScope } from '../../../server/remote/visibility.js';
+import { remotePage, remoteSnapshot, remoteWorkingSnapshot, type RemoteScope } from '../../../server/remote/visibility.js';
 
 const now = '2026-09-24T00:00:00.000Z';
 const session = (id: string, cwd: string, extra: Partial<Session> = {}): Session => ({ id, nativeId: id.split(':')[1], provider: 'codex', title: id, cwd, project: 'p',
@@ -123,4 +123,10 @@ test('a trigger\'s ids reach only the controller whose trigger started the run, 
   assert.deepEqual(forHost.map(item => item.origin), [{ kind: 'trigger', controllerId: host, triggerId: 't-host', eventId: 'e-1' }, { kind: 'trigger' }]);
   assert.deepEqual(remoteSnapshot(snapshot, scope(), other).runs.map(item => item.origin), [{ kind: 'trigger', controllerId: host }, { kind: 'trigger' }]);
   assert.deepEqual(remoteSnapshot(snapshot, scope()).runs.map(item => item.origin), [{ kind: 'trigger', controllerId: host }, { kind: 'trigger' }]);
+});
+
+test('a conversation page keeps the mark on Claude\'s narration, so the controller shows it as a summary', () => {
+  const page = remotePage({ session: { id: 'claude:a' } as Session, hasMore: false,
+    messages: [{ id: 'm', role: 'assistant', text: 'Waiting for both workers.', timestamp: '2026-11-13T00:00:00.000Z', summary: true }] });
+  assert.equal(page.messages[0].summary, true);
 });

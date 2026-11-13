@@ -858,8 +858,10 @@ export class RunManager extends EventEmitter {
       submitted = true;
       this.drain.noteHandedOver(run);
       if (selected.adapter instanceof ClaudeControl) {
+        // A message someone sent reaches the turn at once, as in the terminal: what runs in the foreground moves to the
+        // background. Tower's own notices (update wrap-up, permission decisions) wait for the step underway.
         const delivery = selected.adapter.steer({ type: 'user', uuid: run.id, session_id: this.getSession(run.sessionId)!.nativeId, parent_tool_use_id: null,
-          message: { role: 'user', content: [{ type: 'text', text: prompt }, ...claudeImageBlocks(attachments)] } });
+          message: { role: 'user', content: [{ type: 'text', text: prompt }, ...claudeImageBlocks(attachments)] } }, { now: !run.updateWrapUp && !run.permissionNotice });
         // Claude confirms only when it takes the instruction at its next step, which can be minutes away, so the
         // answer is that it was handed over and the run records how it ends.
         this.admissions.delete(run.id);

@@ -3,6 +3,7 @@ import { isTaskNotification, taskNotice, TASK_NOTICE } from '../../shared/task-n
 import { isCommandOutput, isLocalCommand } from '../../shared/local-command.js';
 import { readdir, stat } from 'node:fs/promises';
 import { compressedTranscript, transcriptChunks } from './transcript-file.js';
+import { narrationText } from './claude-narration.js';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { ChatMessage, Provider, Session } from '../../shared/types.js';
 import type { ProcessSnapshot } from './processes.js';
@@ -187,7 +188,11 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
   };
   for (const block of blocks) {
     if (block.type === 'text' && value.role === 'user' && isTowerInstructions(block)) continue;
-    if (block.type === 'text') prose += `${text(block.text, limit)}\n`;
+    const narration = value.role === 'assistant' ? narrationText(block) : undefined;
+    if (narration !== undefined) {
+      flush();
+      messages.push({ id: `${id}:${messages.length}`, role: 'assistant', text: text(narration.trim(), limit), timestamp, summary: true });
+    } else if (block.type === 'text') prose += `${text(block.text, limit)}\n`;
     else if (block.type === 'image') prose += '[Image attachment]\n';
     else if (block.type === 'tool_use') {
       flush();

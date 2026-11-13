@@ -124,6 +124,30 @@ test('steering sends once at next priority and waits for the matching conversati
   assert.equal(f.written.length, 3); assert.deepEqual(f.errors, []);
 });
 
+test('an instruction sent now moves the running turn\'s foreground work to the background right after it', async t => {
+  const f = fixture(); t.after(() => f.control.close()); f.initialize();
+  void f.control.steer({ ...f.input, uuid: 'steer-now' }, { now: true }).catch(() => {});
+  await until(() => f.written.length === 4);
+  assert.deepEqual(f.written[2], { ...f.input, uuid: 'steer-now', priority: 'next' });
+  assert.deepEqual(f.written[3].request, { subtype: 'background_tasks' });
+  assert.equal(f.written[3].type, 'control_request');
+  assert.match(f.written[3].request_id, /^tower-steer-background-/);
+  // Claude's answer to it is not a permission request and changes nothing.
+  assert.equal(f.control.handle({ type: 'control_response', response: { subtype: 'success', request_id: f.written[3].request_id, response: {} } }), true);
+  assert.equal(f.control.handle({ ...f.input, uuid: 'steer-now', isReplay: true }), true);
+  assert.deepEqual(f.errors, []);
+});
+
+test('nothing is moved to the background between turns or for an instruction that waits for the step underway', async t => {
+  const f = fixture(); t.after(() => f.control.close()); f.initialize();
+  void f.control.steer({ ...f.input, uuid: 'steer-next' }).catch(() => {});
+  f.control.setTurnIdle(true);
+  void f.control.steer({ ...f.input, uuid: 'steer-idle' }, { now: true }).catch(() => {});
+  await until(() => f.written.length === 4);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.written.slice(2).map(message => message.uuid), ['steer-next', 'steer-idle']);
+});
+
 test('steering rejects a different session without writing', async t => {
   const f = fixture(); t.after(() => f.control.close()); f.initialize();
   await assert.rejects(f.control.steer({ ...f.input, uuid: 'steer-1', session_id: 'other' }), { disposition: 'rejected' });

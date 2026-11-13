@@ -182,7 +182,12 @@ export class ClaudeControl {
     pending.reject(new SteeringError(message, 'uncertain'));
   }
 
-  steer(input: Message): Promise<void> {
+  /**
+   * `now` also moves the turn's running foreground work (Bash commands, subagents) to the background, as Ctrl+B does in
+   * the terminal: the blocking tool call returns at once, so Claude takes the instruction at that step instead of after
+   * a command that can run for minutes. The work keeps running and its result reaches Claude as a task notification.
+   */
+  steer(input: Message, options: { now?: boolean } = {}): Promise<void> {
     const id = input.uuid;
     if (!this.canSteer() || !validId(id) || !validId(this.sessionId) || input.session_id !== this.sessionId
       || input.type !== 'user' || input.parent_tool_use_id != null || !record(input.message) || input.message.role !== 'user') {
@@ -196,9 +201,21 @@ export class ClaudeControl {
       this.steers.set(id, { sessionId: this.sessionId!, resolve, reject, ...(this.turnIdle ? { timer: this.steerTimer(id) } : {}) });
       // "now" interrupts the native turn; "next" folds into its next processing checkpoint.
       try {
-        void this.options.write({ ...input, priority: 'next' }).catch(() => fail('Claude Code disconnected while the instruction was being sent. Delivery is uncertain.'));
+        void this.options.write({ ...input, priority: 'next' }).then(() => { if (options.now && !this.turnIdle) this.backgroundForegroundWork(); },
+          () => fail('Claude Code disconnected while the instruction was being sent. Delivery is uncertain.'));
       } catch { fail('Claude Code disconnected while the instruction was being sent. Delivery is uncertain.'); }
     });
+  }
+
+  /**
+   * Its answer is not awaited: the instruction is already queued, and a Claude Code without this request (or with
+   * nothing running in the foreground) takes it at the next step as before.
+   */
+  private backgroundForegroundWork(): void {
+    if (this.closed) return;
+    try {
+      void this.options.write({ type: 'control_request', request_id: `tower-steer-background-${randomUUID()}`, request: { subtype: 'background_tasks' } }).catch(() => {});
+    } catch { /* the instruction is queued either way */ }
   }
 
   close(): void {

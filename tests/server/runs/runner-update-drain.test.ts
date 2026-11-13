@@ -80,6 +80,7 @@ test('the wrap-up request reaches the running turn once, and the continuation st
   f.manager.driveUpdateDrain();
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(f.received.filter(frame => frame.uuid && /about to restart/.test(JSON.stringify(frame))).length, 1, 'never sent twice');
+  assert.equal(f.received.some(frame => frame.request?.subtype === 'background_tasks'), false, 'Tower\'s own request waits for the step underway');
   f.emit({ ...wrapUp, isReplay: true });
   await until(() => f.run(wrapUp.uuid)?.steering?.state === 'delivered');
   f.emit({ type: 'result', session_id: nativeId, is_error: false });

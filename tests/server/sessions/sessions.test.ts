@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionService } from '../../../server/sessions/service.js';
 import { parseMessages } from '../../../server/sessions/parser.js';
+import { thinkingSignature } from '../../helpers/claude-signature.ts';
 import { isClaudeRegistryCommand, parseCodexOpenFiles } from '../../../server/sessions/processes.js';
 
 const rootId = '11111111-1111-4111-8111-111111111111';
@@ -551,6 +552,21 @@ test('a background task notice Claude Code writes as a user turn reads as a noti
   assert.equal(parseMessages('claude', { ...row, origin: undefined })[0]?.role, 'system');
   assert.deepEqual(parseMessages('claude', { ...row, message: { role: 'user', content: '<task-notification>\n</task-notification>' } }), []);
   assert.equal(parseMessages('claude', { ...row, origin: undefined, message: { role: 'user', content: 'Please explain <task-notification> tags' } })[0]?.role, 'user');
+});
+
+test('Claude\'s narration between tool calls reads as the agent\'s words, marked as a summary; its reasoning stays hidden', () => {
+  const at = '2026-11-13T00:47:17.000Z';
+  const row = (uuid: string, content: unknown[]) => ({ type: 'assistant', uuid, timestamp: at, message: { role: 'assistant', content } });
+  // Claude Code writes each block as its own row: reasoning, narration, then the tool call.
+  assert.deepEqual(parseMessages('claude', row('reason', [{ type: 'thinking', thinking: 'Private reasoning', signature: thinkingSignature('thinking') }])), []);
+  assert.deepEqual(parseMessages('claude', row('narr', [{ type: 'thinking', thinking: '두 작업자가 끝날 때까지 대기하며, 완료되면 보고하겠습니다.\n\n', signature: thinkingSignature('narration') }])),
+    [{ id: 'narr:0', role: 'assistant', text: '두 작업자가 끝날 때까지 대기하며, 완료되면 보고하겠습니다.', timestamp: at, summary: true }]);
+  // Within one row it keeps its place among the other blocks.
+  const mixed = parseMessages('claude', row('mixed', [{ type: 'text', text: 'Before' }, { type: 'thinking', thinking: 'Between', signature: thinkingSignature('narration') },
+    { type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'ls' } }]));
+  assert.deepEqual(mixed.map(message => [message.role, message.text, message.summary]), [['assistant', 'Before', undefined], ['assistant', 'Between', true], ['tool', '{\n  "command": "ls"\n}', undefined]]);
+  // A user row never carries narration.
+  assert.deepEqual(parseMessages('claude', { type: 'user', uuid: 'u', timestamp: at, message: { role: 'user', content: [{ type: 'thinking', thinking: 'x', signature: thinkingSignature('narration') }] } }), []);
 });
 
 test('a message sent while Claude works reads as the owner speaking, though Claude Code writes it only as the command it took', () => {

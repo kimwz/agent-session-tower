@@ -991,7 +991,7 @@ export class MasterSession {
           steered.splice(one, 1);
           return false;
         });
-        const answer = messages.slice(request + 1, next < 0 ? messages.length : next).reverse().find(message => message.role === 'assistant' && message.text.trim());
+        const answer = messages.slice(request + 1, next < 0 ? messages.length : next).reverse().find(message => message.role === 'assistant' && !message.summary && message.text.trim());
         if (answer) {
           // Outcome is a judgment of the session's latest turn, not necessarily the run we are reporting.
           const latestTurn = next < 0 && !detail.hasMore && detail.session?.status !== 'working'
