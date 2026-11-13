@@ -450,11 +450,16 @@ function downloadIntoShell(command: string): boolean {
       index++;
       while (index < words.length && (words[index]!.startsWith('-') || /^\w+=/.test(words[index]!))) {
         const word = words[index]!;
-        // Options keep their case: sudo `-s` runs a shell, `-S` only reads a password.
-        if (name !== 'env' && (/^-[A-Za-z]*[si][A-Za-z]*$/.test(word) || word === '--shell' || word === '--login')) ownShell = true;
-        // Short options may be bundled; the last one takes the value (`sudo -Hu deploy`).
-        const last = /^-[A-Za-z]{2,}$/.test(word) ? `-${word.at(-1)}` : word;
-        index += VALUE_OPTIONS[name]!.has(last) ? 2 : 1;
+        index++;
+        if (word === '--shell' || word === '--login') { if (name !== 'env') ownShell = true; continue; }
+        if (word.startsWith('--')) { if (VALUE_OPTIONS[name]!.has(word)) index++; continue; }
+        if (!word.startsWith('-')) continue;
+        // Short options read as getopt does: letters in turn, the first that takes a value takes the rest of the word
+        // (`-uroot`) or else the next word (`-Hu deploy`). Options keep their case: sudo `-s` runs a shell, `-S` only reads a password.
+        for (let at = 1; at < word.length; at++) {
+          if (name !== 'env' && (word[at] === 's' || word[at] === 'i')) ownShell = true;
+          if (VALUE_OPTIONS[name]!.has(`-${word[at]}`)) { if (at === word.length - 1) index++; break; }
+        }
       }
     }
     const program = words[index]?.replace(/^.*\//, '').toLowerCase();
