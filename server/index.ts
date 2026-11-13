@@ -49,7 +49,7 @@ import { networkAccess } from './http/remote-access.js';
 import { AuthStore } from './auth/store.js';
 import { readWebAsset } from './http/web-assets.js';
 import { projectSessionStates } from './sessions/snapshot.js';
-import { claudeEnvironmentSignIn, ProviderCapabilities } from './providers/capabilities.js';
+import { claudeEnvironmentSignIn, ProviderCapabilities, type ClaudeCredential } from './providers/capabilities.js';
 import { ClaudeAccounts } from './providers/claude-accounts/accounts.js';
 import { ClaudeLogin } from './providers/claude-accounts/login.js';
 import { RepositoryMonitor, watchedRepositoryPaths } from './repositories/monitor.js';
@@ -96,7 +96,7 @@ import { LatestReleases } from './updates/latest.js';
 import { TowerAutoUpdate } from './updates/tower.js';
 import { autoUpdateEnabled, publicToolUpdates, readToolUpdates, unlessUpdating } from './updates/tools.js';
 import type { AutoUpdateStatus } from '../shared/link.js';
-import type { ComponentVersions, Snapshot, ProviderHealth, Run, Session } from '../shared/types.js';
+import type { ComponentVersions, Snapshot, ProviderHealth, ProviderUsage, Run, Session } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { PublicListener } from './public-agents/listener.js';
 import { NotificationService, type FollowingComputer } from './notifications/service.js';
@@ -372,13 +372,17 @@ async function main() {
   let componentVersions: ComponentVersions | undefined;
   // CPU, memory and disk of this computer, for the rings on its host node.
   const system = new SystemMonitor(systemSources(stateDir), changed);
-  // The Codex probe starts the CLI, so it never runs while this account's Codex is being updated.
   // The Claude accounts saved on this computer, switched from the usage meter; each meter reading of Claude Code's own
-  // sign-in tells them which one is in use.
+  // sign-in tells them which one is in use. Only the Tower on the default state directory keeps them for the owner's own
+  // sign-in: a fixture or check Tower elsewhere would copy and renew the same tokens (one with a Claude config folder of its
+  // own touches only that). An environment sign-in has nothing to switch.
+  const claudeAccountsOff = claudeEnvironmentSignIn(process.env) ? '이 컴퓨터의 Claude는 환경 변수의 로그인을 써서 계정을 전환할 수 없습니다.'
+    : resolve(stateDir) !== resolve(defaultStateDir()) && !process.env.CLAUDE_CONFIG_DIR ? '기본 상태 폴더의 Tower에서만 Claude 계정을 전환할 수 있습니다.' : undefined;
   const claudeAccounts = new ClaudeAccounts({ stateDir, onChange: changed, refreshMeter: () => { void capabilities.refresh(); } });
   const claudeLogin = new ClaudeLogin({ directory: claudeAccounts.directory, adopt: directory => claudeAccounts.adopt(directory), onChange: changed });
+  // The Codex probe starts the CLI, so it never runs while this account's Codex is being updated.
   const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed, stateDir, unlessUpdating: (provider, read) => unlessUpdating(stateDir, provider, read),
-    onClaudeReading: (credential, usage) => claudeAccounts.observe(credential, usage) });
+    ...(claudeAccountsOff ? {} : { onClaudeReading: (credential: ClaudeCredential, usage: ProviderUsage) => claudeAccounts.observe(credential, usage) }) });
   // This Tower keeps itself current when it runs as the service; its worker keeps Claude Code and Codex current.
   let pairedControllers = (): number => 0;
   const latestReleases = new LatestReleases();
@@ -820,7 +824,7 @@ async function main() {
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })), managed: managedSync,
       // The trust is made first when it is still pending (right after joining), so the folder can be shared at once.
       afterClone: async id => { await followingSecrets?.align(id); await followingSecrets?.shareFolders(id, managedSync?.folders(id) ?? []); } } : { error: linkError },
-    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp, todoTools, claudeAccounts: { accounts: claudeAccounts, login: claudeLogin, available: () => !claudeEnvironmentSignIn(process.env) },
+    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp, todoTools, claudeAccounts: { accounts: claudeAccounts, login: claudeLogin, unavailable: () => claudeAccountsOff },
     decisions: {
       overview: () => decisions.overview(),
       // Turning the key or the canvas outcomes on or off shows or hides them at once.
@@ -905,7 +909,7 @@ async function main() {
     secretRelay.start();
   }
   capabilities.start();
-  claudeAccounts.start();
+  if (!claudeAccountsOff) claudeAccounts.start();
   repositories.start();
   system.start();
   await outcomes.start();

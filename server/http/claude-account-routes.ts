@@ -3,7 +3,8 @@ import { AccountError, type ClaudeAccounts } from '../providers/claude-accounts/
 import type { ClaudeLogin } from '../providers/claude-accounts/login.js';
 import { readJson } from './requests.js';
 
-export type ClaudeAccountRoutes = { accounts: ClaudeAccounts; login: ClaudeLogin; available: () => boolean };
+/** `unavailable`: why this Tower does not manage Claude accounts, or undefined when it does. */
+export type ClaudeAccountRoutes = { accounts: ClaudeAccounts; login: ClaudeLogin; unavailable: () => string | undefined };
 type Json = (res: ServerResponse, status: number, body: unknown) => void;
 
 /**
@@ -17,11 +18,12 @@ export async function claudeAccountRoute(req: IncomingMessage, res: ServerRespon
   if ((action === undefined && req.method !== 'GET') || (action !== undefined && req.method !== 'POST')) return false;
   if (!allowed) { json(res, 403, { error: 'Claude 계정 관리는 소유자의 화면에서만 할 수 있습니다.' }); return true; }
   if (!routes) { json(res, 503, { error: 'Claude 계정 관리를 사용할 수 없습니다.' }); return true; }
-  const answer = () => ({ available: routes.available(), accounts: routes.accounts.list(), ...(routes.login.status() ? { login: routes.login.status() } : {}) });
+  const off = routes.unavailable();
+  const answer = () => off ? { available: false, accounts: [], reason: off } : { available: true, accounts: routes.accounts.list(), ...(routes.login.status() ? { login: routes.login.status() } : {}) };
   try {
     if (action === undefined) { json(res, 200, answer()); return true; }
     const body = await readJson(req, 4096) as Record<string, unknown>;
-    if (!routes.available()) { json(res, 409, { error: '이 컴퓨터의 Claude는 환경 변수의 로그인을 쓰고 있어 계정을 전환할 수 없습니다.' }); return true; }
+    if (off) { json(res, 409, { error: off }); return true; }
     const id = typeof body.id === 'string' ? body.id : '';
     if (action === 'switch') await routes.accounts.switchTo(id);
     else if (action === 'remove') await routes.accounts.remove(id);

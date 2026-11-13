@@ -12,7 +12,7 @@ test('only the owner’s own page lists, switches or adds Claude accounts; the m
   const dir = await mkdtemp(join(tmpdir(), 'tower-claude-accounts-http-'));
   const switched: string[] = [];
   const routes = {
-    available: () => true,
+    unavailable: () => undefined,
     accounts: { list: () => [{ id: 'aaaaaaaaaaaa', email: 'alpha@example.com', addedAt: '2026-11-13T00:00:00Z', active: true }], switchTo: async (id: string) => { switched.push(id); return []; }, remove: async () => [] },
     login: { status: () => undefined, start: async () => ({}), submitCode: () => ({}), cancel: async () => {} },
   } as unknown as ClaudeAccountRoutes;

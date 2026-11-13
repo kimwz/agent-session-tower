@@ -41,8 +41,14 @@ export class ClaudeLogin {
 
   status(): ClaudeLoginState | undefined { return this.current ? { ...this.current.state } : undefined; }
 
-  async start(): Promise<ClaudeLoginState> {
-    if (this.current && ['starting', 'waiting_code', 'verifying'].includes(this.current.state.state)) return this.status()!;
+  private starting?: Promise<ClaudeLoginState>;
+  /** Starts a sign-in, or answers the one under way: two quick requests never leave a second login process behind. */
+  start(): Promise<ClaudeLoginState> {
+    if (this.current && ['starting', 'waiting_code', 'verifying'].includes(this.current.state.state)) return Promise.resolve(this.status()!);
+    return this.starting ??= this.launch().finally(() => { this.starting = undefined; });
+  }
+
+  private async launch(): Promise<ClaudeLoginState> {
     await this.discard();
     const executable = await (this.options.executable ?? (() => findExecutable('claude')))();
     if (!executable) throw new Error('Claude Code CLI를 찾지 못했습니다.');

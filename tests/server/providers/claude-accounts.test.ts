@@ -61,7 +61,9 @@ function fakeAnthropic() {
 
 async function fixture(t: test.TestContext) {
   const root = await mkdtemp(join(tmpdir(), 'claude-accounts-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // One cleanup: everything that may still write in the folder stops before the folder goes.
+  const stops: Array<() => Promise<void>> = [];
+  t.after(async () => { for (const stop of stops.reverse()) await stop(); await rm(root, { recursive: true, force: true }); });
   const home = join(root, 'home');
   const defaultDir = join(root, 'default-claude');
   await mkdir(home, { recursive: true });
@@ -74,7 +76,7 @@ async function fixture(t: test.TestContext) {
   const meter: number[] = [];
   const accounts = new ClaudeAccounts({ stateDir: join(root, 'state'), env, platform: 'darwin', keychain, fetch: anthropic.fetch, now: () => NOW, home,
     onChange: () => { changes++; }, refreshMeter: () => { meter.push(1); } });
-  t.after(() => accounts.stop());
+  stops.push(() => accounts.stop());
   const store = { env, platform: 'darwin', keychain };
   const signIn = async (name: string, uuid: string, email: string, expiresAt?: number) => {
     anthropic.profiles.set(`access-${name}`, { uuid, email, org: `org-${uuid}` });
@@ -91,7 +93,7 @@ async function fixture(t: test.TestContext) {
     const { credentialOf } = await import('../../../server/providers/capabilities.js');
     accounts.observe(credentialOf(record, NOW), { status: 'available', windows: [{ id: 'five_hour', usedPercent: 90, windowMinutes: 300 }], updatedAt: new Date(NOW).toISOString() });
   };
-  return { root, home, env, items, keychain, lock, anthropic, accounts, store, signIn, active, observe, meter, changes: () => changes };
+  return { root, stops, home, env, items, keychain, lock, anthropic, accounts, store, signIn, active, observe, meter, changes: () => changes };
 }
 
 test('only the claudeAiOauth record is replaced; other sign-ins in the store and the file fallback stay', async t => {
@@ -178,11 +180,12 @@ test('an inactive account is renewed by Tower, and the rotated token is kept bef
   await f.signIn('alpha', 'u-alpha', 'alpha@example.com', NOW + 60_000);
   await f.observe();
   await until(() => f.accounts.list().length === 1);
-  await f.signIn('beta', 'u-beta', 'beta@example.com');
+  // Beta, the account in use, is about to expire too: its token is Claude Code's, so Tower must not renew it.
+  await f.signIn('beta', 'u-beta', 'beta@example.com', NOW + 60_000);
   await f.observe();
   await until(() => f.accounts.list().find(item => item.email === 'beta@example.com')?.active);
   await f.accounts.poll();
-  // Only alpha (inactive, about to expire) was renewed; beta's token belongs to Claude Code.
+  // Only alpha (inactive, about to expire) was renewed.
   assert.deepEqual(f.anthropic.refreshes, ['refresh-alpha']);
   const alpha = f.accounts.list().find(item => item.email === 'alpha@example.com')!;
   const store = await readClaudeStore({ env: f.accounts.accountEnv(alpha.id), platform: 'darwin', keychain: f.keychain });
@@ -248,7 +251,7 @@ printf '{"oauthAccount":{"accountUuid":"u-gamma","emailAddress":"gamma@example.c
   await chmod(bin, 0o755);
   const login = new ClaudeLogin({ directory: f.accounts.directory, executable: async () => bin, adopt: directory => f.accounts.adopt(directory), onChange: () => {},
     env: { ...f.env, PATH: process.env.PATH, CLAUDE_SECURESTORAGE_CONFIG_DIR: '/must/not/leak' }, platform: 'darwin', keychain: f.keychain });
-  t.after(() => login.stop());
+  f.stops.push(() => login.stop());
   await login.start();
   const waiting = await until(() => login.status()?.state === 'waiting_code' && login.status());
   assert.equal(waiting.url, 'https://claude.com/cai/oauth/authorize?code=true&state=abc');
@@ -275,7 +278,7 @@ exit 1
   await chmod(bin, 0o755);
   await mkdir(f.accounts.directory, { recursive: true });
   const login = new ClaudeLogin({ directory: f.accounts.directory, executable: async () => bin, adopt: directory => f.accounts.adopt(directory), onChange: () => {}, env: { ...f.env, PATH: process.env.PATH }, platform: 'darwin', keychain: f.keychain });
-  t.after(() => login.stop());
+  f.stops.push(() => login.stop());
   await login.start();
   await until(() => login.status()?.state === 'waiting_code');
   login.submitCode('bad');
@@ -283,4 +286,51 @@ exit 1
   assert.equal(failed.error, "That code wasn't accepted.");
   await until(async () => !(await readdir(f.accounts.directory)).some(name => name.startsWith('login-')));
   assert.deepEqual(f.accounts.list(), []);
+});
+
+test('a sign-in Tower cannot identify is never switched away from, and nothing is renewed while it is in use', async t => {
+  const f = await fixture(t);
+  await f.signIn('alpha', 'u-alpha', 'alpha@example.com', NOW + 60_000);
+  await f.observe();
+  await until(() => f.accounts.list().length === 1);
+  // A `/login` to an account whose profile cannot be read (the profile service refuses it).
+  await writeClaudeOAuth(oauth('mystery'), f.store);
+  const alpha = f.accounts.list()[0];
+  await assert.rejects(f.accounts.switchTo(alpha.id), /확인하지 못해/);
+  assert.equal(await f.active(), 'refresh-mystery', 'the unidentified sign-in stays');
+  await f.accounts.poll();
+  assert.deepEqual(f.anthropic.refreshes, [], 'with the account in use unknown, no saved copy is renewed');
+  await assert.rejects(f.accounts.remove(alpha.id), /확인하지 못해/);
+});
+
+test('an account a terminal /login just made the one in use cannot be removed before the next meter reading', async t => {
+  const f = await fixture(t);
+  await f.signIn('alpha', 'u-alpha', 'alpha@example.com');
+  await f.observe();
+  await until(() => f.accounts.list().length === 1);
+  await f.signIn('beta', 'u-beta', 'beta@example.com');
+  await f.observe();
+  await until(() => f.accounts.list().find(item => item.email === 'beta@example.com')?.active);
+  const alpha = f.accounts.list().find(item => item.email === 'alpha@example.com')!;
+  // Back to alpha in a terminal; Tower has not read the meter since.
+  const stored = await readClaudeStore({ env: f.accounts.accountEnv(alpha.id), platform: 'darwin', keychain: f.keychain });
+  await writeClaudeOAuth(stored.kind === 'stored' ? stored.blob.claudeAiOauth as Record<string, unknown> : {}, f.store);
+  await assert.rejects(f.accounts.remove(alpha.id), /지금 쓰고 있는 계정/);
+});
+
+test('a refused saved sign-in shows its last usage as an earlier reading', async t => {
+  const f = await fixture(t);
+  await f.signIn('alpha', 'u-alpha', 'alpha@example.com', NOW + 60_000);
+  await f.observe();
+  await until(() => f.accounts.list().find(item => item.usage));
+  await f.signIn('beta', 'u-beta', 'beta@example.com');
+  await f.observe();
+  await until(() => f.accounts.list().find(item => item.email === 'beta@example.com')?.active);
+  f.anthropic.rejected.add('refresh-alpha');
+  await f.accounts.poll();
+  const alpha = f.accounts.list().find(item => item.email === 'alpha@example.com')!;
+  assert.equal(alpha.problem, 'sign_in_again');
+  assert.equal(alpha.stale, true);
+  assert.equal(alpha.reason, 'not_signed_in');
+  assert.equal(alpha.usage?.windows[0].usedPercent, 90);
 });

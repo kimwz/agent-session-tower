@@ -187,7 +187,8 @@ export interface ClaudeLoginStatus {
   error?: string;
   account?: ClaudeAccountSummary;
 }
-export interface ClaudeAccountsAnswer { available: boolean; accounts: ClaudeAccountSummary[]; login?: ClaudeLoginStatus }
+/** `reason`: why this Tower does not manage Claude accounts, when `available` is false. */
+export interface ClaudeAccountsAnswer { available: boolean; accounts: ClaudeAccountSummary[]; login?: ClaudeLoginStatus; reason?: string }
 export interface UsageWindow {
   id: string;
   usedPercent: number;

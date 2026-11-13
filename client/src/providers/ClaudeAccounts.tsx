@@ -31,7 +31,7 @@ export function ClaudeAccounts({ token, onAddAccount }: { token: string; onAddAc
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setBusy(undefined); }
   };
-  if (answer && !answer.available) return <p className="claude-accounts-note">{t('이 컴퓨터의 Claude는 환경 변수의 로그인을 써서 계정을 전환할 수 없습니다.')}</p>;
+  if (answer && !answer.available) return <p className="claude-accounts-note">{answer.reason ?? t('이 컴퓨터의 Claude는 환경 변수의 로그인을 써서 계정을 전환할 수 없습니다.')}</p>;
   const accounts = answer?.accounts ?? [];
   return <section className="claude-accounts" aria-label={t('Claude 계정')}>
     <header><strong>{t('Claude 계정')}</strong><button type="button" className="claude-account-add" onClick={onAddAccount}><Plus size={12} aria-hidden="true" />{t('계정 추가')}</button></header>

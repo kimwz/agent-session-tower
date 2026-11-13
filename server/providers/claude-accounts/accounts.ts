@@ -22,6 +22,8 @@ const POLL_INTERVAL = 5 * 60_000;
 const RATE_LIMIT_WAIT = 15 * 60_000;
 // A token this close to its expiry is renewed before use.
 const EXPIRY_MARGIN = 5 * 60_000;
+// After a sign-in could not be saved, it is tried again this much later.
+const SYNC_RETRY = 30 * 60_000;
 
 export type SavedClaudeAccount = {
   id: string; accountUuid: string; organizationUuid: string; email: string;
@@ -80,6 +82,8 @@ export class ClaudeAccounts {
   /** Fingerprint of the default store's sign-in the last sync settled. */
   private settled?: string;
   private usageReasons = new Map<string, ProviderUsage['reason']>();
+  /** A sign-in whose saving failed, and when to try again: no profile request and warning every minute meanwhile. */
+  private failed?: { fingerprint: string; until: number };
   private waitUntil = new Map<string, number>();
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = false;
@@ -118,7 +122,8 @@ export class ClaudeAccounts {
 
   list(): ClaudeAccountView[] {
     return this.accounts.map(({ accountUuid: _a, organizationUuid: _o, ...account }) => {
-      const reason = this.usageReasons.get(account.id);
+      // A refused sign-in makes its last usage an earlier reading too.
+      const reason = account.problem ? 'not_signed_in' : this.usageReasons.get(account.id);
       return { ...account, active: account.id === this.activeId, ...(account.usage ? { usage: { windows: account.usage.windows.map(window => ({ ...window })), updatedAt: account.usage.updatedAt } } : {}),
         ...(reason ? { reason, stale: true } : {}) };
     });
@@ -149,6 +154,16 @@ export class ClaudeAccounts {
     const credential = credentialOf(oauth, this.now());
     if (!oauth || !credential.account) { this.activeId = undefined; this.settled = undefined; return; }
     if (credential.account === this.settled) return;
+    if (this.failed?.fingerprint === credential.account && this.now() < this.failed.until) { this.activeId = undefined; return; }
+    try { await this.identify(oauth, credential); }
+    catch (error) {
+      this.activeId = undefined;
+      this.failed = { fingerprint: credential.account, until: this.now() + SYNC_RETRY };
+      throw error;
+    }
+  }
+
+  private async identify(oauth: Json, credential: ClaudeCredential): Promise<void> {
     // A copy with the same refresh token is the same sign-in, even when its access token has expired.
     let saved: SavedClaudeAccount | undefined;
     for (const account of this.accounts) {
@@ -176,7 +191,19 @@ export class ClaudeAccounts {
     }
     this.activeId = saved.id;
     this.settled = credential.account;
+    this.failed = undefined;
     this.options.onChange();
+  }
+
+  /** Identifies the sign-in in use now, for an owner's action; refuses the action when it is there but cannot be identified. */
+  private async settleActive(refused: string): Promise<void> {
+    this.settled = undefined;
+    this.failed = undefined;
+    let error: unknown;
+    try { await this.sync(); } catch (caught) { error = caught; }
+    if (this.activeId || !oauthOf(await readClaudeStore(this.storeOptions(this.env)))) return;
+    if (error) console.warn(`[claude-accounts] the Claude sign-in in use could not be identified: ${error instanceof Error ? error.message : error}`);
+    throw new AccountError(`지금 로그인된 Claude 계정을 확인하지 못해 ${refused} 않았습니다. 잠시 뒤 다시 시도하세요.`);
   }
 
   private describe(profile: ClaudeProfile, oauth: Json): Pick<SavedClaudeAccount, 'email' | 'displayName' | 'organizationName' | 'plan'> {
@@ -211,11 +238,8 @@ export class ClaudeAccounts {
       const target = this.accounts.find(account => account.id === id);
       if (!target) throw new AccountError('저장된 계정이 아닙니다.', 404);
       // The account signed in now must be saved first, or switching would lose it.
-      this.settled = undefined;
-      await this.sync();
+      await this.settleActive('전환하지');
       if (this.activeId === id) return this.list();
-      const current = oauthOf(await readClaudeStore(this.storeOptions(this.env)));
-      if (current && !this.activeId) throw new AccountError('지금 로그인된 Claude 계정을 확인하지 못해 전환하지 않았습니다. 잠시 뒤 다시 시도하세요.');
       const { oauth } = await this.inactiveCredential(target);
       await writeClaudeOAuth(oauth, this.storeOptions(this.env));
       const profile = await readOAuthAccount(this.accountEnv(id), this.options.home);
@@ -246,6 +270,8 @@ export class ClaudeAccounts {
     return this.exclusive(async () => {
       const index = this.accounts.findIndex(account => account.id === id);
       if (index < 0) throw new AccountError('저장된 계정이 아닙니다.', 404);
+      // A terminal `/login` since the last meter reading may have made this one the account in use: look again first.
+      await this.settleActive('지우지');
       if (id === this.activeId) throw new AccountError('지금 쓰고 있는 계정은 다른 계정으로 전환한 뒤에 지울 수 있습니다.');
       await removeClaudeStore(this.accountDirectory(id), { ...(this.options.platform ? { platform: this.options.platform } : {}), ...(this.options.keychain ? { keychain: this.options.keychain } : {}) });
       this.accounts.splice(index, 1);
