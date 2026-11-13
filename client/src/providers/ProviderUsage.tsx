@@ -28,7 +28,7 @@ export function ProviderUsageMeter({ provider, health, accounts }: { provider: P
     fit();
     window.addEventListener('resize', fit);
     return () => window.removeEventListener('resize', fit);
-  }, [open, accounts, provider]);
+  }, [open, accounts?.base, provider]);
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60_000);

@@ -834,7 +834,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
           return json(res, 200, { ok: true });
         }
         if (!nodes.known(nodeRoute[1])) return json(res, 404, { error: '연결된 컴퓨터가 아닙니다.' });
-        if (claudeAccountRequest(req.method, `/api/${nodeRoute[2].split('?')[0]}`) !== undefined && !accountsAllowed) return json(res, 403, { error: 'Claude 계정 관리는 소유자의 화면에서만 할 수 있습니다.' });
+        if (claudeAccountRequest(req.method, `/api/${nodeRoute[2]}`) !== undefined && !accountsAllowed) return json(res, 403, { error: 'Claude 계정 관리는 소유자의 화면에서만 할 수 있습니다.' });
         // A signed-in browser elsewhere loses its streams to other computers when it signs out, like its own.
         if (!identity.local) trackStream(sessionId, res, () => res.destroy());
         const message = req.method === 'POST' && onNodeMessage && /^sessions\/[^/]+\/messages$/.test(nodeRoute[2]);

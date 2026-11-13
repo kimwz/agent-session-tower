@@ -50,6 +50,11 @@ const scoped = new Map<string, { raw: Snapshot; named: Snapshot }>();
 
 /** Where a computer stands for this page: what it shows and whether work can be sent to it. */
 export type HostState = 'here' | 'ready' | 'loading' | 'read-only' | 'offline' | 'updating' | 'update-required' | 'removed-by-node';
+/** Where a computer's saved Claude accounts are managed from this page: its own path, a joined computer's over its link, or none. */
+export function claudeAccountsPath(host: Pick<Host, 'node' | 'claudeAccounts'>): string | undefined {
+  return host.node ? host.claudeAccounts ? `/api/nodes/${host.node}/claude-accounts` : undefined : '/api/claude-accounts';
+}
+
 export function hostState(host: Host): HostState {
   if (!host.node) return 'here';
   if (host.status === 'update-required') return 'update-required';

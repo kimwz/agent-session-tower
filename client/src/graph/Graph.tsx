@@ -7,7 +7,7 @@ import type { RepositoryAction, RepositoryStatus } from '../../../shared/reposit
 import type { SessionDraft } from '../sessions/NewSessionDialog';
 import { ProjectEdge } from './ProjectEdge';
 import { nodeTypes, type HostLink, type ProjectData } from './GraphNodes';
-import { workspaceNote, type Host } from '../remote/hosts';
+import { claudeAccountsPath, workspaceNote, type Host } from '../remote/hosts';
 import { nodeOf } from '../remote/scope';
 import type { SlackPublicStatus } from '../../../shared/slack';
 import type { TriggerEvent, TriggerOverview } from '../../../shared/triggers';
@@ -207,7 +207,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
       const hostPosition = manual ? clearHostPosition(saved ?? beside, placedFolders) : automatic;
       // An empty node id says "this computer" explicitly, unlike a shortcut that leaves the computer open.
       ns.push({ id: hostId, type: 'host', position: hostPosition, data: { name: machine.name, active: sessions.filter(s => s.status === 'working' && s.node === machine.node).length, providers: machine.providers, disabled, onAutoPrompt: () => onAutoPrompt(undefined, machine.node ?? ''),
-        ...(machine.node ? machine.claudeAccounts ? { token, accounts: `/api/nodes/${machine.node}/claude-accounts` } : {} : { token, accounts: '/api/claude-accounts' }), ...(machine.node ? { link: { status: machine.status as HostLink['status'], live: machine.live, known: machine.known, canWork: machine.canWork, ...(machine.updating ? { updating: true } : {}), ...(machine.version ? { version: machine.version } : {}) } } : {}), ...(machine.versions ? { versions: machine.versions } : {}), ...(machine.system ? { system: machine.system } : {}) }, style: { width: HOST_WIDTH, height: HOST_HEIGHT, pointerEvents: 'all' }, zIndex: 20, draggable: manual, dragHandle: '.host-node', selectable: false, focusable: false });
+        ...(claudeAccountsPath(machine) ? { token, accounts: claudeAccountsPath(machine) } : {}), ...(machine.node ? { link: { status: machine.status as HostLink['status'], live: machine.live, known: machine.known, canWork: machine.canWork, ...(machine.updating ? { updating: true } : {}), ...(machine.version ? { version: machine.version } : {}) } } : {}), ...(machine.versions ? { versions: machine.versions } : {}), ...(machine.system ? { system: machine.system } : {}) }, style: { width: HOST_WIDTH, height: HOST_HEIGHT, pointerEvents: 'all' }, zIndex: 20, draggable: manual, dragHandle: '.host-node', selectable: false, focusable: false });
       // The Slack and trigger monitor belongs to this computer and sits right after its folders.
       if (!machine.node && monitorShown) { monitorAt = x; x += monitorWidth + 36; }
       if (machineIndex < machines.length - 1) x += 72;
