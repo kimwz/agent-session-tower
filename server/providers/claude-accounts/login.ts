@@ -117,6 +117,7 @@ export class ClaudeLogin {
 
   private async removeFolder(directory: string): Promise<void> {
     try { await removeClaudeStore(directory, { ...(this.options.platform ? { platform: this.options.platform } : {}), ...(this.options.keychain ? { keychain: this.options.keychain } : {}) }); }
+    // best-effort: a folder left behind holds only an abandoned sign-in; the next login uses a new one.
     catch { await rm(directory, { recursive: true, force: true }).catch(() => {}); }
   }
 

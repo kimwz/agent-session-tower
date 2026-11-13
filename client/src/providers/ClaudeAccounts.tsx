@@ -82,10 +82,12 @@ export function ClaudeLoginDialog({ token, onClose }: { token: string; onClose: 
   // The sign-in finishes on the server; follow it while it runs.
   useEffect(() => {
     if (!active || error) return;
+    // best-effort: a missed reading is followed by the next one.
     const timer = setInterval(() => { void api<ClaudeAccountsAnswer>('/api/claude-accounts').then(answer => setLogin(answer.login)).catch(() => {}); }, 1500);
     return () => clearInterval(timer);
   }, [active, error]);
   const close = () => {
+    // best-effort: an uncancelled sign-in ends by itself after ten minutes.
     if (login && LOGIN_ACTIVE.includes(login.state)) void post(token, '/api/claude-accounts/login/cancel').catch(() => {});
     onClose();
   };

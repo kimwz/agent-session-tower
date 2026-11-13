@@ -53,7 +53,7 @@ export const systemKeychain: Keychain = {
   },
   async remove(account, service) {
     try { await run(['delete-generic-password', '-a', account, '-s', service]); }
-    catch { /* No such item is the outcome removal wants. */ }
+    catch { /* best-effort: no such item is the outcome removal wants. */ }
   },
 };
 
@@ -94,7 +94,7 @@ export async function readClaudeStore(options: StoreOptions = {}): Promise<Store
 export const oauthOf = (reading: StoreReading): Json | undefined => reading.kind === 'stored' ? object(reading.blob.claudeAiOauth) : undefined;
 
 async function fileExists(path: string): Promise<boolean> {
-  try { return (await stat(path)).isFile(); } catch { return false; }
+  try { return (await stat(path)).isFile(); } catch { return false; } // best-effort: no file means nothing to keep in step
 }
 
 async function replaceInFile(path: string, oauth: Json, create: boolean): Promise<void> {
@@ -117,7 +117,7 @@ export async function writeClaudeOAuth(oauth: Json, options: StoreOptions = {}):
   const keychain = options.keychain || systemKeychain;
   let blob: Json = {};
   let raw: string | undefined;
-  try { raw = await keychain.read(storage.account, storage.service); } catch { /* No item yet: a new one is made. */ }
+  try { raw = await keychain.read(storage.account, storage.service); } catch { /* best-effort: no item yet, so a new one is made. */ }
   if (raw !== undefined) {
     // An item Tower cannot parse is never overwritten: it may hold sign-ins Tower does not know.
     const parsed = object(JSON.parse(raw));

@@ -112,7 +112,7 @@ export class ClaudeAccounts {
   /** One account change at a time: syncs, switches, sign-ins, removals and usage reads never interleave. */
   private exclusive<T>(work: () => Promise<T>): Promise<T> {
     const next = this.queue.then(async () => { await this.loaded; return work(); });
-    this.queue = next.catch(() => {});
+    this.queue = next.catch(() => {}); // best-effort: each caller gets its own error; the queue only keeps the order.
     return next;
   }
 
@@ -293,7 +293,7 @@ export class ClaudeAccounts {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     this.stopping.abort();
-    await this.queue.catch(() => {});
+    await this.queue.catch(() => {}); // best-effort: stopping only waits for the work in hand; its caller saw its error.
   }
 
   /** Reads every inactive account's usage, renewing its own token when needed. Skipped while the active account is unknown. */
