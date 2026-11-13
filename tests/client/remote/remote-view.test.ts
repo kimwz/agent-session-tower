@@ -72,6 +72,15 @@ test('two computers with the same folder and session ids stay apart in lists, fr
   assert.equal(older.hosts[1].canWork, false, 'a computer whose worker cannot take remote work is shown but not sent work');
 });
 
+test('a connected computer manages its Claude accounts only when its Tower says it can', () => {
+  const same = snapshot([]);
+  const hosts = (features: string[], status: 'connected' | 'offline' = 'connected') => combinedView(snapshot([], { nodes: [remote(B, 'studio', { features, ...(status === 'connected' ? {} : { status, streaming: false }) })] }), new Map([[B, same]])).hosts;
+  assert.equal(hosts(['read', 'work', 'claudeAccounts'])[1].claudeAccounts, true);
+  assert.equal(hosts(['read', 'work'])[1].claudeAccounts, undefined, 'an older Tower shows no account controls');
+  assert.equal(hosts(['read', 'work', 'claudeAccounts'], 'offline')[1].claudeAccounts, undefined, 'nor one that is not connected');
+  assert.equal(hosts(['read', 'work', 'claudeAccounts'])[0].claudeAccounts, undefined, 'this computer is managed through its own path');
+});
+
 test('temporary folders stay off the canvas on every computer', () => {
   const sessions = [session(`@${B}/codex:1`, `@${B}//private/tmp/worktree`, { node: B }), session(`@${B}/codex:2`, `@${B}//work/app`, { node: B })];
   assert.deepEqual(canvasVisibleSessions(sessions, [], false).map(item => item.id), [`@${B}/codex:2`]);

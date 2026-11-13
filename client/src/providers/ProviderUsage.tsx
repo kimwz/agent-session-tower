@@ -3,11 +3,11 @@ import type { Provider, ProviderHealth, UsageWindow } from '../../../shared/type
 import { ProviderIcon } from '../common/Icons';
 import { absoluteTime, providerLabels, relativeTime } from '../common/lib';
 import { useI18n } from '../i18n/i18n';
-import { ClaudeAccounts, ClaudeLoginDialog } from './ClaudeAccounts';
+import { ClaudeAccounts, ClaudeLoginDialog, type ClaudeAccountsTarget } from './ClaudeAccounts';
 import { accountLabel, usageAheadOfTime, usageElapsedPercent, usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from './provider-usage';
 
-/** `accountsToken`: on this page's own computer, its request token; the tooltip then lists and switches its saved Claude accounts. */
-export function ProviderUsageMeter({ provider, health, accountsToken }: { provider: Provider; health?: ProviderHealth; accountsToken?: string }) {
+/** `accounts`: where this computer's saved Claude accounts are managed, with this page's request token; the tooltip then lists and switches them. */
+export function ProviderUsageMeter({ provider, health, accounts }: { provider: Provider; health?: ProviderHealth; accounts?: ClaudeAccountsTarget }) {
   const { t } = useI18n();
   const id = useId();
   const [open, setOpen] = useState(false);
@@ -23,12 +23,12 @@ export function ProviderUsageMeter({ provider, health, accountsToken }: { provid
   const tooltip = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const element = tooltip.current;
-    if (!open || !element || !accountsToken) return;
+    if (!open || !element || !accounts || provider !== 'claude') return;
     const fit = () => { element.style.maxHeight = `${Math.max(160, window.innerHeight - element.getBoundingClientRect().top - 8)}px`; };
     fit();
     window.addEventListener('resize', fit);
     return () => window.removeEventListener('resize', fit);
-  }, [open, accountsToken]);
+  }, [open, accounts, provider]);
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60_000);
@@ -58,9 +58,9 @@ export function ProviderUsageMeter({ provider, health, accountsToken }: { provid
       {windows.length ? <dl>{windows.map(window => <UsageWindowDetail key={window.id} window={window} now={now} />)}</dl> : <p className="usage-unavailable">{usageUnavailableReason(usage)}</p>}
       {stale && <p className="usage-stale">{usage?.status === 'loading' ? t('이전 정보 · 새 사용량 확인 중') : t('이전 정보 · 새 사용량을 불러오지 못했습니다.')}</p>}
       {usage?.updatedAt && <small>{t('확인: {0}', { 0: relativeTime(usage.updatedAt) })}</small>}
-      {provider === 'claude' && accountsToken && <ClaudeAccounts token={accountsToken} onAddAccount={() => { setOpen(false); setAdding(true); }} />}
+      {provider === 'claude' && accounts && <ClaudeAccounts target={accounts} onAddAccount={() => { setOpen(false); setAdding(true); }} />}
     </div>}
-    {adding && accountsToken && <ClaudeLoginDialog token={accountsToken} onClose={() => setAdding(false)} />}
+    {adding && accounts && <ClaudeLoginDialog target={accounts} onClose={() => setAdding(false)} />}
   </div>;
 }
 
@@ -77,7 +77,7 @@ function UsageWindowDetail({ window, now }: { window: UsageWindow; now: number }
   </div>;
 }
 
-export function ProviderUsage({ providers, accountsToken }: { providers: ProviderHealth[]; accountsToken?: string }) {
+export function ProviderUsage({ providers, accounts }: { providers: ProviderHealth[]; accounts?: ClaudeAccountsTarget }) {
   const { t } = useI18n();
-  return <div className="provider-usage" aria-label={t('계정 사용량 · 모든 기기')}><div className="provider-usage-rings">{(['claude', 'codex'] as const).map(provider => <ProviderUsageMeter key={provider} provider={provider} health={providers.find(health => health.provider === provider)} accountsToken={accountsToken} />)}</div><span className="provider-usage-scope">{t('계정 사용량 · 모든 기기')}</span></div>;
+  return <div className="provider-usage" aria-label={t('계정 사용량 · 모든 기기')}><div className="provider-usage-rings">{(['claude', 'codex'] as const).map(provider => <ProviderUsageMeter key={provider} provider={provider} health={providers.find(health => health.provider === provider)} accounts={accounts} />)}</div><span className="provider-usage-scope">{t('계정 사용량 · 모든 기기')}</span></div>;
 }

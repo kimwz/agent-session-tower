@@ -52,6 +52,7 @@ import { projectSessionStates } from './sessions/snapshot.js';
 import { claudeEnvironmentSignIn, ProviderCapabilities, type ClaudeCredential } from './providers/capabilities.js';
 import { ClaudeAccounts } from './providers/claude-accounts/accounts.js';
 import { ClaudeLogin } from './providers/claude-accounts/login.js';
+import { claudeAccountLink, type ClaudeAccountRoutes } from './http/claude-account-routes.js';
 import { RepositoryMonitor, watchedRepositoryPaths } from './repositories/monitor.js';
 import { installAgentGuidance } from './agent-guidance/install.js';
 import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSummary } from '../shared/skills.js';
@@ -380,6 +381,7 @@ async function main() {
     : resolve(stateDir) !== resolve(defaultStateDir()) && !process.env.CLAUDE_CONFIG_DIR ? '기본 상태 폴더의 Tower에서만 Claude 계정을 전환할 수 있습니다.' : undefined;
   const claudeAccounts = new ClaudeAccounts({ stateDir, onChange: changed, refreshMeter: () => { void capabilities.refresh(); } });
   const claudeLogin = new ClaudeLogin({ directory: claudeAccounts.directory, adopt: directory => claudeAccounts.adopt(directory), onChange: changed });
+  const claudeAccountRoutes: ClaudeAccountRoutes = { accounts: claudeAccounts, login: claudeLogin, unavailable: () => claudeAccountsOff };
   // The Codex probe starts the CLI, so it never runs while this account's Codex is being updated.
   const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed, stateDir, unlessUpdating: (provider, read) => unlessUpdating(stateDir, provider, read),
     ...(claudeAccountsOff ? {} : { onClaudeReading: (credential: ClaudeCredential, usage: ProviderUsage) => claudeAccounts.observe(credential, usage) }) });
@@ -706,9 +708,11 @@ async function main() {
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname, follow: followedHost,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.
-    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('secretSharing') ? [SECRET_SHARING_FEATURE] : []), ...(runs.supports('secretExclusions') ? [SECRET_EXCLUSIONS_FEATURE] : []), ...(runs.supports('compaction') ? ['compaction'] : []), 'followHost', ...(runs.supports('managedSettings') ? ['managedSettings'] : []), ...(runs.supports('secretMachines') ? [SECRET_MACHINES_FEATURE] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
+    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : []), ...(runs.supports('secretSharing') ? [SECRET_SHARING_FEATURE] : []), ...(runs.supports('secretExclusions') ? [SECRET_EXCLUSIONS_FEATURE] : []), ...(runs.supports('compaction') ? ['compaction'] : []), 'followHost', ...(runs.supports('managedSettings') ? ['managedSettings'] : []), ...(runs.supports('secretMachines') ? [SECRET_MACHINES_FEATURE] : [])] : [], 'status', ...updates.managed ? ['update'] : [], 'claudeAccounts'],
     handle: async (req, res, principal) => {
       if (await managedReceiver.handle(req, res, principal)) return;
+      // Its saved Claude accounts, managed from the controller's owner page; each change is recorded for this computer's owner.
+      if (await claudeAccountLink(req, res, claudeAccountRoutes, change => { remoteChanges.record({ controllerId: principal.controllerId, action: 'claude-account', detail: change }); changed(); })) return;
       if (await handleSecretLink(req, res, principal.controllerId, runs, { excluded: path => exclusions.excludesNow(path), follows: async id => await followedHost.reload() === id })) return;
       return remoteRouter.handle(req, res, principal);
     },
@@ -824,7 +828,7 @@ async function main() {
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })), managed: managedSync,
       // The trust is made first when it is still pending (right after joining), so the folder can be shared at once.
       afterClone: async id => { await followingSecrets?.align(id); await followingSecrets?.shareFolders(id, managedSync?.folders(id) ?? []); } } : { error: linkError },
-    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp, todoTools, claudeAccounts: { accounts: claudeAccounts, login: claudeLogin, unavailable: () => claudeAccountsOff },
+    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp, todoTools, claudeAccounts: claudeAccountRoutes,
     decisions: {
       overview: () => decisions.overview(),
       // Turning the key or the canvas outcomes on or off shows or hides them at once.

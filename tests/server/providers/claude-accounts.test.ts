@@ -52,7 +52,9 @@ function fakeAnthropic() {
     }
     if (url.endsWith('/api/oauth/usage')) {
       usageReads.push(token);
-      return Response.json({ five_hour: { utilization: 42, resets_at: new Date(NOW + 2 * HOUR).toISOString() }, seven_day: { utilization: 7, resets_at: new Date(NOW + 72 * HOUR).toISOString() } });
+      // The quota parser judges resets by the real clock, so they lie ahead of it whatever day the test runs.
+      const real = Date.now();
+      return Response.json({ five_hour: { utilization: 42, resets_at: new Date(real + 2 * HOUR).toISOString() }, seven_day: { utilization: 7, resets_at: new Date(real + 72 * HOUR).toISOString() } });
     }
     return new Response('not found', { status: 404 });
   }) as typeof globalThis.fetch;
