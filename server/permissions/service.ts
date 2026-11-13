@@ -48,6 +48,11 @@ const failure = (message: string, kind: ErrorKind = 'invalid') => new TowerError
 const empty = (): PermissionState => ({ version: 1, rules: [], requests: [], codex: [] });
 /** A conversation the reviewer sent back for a narrower request this often in a day hears from the owner next. */
 const MAX_NARROW = 2;
+/**
+ * What an agent is told when the reviewer allowed its step but Tower keeps no lasting rule for it (a hard limit, an
+ * owner's overlapping rule). That is no narrowing the agent got wrong, so it never counts toward MAX_NARROW.
+ */
+export const ONE_SHOT_SUGGESTION = 'Ask permissions_run for the exact command needed for this task, with every argument; no lasting rule is required.';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** The reviewer's answer, as Tower's reviewer hands it over. */
@@ -356,8 +361,8 @@ export class PermissionService {
       }
       if (result.verdict === 'narrow') {
         const since = Date.parse(at) - DAY_MS;
-        const narrowed = this.state.requests.filter(item => item.sessionId === request.sessionId && item.review?.verdict === 'narrow' && Date.parse(item.review.at ?? item.createdAt) >= since).length;
-        if (narrowed >= MAX_NARROW) return owner('이 대화는 오늘 이미 범위를 줄여 다시 요청했습니다');
+        const narrowed = this.state.requests.filter(item => item.sessionId === request.sessionId && item.review?.verdict === 'narrow' && item.review.suggestion !== ONE_SHOT_SUGGESTION && Date.parse(item.review.at ?? item.createdAt) >= since).length;
+        if (narrowed >= MAX_NARROW && result.suggestion?.trim() !== ONE_SHOT_SUGGESTION) return owner('이 대화는 오늘 이미 범위를 줄여 다시 요청했습니다');
         const suggestion = result.suggestion?.trim().slice(0, 500);
         {
           const batch = new PermissionBatch(this.state);

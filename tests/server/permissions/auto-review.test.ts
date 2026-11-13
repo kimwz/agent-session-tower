@@ -575,12 +575,15 @@ test('a reviewer approval beside an overlapping owner rule sends the agent to pe
   const told: string[] = [];
   const reviewer = new PermissionReviewer({ service: f.service, sources: sources(f, []), reachable: () => true, notify: async (_request, message) => { told.push(message); },
     model: async () => ({ verdict: 'approve', rule: null, scope: null, suggestion: null, reason: '머지는 요청된 작업입니다.', missing: [] }) });
-  const { request } = await f.service.request({ kind: 'command', value: 'gh pr merge 6', providers: ['claude', 'codex'], scope: 'project', reason: 'merge' }, agent('claude:one'));
-  reviewer.wake();
-  await reviewer.flush();
-  const item = f.service.overview().requests.find(entry => entry.id === request.id)!;
-  assert.deepEqual([item.status, item.review!.verdict], ['withdrawn', 'narrow']);
-  assert.match(item.review!.reason!, /겹치는 소유자 규칙/);
+  // Not a narrowing the agent got wrong: any number of them in a day stay with the agent.
+  for (const pr of [6, 7, 8]) {
+    const { request } = await f.service.request({ kind: 'command', value: `gh pr merge ${pr}`, providers: ['claude', 'codex'], scope: 'project', reason: 'merge' }, agent('claude:one', `r${pr}`));
+    reviewer.wake();
+    await reviewer.flush();
+    const item = f.service.overview().requests.find(entry => entry.id === request.id)!;
+    assert.deepEqual([item.status, item.review!.verdict], ['withdrawn', 'narrow'], `PR ${pr}`);
+    assert.match(item.review!.reason!, /겹치는 소유자 규칙/);
+  }
   assert.match(told.join('\n'), /permissions_run/);
   assert.deepEqual(f.service.overview().rules.map(rule => rule.value), ['gh pr merge'], 'no reviewer rule beside the owner’s');
 });
