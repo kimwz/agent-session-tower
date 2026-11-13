@@ -12,6 +12,7 @@ import { isReopenableLink } from '../../shared/reopenable-links.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
+import { claudeAccountRoute, type ClaudeAccountRoutes } from './claude-account-routes.js';
 import { attachmentUploadRoute, uploadAppendPath, uploadProgressPath, ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus, parseAutoPrompt, parseAutoPromptSuggestion, parseCreateSession, parseMessage, readJson, UUID } from './requests.js';
 import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSummary } from '../../shared/skills.js';
 import { MAX_SKILL_BUNDLE_BYTES } from '../../shared/skills.js';
@@ -132,6 +133,7 @@ export interface HttpOptions {
   storageRefusal?: () => Promise<{ code: string; message: string } | undefined>;
   /** Moves this Tower to a version (the latest release when none is given), when it runs as the background service. */
   towerUpdate?: (version?: string) => Promise<{ status: number; body: unknown }>;
+  claudeAccounts?: ClaudeAccountRoutes;
   /** The owner's "update now": running turns wrap up, the rest stop at a deadline, and the worker switches. */
   forceRunnerUpdate?: () => Promise<{ status: number; body: unknown }>;
   /** Full backups of this Tower's settings; made and restored only from this Tower's own pages, by the owner. */
@@ -199,7 +201,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, storageRefusal, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp, todoTools }: HttpOptions) {
+export function createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, storageRefusal, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp, todoTools, claudeAccounts }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   // The Tower password's part in the vault: value viewing of each sign-in, and unlock, lock and credential changes in one turn.
@@ -796,6 +798,12 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       const ownerPage = Boolean(origin) && (identity.local || Boolean(auth?.session(sessionId, identity.ip))) && req.headers['x-tower-master'] === undefined
         && req.headers['x-tower-agent'] === undefined && req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] === undefined && !/^\s*TodoKey\b/i.test(req.headers.authorization ?? '');
       if (await todoRoute(req, res, url, path, backend.todos, json, ownerPage)) return;
+      // A browser names no origin on its own GET requests, so reading the list is gated without one. A sign-in code typed
+      // elsewhere travels only over HTTPS, as the vault's values do.
+      const notAgent = req.headers['x-tower-master'] === undefined && req.headers['x-tower-agent'] === undefined && req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] === undefined;
+      if (await claudeAccountRoute(req, res, path, claudeAccounts, json, req.method === 'GET'
+        ? notAgent && (identity.local || Boolean(auth?.session(sessionId, identity.ip)))
+        : ownerPage && (identity.local || secureOrigin || ('encrypted' in req.socket && Boolean(req.socket.encrypted))))) return;
       if (req.method === 'POST' && path === '/api/groups') {
         const patch = normalizeProjectGroupPatch(await readJson(req));
         if (!backend.setGroup) return json(res, 503, { error: '폴더 그룹을 저장할 수 없습니다.' });

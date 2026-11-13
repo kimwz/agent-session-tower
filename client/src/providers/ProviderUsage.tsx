@@ -1,14 +1,17 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { Provider, ProviderHealth, UsageWindow } from '../../../shared/types';
 import { ProviderIcon } from '../common/Icons';
 import { absoluteTime, providerLabels, relativeTime } from '../common/lib';
 import { useI18n } from '../i18n/i18n';
+import { ClaudeAccounts, ClaudeLoginDialog } from './ClaudeAccounts';
 import { accountLabel, usageAheadOfTime, usageElapsedPercent, usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from './provider-usage';
 
-export function ProviderUsageMeter({ provider, health }: { provider: Provider; health?: ProviderHealth }) {
+/** `accountsToken`: on this page's own computer, its request token; the tooltip then lists and switches its saved Claude accounts. */
+export function ProviderUsageMeter({ provider, health, accountsToken }: { provider: Provider; health?: ProviderHealth; accountsToken?: string }) {
   const { t } = useI18n();
   const id = useId();
   const [open, setOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
   const container = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -16,6 +19,16 @@ export function ProviderUsageMeter({ provider, health }: { provider: Provider; h
     document.addEventListener('pointerdown', closeOutside);
     return () => document.removeEventListener('pointerdown', closeOutside);
   }, [open]);
+  // The account list can run past the bottom of the screen (a phone, a low canvas node): it scrolls within what is visible.
+  const tooltip = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const element = tooltip.current;
+    if (!open || !element || !accountsToken) return;
+    const fit = () => { element.style.maxHeight = `${Math.max(160, window.innerHeight - element.getBoundingClientRect().top - 8)}px`; };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, [open, accountsToken]);
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60_000);
@@ -38,14 +51,16 @@ export function ProviderUsageMeter({ provider, health }: { provider: Provider; h
       </span>
       <span className="usage-summary"><strong>{percent}{stale && <i aria-hidden="true">*</i>}</strong><small>{provider === 'claude' ? 'Claude' : 'Codex'} · {primary ? usageWindowLabel(primary) : label}</small></span>
     </button>
-    {open && <div className="usage-tooltip" id={id} role="tooltip">
+    {open && <div ref={tooltip} className="usage-tooltip" id={id} role="tooltip">
       <strong>{t('{0} 계정 사용량', { 0: providerLabels[provider] })}</strong>
       {account && <p className="usage-account">{t('연결된 계정: {0}', { 0: account })}</p>}
       <p>{t('모든 기기에서 공유하는 계정 한도입니다.')}</p>
       {windows.length ? <dl>{windows.map(window => <UsageWindowDetail key={window.id} window={window} now={now} />)}</dl> : <p className="usage-unavailable">{usageUnavailableReason(usage)}</p>}
       {stale && <p className="usage-stale">{usage?.status === 'loading' ? t('이전 정보 · 새 사용량 확인 중') : t('이전 정보 · 새 사용량을 불러오지 못했습니다.')}</p>}
       {usage?.updatedAt && <small>{t('확인: {0}', { 0: relativeTime(usage.updatedAt) })}</small>}
+      {provider === 'claude' && accountsToken && <ClaudeAccounts token={accountsToken} onAddAccount={() => { setOpen(false); setAdding(true); }} />}
     </div>}
+    {adding && accountsToken && <ClaudeLoginDialog token={accountsToken} onClose={() => setAdding(false)} />}
   </div>;
 }
 
@@ -62,7 +77,7 @@ function UsageWindowDetail({ window, now }: { window: UsageWindow; now: number }
   </div>;
 }
 
-export function ProviderUsage({ providers }: { providers: ProviderHealth[] }) {
+export function ProviderUsage({ providers, accountsToken }: { providers: ProviderHealth[]; accountsToken?: string }) {
   const { t } = useI18n();
-  return <div className="provider-usage" aria-label={t('계정 사용량 · 모든 기기')}><div className="provider-usage-rings">{(['claude', 'codex'] as const).map(provider => <ProviderUsageMeter key={provider} provider={provider} health={providers.find(health => health.provider === provider)} />)}</div><span className="provider-usage-scope">{t('계정 사용량 · 모든 기기')}</span></div>;
+  return <div className="provider-usage" aria-label={t('계정 사용량 · 모든 기기')}><div className="provider-usage-rings">{(['claude', 'codex'] as const).map(provider => <ProviderUsageMeter key={provider} provider={provider} health={providers.find(health => health.provider === provider)} accountsToken={accountsToken} />)}</div><span className="provider-usage-scope">{t('계정 사용량 · 모든 기기')}</span></div>;
 }

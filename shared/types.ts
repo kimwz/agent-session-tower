@@ -160,6 +160,35 @@ export interface ProviderAccount {
   /** The native plan id, such as `max` or `plus`; `api_key` for a Codex API key sign-in. */
   plan?: string;
 }
+/**
+ * A Claude account saved on this computer for switching, as the owner's own page sees it (never in the snapshot): the full
+ * email, so similar addresses stay apart. `active` is the account Claude Code signs in with now.
+ */
+export interface ClaudeAccountSummary {
+  id: string;
+  email: string;
+  displayName?: string;
+  organizationName?: string;
+  plan?: string;
+  addedAt: string;
+  active: boolean;
+  /** The last quota reading; `stale` with `reason` when the newest attempt failed. */
+  usage?: { windows: UsageWindow[]; updatedAt: string };
+  stale?: boolean;
+  reason?: string;
+  /** The saved sign-in was refused: only a new sign-in brings it back. */
+  problem?: 'sign_in_again';
+}
+/** Adding an account: Tower's `claude auth login`, waiting for the code its sign-in page shows. */
+export interface ClaudeLoginStatus {
+  id: string;
+  state: 'starting' | 'waiting_code' | 'verifying' | 'done' | 'failed';
+  url?: string;
+  error?: string;
+  account?: ClaudeAccountSummary;
+}
+/** `reason`: why this Tower does not manage Claude accounts, when `available` is false. */
+export interface ClaudeAccountsAnswer { available: boolean; accounts: ClaudeAccountSummary[]; login?: ClaudeLoginStatus; reason?: string }
 export interface UsageWindow {
   id: string;
   usedPercent: number;

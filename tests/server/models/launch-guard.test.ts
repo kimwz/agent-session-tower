@@ -34,7 +34,8 @@ test('only the known launchers pass a model to Claude or Codex, and they start p
   assert.deepEqual(model, ['server/auto-prompt/native.ts', 'server/master/first-reply.ts', 'server/runs/claude-args.ts', 'server/sessions/exec-lineage.ts', 'shared/models.ts']);
   const launchers = [...files].filter(([path, text]) => path !== 'server/providers/discovery.ts'
     && [...text.matchAll(/findExecutable\)?\(\s*([^,)]+)/g)].some(match => !["'gh'", "'git'"].includes(match[1]!.trim()))).map(([path]) => path).sort();
-  assert.deepEqual(launchers, ['server/auto-prompt/native.ts', 'server/master/first-reply.ts', 'server/runs/manager.ts', 'server/updates/tools.ts']);
+  // Adding a Claude account runs `claude auth login`, which takes no model.
+  assert.deepEqual(launchers, ['server/auto-prompt/native.ts', 'server/master/first-reply.ts', 'server/providers/claude-accounts/login.ts', 'server/runs/manager.ts', 'server/updates/tools.ts']);
   assert.match(files.get('server/master/first-reply.ts')!, /resolveModel\(this\.options\.stateDir, 'voice\.firstReply'\)/);
 });
 

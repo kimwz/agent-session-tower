@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.183.0] - 2026-11-13
+
+- **Claude 계정을 사용량 화면에서 바로 바꿉니다.** 이 컴퓨터의 Claude 사용량에 마우스를 올리면(휴대폰에서는 누르면) 저장된 Claude 계정이 모두 보입니다. 계정마다 이메일·조직·플랜과 5시간·주간 사용량, 확인 시각이 보이고, **전환**을 누르면 그 계정이 이 컴퓨터의 Claude 로그인이 됩니다. 새로 시작하는 Claude 실행(Tower의 턴과 터미널의 `claude` 모두)부터 그 계정을 쓰고, 진행 중인 작업은 끊지 않습니다. 이미 돌고 있는 Claude는 토큰을 갱신할 때 새 계정으로 넘어갑니다.
+- **계정은 Tower에서 추가합니다.** **계정 추가**를 누르면 Tower가 따로 마련한 폴더에서 `claude auth login`을 실행해 로그인 링크를 보여 줍니다. 어느 기기에서든 그 링크로 로그인하고 나오는 코드를 붙여넣으면 계정이 저장되며, 지금 쓰는 계정은 그대로입니다. 지금 로그인된 계정(터미널에서 `/login`으로 바꾼 계정도)은 Tower가 처음 볼 때 자동으로 저장됩니다. 쓰고 있지 않은 계정은 목록에서 지울 수 있습니다.
+- **쓰지 않는 계정의 사용량도 새로 읽습니다.** 5분마다 Tower가 그 계정의 토큰을 직접 갱신해 사용량을 읽습니다. 쓰고 있는 계정의 토큰은 Claude Code의 것이므로 Tower가 갱신하지 않습니다. 저장된 로그인이 거부되면 그 계정에 **다시 로그인**이 표시되고 마지막 사용량은 이전 정보로 남습니다.
+- **로그인 정보는 Claude Code와 같은 곳에 보관합니다.** macOS에서는 키체인, 그 밖에서는 계정 폴더의 `.credentials.json`이며, 토큰이 페이지·로그·스냅숏에 나가지 않습니다. 전환할 때는 키체인 항목의 Claude 로그인만 바꾸고 MCP 로그인 같은 나머지는 그대로 둡니다. `~/.claude/.credentials.json`이 이미 있으면 같이 바꿔, 키체인이 잠긴 SSH 셸도 같은 계정을 씁니다. 계정 목록과 전환·추가는 소유자의 화면에서만 할 수 있습니다(마스터·에이전트·턴의 요청은 거부, 원격은 HTTPS).
+
 ## [1.182.2] - 2026-11-12
 
 - **터미널에서 실행한 Claude(2.1.322)의 대화가 터미널과 같게 보입니다.** Claude가 작업하는 도중에 끝난 백그라운드 작업의 알림(`Background command "…" completed`)은 Claude Code가 대기 명령으로만 기록해 Tower가 버렸는데, 이제 다른 백그라운드 작업 알림처럼 대화에 보입니다. Claude Code가 새 형식(시스템 기록)으로 남기는 `/model` 같은 슬래시 명령과 그 출력도 예전 형식의 `/effort`처럼 보입니다.
