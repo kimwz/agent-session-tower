@@ -107,6 +107,12 @@ export type RemoteAction = 'joined' | 'update' | 'session' | 'message' | 'title'
   | 'auto-prompt-cancel' | 'compact' | 'compact-cancel' | 'repository' | 'folder-name' | 'file' | 'directory' | 'terminal-open' | 'terminal-close' | 'trigger'
   /** Its saved Claude accounts: `switch`, `remove` or `add` (a sign-in started) in `detail`. */
   | 'claude-account';
+/**
+ * Set by a controller on a joined computer's account request it has checked came from its owner's page. The joined computer
+ * serves account requests only with it, so a controller from before that check (1.183 and older) cannot pass them on.
+ */
+export const CLAUDE_ACCOUNTS_CHECKED = 'x-tower-claude-accounts-owner';
+
 export interface RemoteChange {
   at: string; controllerId: string; action: RemoteAction;
   /** The controlling computer's name: now, or when it made the change if it has been released since. */

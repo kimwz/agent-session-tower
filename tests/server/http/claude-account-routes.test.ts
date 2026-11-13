@@ -8,6 +8,7 @@ import { Readable } from 'node:stream';
 import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
 import { claudeAccountLink, type ClaudeAccountRoutes } from '../../../server/http/claude-account-routes.js';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity.js';
+import { CLAUDE_ACCOUNTS_CHECKED } from '../../../shared/link.js';
 import { CALLER_CAPABILITY_HEADER } from '../../../server/runs/session-mcp.js';
 
 test('only the owner’s own page lists, switches or adds Claude accounts; the master, agents and turns are refused', async t => {
@@ -73,8 +74,8 @@ test('over the link a paired controller lists and switches accounts, and each ch
     login: { status: () => undefined, start: async () => ({}), submitCode: () => ({}), cancel: async () => {} },
   } as unknown as ClaudeAccountRoutes;
   const changes: string[] = [];
-  const request = async (path: string, method: string, body?: unknown) => {
-    const req = Object.assign(Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]), { method, url: path, headers: { 'content-type': 'application/json' } }) as unknown as Http2ServerRequest;
+  const request = async (path: string, method: string, body?: unknown, checked = true) => {
+    const req = Object.assign(Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]), { method, url: path, headers: { 'content-type': 'application/json', ...(checked ? { [CLAUDE_ACCOUNTS_CHECKED]: '1' } : {}) } }) as unknown as Http2ServerRequest;
     let status = 0; let text = '';
     const res = { writeHead(code: number) { status = code; }, end(value: string) { text = value; } } as unknown as Http2ServerResponse;
     const handled = await claudeAccountLink(req, res, routes, change => changes.push(change));
@@ -86,6 +87,11 @@ test('over the link a paired controller lists and switches accounts, and each ch
   assert.equal((await request('/api/claude-accounts/switch', 'POST', { id: 'aaaaaaaaaaaa' })).status, 200);
   assert.deepEqual(switched, ['aaaaaaaaaaaa']);
   assert.deepEqual(changes, ['switch']);
+  // A controller from before the owner check (it sends no mark) cannot pass account requests on.
+  const unchecked = await request('/api/claude-accounts/switch', 'POST', { id: 'aaaaaaaaaaaa' }, false);
+  assert.equal(unchecked.status, 403);
+  assert.deepEqual(switched, ['aaaaaaaaaaaa'], 'nothing switched without the mark');
+  assert.equal((await request('/api/claude-accounts', 'GET', undefined, false)).status, 403);
   assert.equal((await request('/api/claude-accounts/switch', 'GET')).handled, false, 'a change asked with GET is not an account request');
   assert.equal((await request('/api/sessions', 'GET')).handled, false);
 });
