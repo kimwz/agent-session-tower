@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.184.0] - 2026-11-13
+
+- **작업 중인 Claude에 보낸 메시지가 바로 들어갑니다.** 지금까지 Tower는 메시지를 Claude에 즉시 보냈지만, Claude는 실행 중인 도구가 끝난 뒤에야 받아들였습니다. 에이전트가 작업자 보고를 기다리는 Bash처럼 몇 분씩 걸리는 명령을 돌리고 있으면 "끼워넣는 중"인 채로 그만큼 기다렸습니다. 이제 Tower는 메시지를 넣으면서 터미널의 Ctrl+B처럼 실행 중인 명령과 하위 에이전트를 백그라운드로 옮깁니다. 명령은 그대로 계속 돌고 끝나면 Claude가 결과를 받으며, 메시지는 그 자리에서 Claude에 전달됩니다. Jev가 끼워넣기로 판단한 메시지와 **지금 끼워넣기**를 누른 메시지 모두 해당합니다. 업데이트 마무리 요청이나 권한 결정 안내처럼 Tower가 스스로 넣는 안내는 지금처럼 진행 중인 단계가 끝난 뒤 들어갑니다.
+- **Claude가 도구 사이에 한 말이 Tower에도 보입니다.** 터미널에서 "· summary"로 표시되는 문장(예: "두 작업자가 끝날 때까지 대기하며, 완료되면 보고하겠습니다.")은 Claude 서버가 에이전트의 말을 요약해 보낸 것으로, 형식은 thinking 블록이고 서명에 `narration`이라고 적혀 있습니다. Tower는 thinking 블록을 모두 숨겨서 이 문장들이 보이지 않았습니다. 이제 대화에서는 "에이전트 · 요약"으로, 실행 출력에서는 일반 답변처럼 보입니다. 다른 컴퓨터의 대화에도 같은 표시가 갑니다. Claude의 추론(일반 thinking)은 지금처럼 보이지 않고, 서명을 정확히 해석할 수 없는 블록도 보이지 않습니다. 마스터가 다른 대화의 결과로 전하는 답은 요약이 아니라 에이전트가 직접 쓴 답에서 고릅니다.
+
 ## [1.183.0] - 2026-11-13
 
 - **Claude 계정을 사용량 화면에서 바로 바꿉니다.** 이 컴퓨터의 Claude 사용량에 마우스를 올리면(휴대폰에서는 누르면) 저장된 Claude 계정이 모두 보입니다. 계정마다 이메일·조직·플랜과 5시간·주간 사용량, 확인 시각이 보이고, **전환**을 누르면 그 계정이 이 컴퓨터의 Claude 로그인이 됩니다. 새로 시작하는 Claude 실행(Tower의 턴과 터미널의 `claude` 모두)부터 그 계정을 쓰고, 진행 중인 작업은 끊지 않습니다. 이미 돌고 있는 Claude는 토큰을 갱신할 때 새 계정으로 넘어갑니다.
