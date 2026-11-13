@@ -438,10 +438,12 @@ const VALUE_OPTIONS: Record<string, Set<string>> = {
  */
 function downloadIntoShell(command: string): boolean {
   if (/(^|[\s;&|(`'"])(\S*\/)?(sh|bash|zsh|dash|ksh)\s+(-[a-z]+\s+)*(-[a-z]*c\s+["']?(\$\(|`)|<\()\s*(curl|wget)\b/i.test(command)) return true;
-  for (const match of command.matchAll(/(?:^|[^\w-])(?:curl|wget)\b[^\n|]*\|(?!\|)([^|;&\n]*)/gi)) {
+  for (const match of command.matchAll(/(?:^|[^\w-])(?:curl|wget)\b[^\n|]*\|(?!\|)\s*([^|;&\n]*)/gi)) {
     // The words of the pipe's next step, quotes dropped; a word left by a quote that closes an ssh command ends it too.
     const words = match[1]!.replace(/["'`)]/g, ' ').trim().split(/\s+/).filter(Boolean);
     let index = 0, ownShell = false;
+    // Variables set for the program (`| INSTALL_K3S_VERSION=v1.30 sh -`) are no program.
+    while (index < words.length && /^\w+=/.test(words[index]!)) index++;
     while (index < words.length) {
       const name = words[index]!.replace(/^.*\//, '');
       if (!['sudo', 'doas', 'env'].includes(name)) break;
@@ -450,7 +452,9 @@ function downloadIntoShell(command: string): boolean {
         const word = words[index]!;
         // Options keep their case: sudo `-s` runs a shell, `-S` only reads a password.
         if (name !== 'env' && (/^-[A-Za-z]*[si][A-Za-z]*$/.test(word) || word === '--shell' || word === '--login')) ownShell = true;
-        index += VALUE_OPTIONS[name]!.has(word) ? 2 : 1;
+        // Short options may be bundled; the last one takes the value (`sudo -Hu deploy`).
+        const last = /^-[A-Za-z]{2,}$/.test(word) ? `-${word.at(-1)}` : word;
+        index += VALUE_OPTIONS[name]!.has(last) ? 2 : 1;
       }
     }
     const program = words[index]?.replace(/^.*\//, '').toLowerCase();
