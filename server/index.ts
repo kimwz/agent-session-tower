@@ -41,7 +41,7 @@ import { VoiceTurnEnd } from './master/voice-turn-end.js';
 import type { WebCredentials } from './tower-tools/tower-client.js';
 import { ownerMcpOverHttp, startOwnerMcp } from './owner-mcp/tools.js';
 import { startSlackMcp, startTowerMcp } from './slack/mcp-bridge.js';
-import { findExecutable, getProviderHealth } from './providers/discovery.js';
+import { getProviderHealth } from './providers/discovery.js';
 import { createMonitorServer } from './http/server.js';
 import { acquireStateLock, MonitorAlreadyRunning } from './instance/state-lock.js';
 import { existingServerUrl } from './instance/existing-server.js';
@@ -376,7 +376,7 @@ async function main() {
   // The Claude accounts saved on this computer, switched from the usage meter; each meter reading of Claude Code's own
   // sign-in tells them which one is in use.
   const claudeAccounts = new ClaudeAccounts({ stateDir, onChange: changed, refreshMeter: () => { void capabilities.refresh(); } });
-  const claudeLogin = new ClaudeLogin({ directory: claudeAccounts.directory, executable: () => findExecutable('claude'), adopt: directory => claudeAccounts.adopt(directory), onChange: changed });
+  const claudeLogin = new ClaudeLogin({ directory: claudeAccounts.directory, adopt: directory => claudeAccounts.adopt(directory), onChange: changed });
   const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed, stateDir, unlessUpdating: (provider, read) => unlessUpdating(stateDir, provider, read),
     onClaudeReading: (credential, usage) => claudeAccounts.observe(credential, usage) });
   // This Tower keeps itself current when it runs as the service; its worker keeps Claude Code and Codex current.

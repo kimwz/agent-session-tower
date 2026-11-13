@@ -13,7 +13,9 @@ import { writePrivateFile } from '../../stores/private-json.js';
  */
 type Json = Record<string, unknown>;
 const MAX_JSON = 2 * 1024 * 1024;
-// `security -i` reads one command line; longer payloads go on the command line, as Claude Code does.
+// `security -i` truncates a command line near 4096 characters (it then stores a cut item and fails). A longer item (one with
+// MCP sign-ins usually is) goes on the command line, as Claude Code itself writes it on every token renewal: only this user's
+// processes can read another process's arguments on macOS, and the same user can read the keychain item anyway.
 const SECURITY_STDIN_LIMIT = 4000;
 const object = (value: unknown): Json | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
 

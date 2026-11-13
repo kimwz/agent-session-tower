@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { findExecutable } from '../discovery.js';
 import { removeClaudeStore, type Keychain } from './storage.js';
 import type { ClaudeAccountView } from './accounts.js';
 import type { ClaudeLoginStatus } from '../../../shared/types.js';
@@ -24,7 +25,8 @@ const DROPPED_ENV = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BAS
 export type ClaudeLoginOptions = {
   /** Where new account folders go (the saved accounts' folder). */
   directory: string;
-  executable: () => Promise<string | undefined>;
+  /** The Claude Code CLI; found on PATH by default. */
+  executable?: () => Promise<string | undefined>;
   adopt: (directory: string) => Promise<ClaudeAccountView>;
   onChange: () => void;
   env?: NodeJS.ProcessEnv;
@@ -42,7 +44,7 @@ export class ClaudeLogin {
   async start(): Promise<ClaudeLoginState> {
     if (this.current && ['starting', 'waiting_code', 'verifying'].includes(this.current.state.state)) return this.status()!;
     await this.discard();
-    const executable = await this.options.executable();
+    const executable = await (this.options.executable ?? (() => findExecutable('claude')))();
     if (!executable) throw new Error('Claude Code CLI를 찾지 못했습니다.');
     const id = randomBytes(6).toString('hex');
     const directory = join(this.options.directory, `login-${id}`);
