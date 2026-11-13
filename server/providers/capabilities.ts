@@ -213,7 +213,7 @@ export function parseCodexConfig(value: unknown): Pick<Capabilities, 'defaultMod
 }
 
 /** Reads the signed-in account's quota; `credential` skips reading the native storage again. */
-export async function readClaudeUsage(options: CredentialReaderOptions & { fetch?: typeof fetch; credential?: ClaudeCredential }): Promise<ProviderUsage> {
+export async function readClaudeUsage(options: CredentialReaderOptions & { fetch?: typeof fetch; credential?: ClaudeCredential; now?: () => number }): Promise<ProviderUsage> {
   options = { ...options, signal: AbortSignal.any([options.signal, AbortSignal.timeout(5000)]) };
   const credentials = options.credential || await readClaudeCredential(options);
   if (!credentials.token) return unavailable(credentials.reason || 'not_signed_in');
@@ -239,7 +239,7 @@ export async function readClaudeUsage(options: CredentialReaderOptions & { fetch
         if (size > MAX_JSON) { await reader.cancel(); return unavailable('no_data'); }
         chunks.push(part.value);
       }
-      return parseClaudeUsage(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      return parseClaudeUsage(JSON.parse(Buffer.concat(chunks).toString('utf8')), options.now ? options.now() : Date.now());
     } finally { reader.releaseLock(); }
   } catch { return unavailable('unreachable'); }
 }

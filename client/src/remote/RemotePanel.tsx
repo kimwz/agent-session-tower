@@ -216,11 +216,12 @@ export function RemoteChanges({ initial }: { initial?: RemoteChange[] }) {
   const actions: Record<RemoteAction, string> = { joined: t('제어를 시작함'), update: t('업데이트 요청'), session: t('새 세션'), message: t('메시지 보냄'), title: t('제목 변경'), close: t('세션 닫음'),
     reopen: t('세션 다시 엶'), acknowledge: t('확인했음으로 표시'), approval: t('승인 요청에 답함'), steer: t('요청 끼워넣음'), cancel: t('작업 중지'), dismiss: t('실패 기록 지움'), 'auto-prompt': t('Auto Prompt'),
     'auto-prompt-cancel': t('Auto Prompt 취소'), compact: t('세션 압축'), 'compact-cancel': t('세션 압축 취소'), repository: t('저장소 동기화'), 'folder-name': t('폴더 이름 변경'), file: t('파일 저장'), directory: t('폴더 만듦'),
-    'terminal-open': t('터미널 엶'), 'terminal-close': t('터미널 끝냄'), trigger: t('트리거 변경') };
+    'terminal-open': t('터미널 엶'), 'terminal-close': t('터미널 끝냄'), trigger: t('트리거 변경'), 'claude-account': t('Claude 계정') };
+  const accountChanges: Record<string, string> = { switch: t('전환함'), remove: t('목록에서 지움'), add: t('추가 시작') };
   // What was done, in the words used where it is done.
   const answers: Record<string, string> = { allow: t('허용함'), deny: t('거부함'), answers: t('답함'), accept: t('수락함'), decline: t('거절함'), cancel: t('취소함') };
   const detail = ({ action, detail: value }: RemoteChange) => !value ? '' : action === 'trigger' ? TRIGGER_CHANGES.has(value) ? auditActionLabel(value as TriggerAuditEntry['action'], t) : value
-    : action === 'repository' ? value === 'pull' ? t('받기') : value === 'push' ? t('푸시') : value : action === 'approval' ? answers[value] ?? value : value;
+    : action === 'repository' ? value === 'pull' ? t('받기') : value === 'push' ? t('푸시') : value : action === 'approval' ? answers[value] ?? value : action === 'claude-account' ? accountChanges[value] ?? value : value;
   const heading = <h3>{t('최근 원격 변경')}</h3>;
   if (!changes) return error ? <div className="remote-changes">{heading}<p role="alert" className="slack-error">{t('원격 변경 기록을 불러오지 못했습니다.')} {translateMessage(error)}</p></div> : null;
   return <div className="remote-changes">

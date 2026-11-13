@@ -12,7 +12,8 @@ import { isReopenableLink } from '../../shared/reopenable-links.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
-import { claudeAccountRoute, type ClaudeAccountRoutes } from './claude-account-routes.js';
+import { claudeAccountRequest, claudeAccountRoute, type ClaudeAccountRoutes } from './claude-account-routes.js';
+import { CLAUDE_ACCOUNTS_CHECKED } from '../../shared/link.js';
 import { attachmentUploadRoute, uploadAppendPath, uploadProgressPath, ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus, parseAutoPrompt, parseAutoPromptSuggestion, parseCreateSession, parseMessage, readJson, UUID } from './requests.js';
 import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSummary } from '../../shared/skills.js';
 import { MAX_SKILL_BUNDLE_BYTES } from '../../shared/skills.js';
@@ -800,10 +801,12 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       if (await todoRoute(req, res, url, path, backend.todos, json, ownerPage)) return;
       // A browser names no origin on its own GET requests, so reading the list is gated without one. A sign-in code typed
       // elsewhere travels only over HTTPS, as the vault's values do.
+      // The same rule decides for a joined computer's accounts below, before the request crosses its link.
       const notAgent = req.headers['x-tower-master'] === undefined && req.headers['x-tower-agent'] === undefined && req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()] === undefined;
-      if (await claudeAccountRoute(req, res, path, claudeAccounts, json, req.method === 'GET'
+      const accountsAllowed = req.method === 'GET'
         ? notAgent && (identity.local || Boolean(auth?.session(sessionId, identity.ip)))
-        : ownerPage && (identity.local || secureOrigin || ('encrypted' in req.socket && Boolean(req.socket.encrypted))))) return;
+        : ownerPage && (identity.local || secureOrigin || ('encrypted' in req.socket && Boolean(req.socket.encrypted)));
+      if (await claudeAccountRoute(req, res, path, claudeAccounts, json, accountsAllowed)) return;
       if (req.method === 'POST' && path === '/api/groups') {
         const patch = normalizeProjectGroupPatch(await readJson(req));
         if (!backend.setGroup) return json(res, 503, { error: '폴더 그룹을 저장할 수 없습니다.' });
@@ -832,6 +835,12 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
           return json(res, 200, { ok: true });
         }
         if (!nodes.known(nodeRoute[1])) return json(res, 404, { error: '연결된 컴퓨터가 아닙니다.' });
+        // Only this server says a request passed the owner check; whatever the browser sent under that name is dropped first.
+        delete req.headers[CLAUDE_ACCOUNTS_CHECKED];
+        if (claudeAccountRequest(req.method, `/api/${nodeRoute[2]}`) !== undefined) {
+          if (!accountsAllowed) return json(res, 403, { error: 'Claude 계정 관리는 소유자의 화면에서만 할 수 있습니다.' });
+          req.headers[CLAUDE_ACCOUNTS_CHECKED] = '1';
+        }
         // A signed-in browser elsewhere loses its streams to other computers when it signs out, like its own.
         if (!identity.local) trackStream(sessionId, res, () => res.destroy());
         const message = req.method === 'POST' && onNodeMessage && /^sessions\/[^/]+\/messages$/.test(nodeRoute[2]);

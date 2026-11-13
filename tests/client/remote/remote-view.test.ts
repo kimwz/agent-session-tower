@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { Session, Snapshot } from '../../../shared/types.js';
 import type { RemoteNode } from '../../../shared/link.js';
 import { localPart, nodeHeaders, nodeOf, nodePath, pathFor, refusedBeforeRunning, requestId, scopedId, scopeSnapshot, settleRequest, splitScopedId } from '../../../client/src/remote/scope.js';
-import { combinedView, hostProblem, hostState, workspaceNote } from '../../../client/src/remote/hosts.js';
+import { claudeAccountsPath, combinedView, hostProblem, hostState, workspaceNote } from '../../../client/src/remote/hosts.js';
 import { localOnlyAddress, RemoteContent } from '../../../client/src/remote/remote-content.js';
 import { Markdown } from '../../../client/src/chat/Markdown.js';
 import { createElement } from 'react';
@@ -70,6 +70,20 @@ test('two computers with the same folder and session ids stay apart in lists, fr
   assert.deepEqual(hosts.map(host => [host.name, host.live, host.canWork, host.known]), [['h', true, true, true], ['studio', true, true, true], ['Laptop', false, false, true]]);
   const older = combinedView(snapshot([], { nodes: [remote(B, 'studio', { features: ['read'] })] }), new Map([[B, same]]));
   assert.equal(older.hosts[1].canWork, false, 'a computer whose worker cannot take remote work is shown but not sent work');
+});
+
+test('a connected computer manages its Claude accounts only when its Tower says it can', () => {
+  const same = snapshot([]);
+  const hosts = (features: string[], status: 'connected' | 'offline' = 'connected') => combinedView(snapshot([], { nodes: [remote(B, 'studio', { features, ...(status === 'connected' ? {} : { status, streaming: false }) })] }), new Map([[B, same]])).hosts;
+  assert.equal(hosts(['read', 'work', 'claudeAccounts'])[1].claudeAccounts, true);
+  assert.equal(hosts(['read', 'work'])[1].claudeAccounts, undefined, 'an older Tower shows no account controls');
+  assert.equal(hosts(['read', 'work', 'claudeAccounts'], 'offline')[1].claudeAccounts, undefined, 'nor one that is not connected');
+  assert.equal(hosts(['read', 'work', 'claudeAccounts'])[0].claudeAccounts, undefined, 'this computer is managed through its own path');
+  // The tooltip acts on the computer it belongs to: never this computer's accounts from a joined computer's node.
+  assert.equal(claudeAccountsPath(hosts(['read', 'work', 'claudeAccounts'])[0]), '/api/claude-accounts');
+  assert.equal(claudeAccountsPath(hosts(['read', 'work', 'claudeAccounts'])[1]), `/api/nodes/${B}/claude-accounts`);
+  assert.equal(claudeAccountsPath(hosts(['read', 'work'])[1]), undefined);
+  assert.equal(claudeAccountsPath(hosts(['read', 'work', 'claudeAccounts'], 'offline')[1]), undefined);
 });
 
 test('temporary folders stay off the canvas on every computer', () => {
