@@ -47,7 +47,7 @@ export class ClaudeControl {
   private initialized = false;
   private timer?: ReturnType<typeof setTimeout>;
   private sessionId?: string;
-  private readonly steers = new Map<string, { sessionId: string; resolve(): void; reject(error: SteeringError): void; timer?: ReturnType<typeof setTimeout> }>();
+  private readonly steers = new Map<string, { sessionId: string; resolve(): void; reject(error: SteeringError): void; timer?: ReturnType<typeof setTimeout>; background?: true }>();
   /** Claude takes a queued instruction at its next step, so it can only be overdue while no turn is running. */
   private turnIdle = false;
   private readonly submittedSteers = new Set<string>();
@@ -182,7 +182,13 @@ export class ClaudeControl {
     pending.reject(new SteeringError(message, 'uncertain'));
   }
 
-  steer(input: Message): Promise<void> {
+  /**
+   * `background` also moves the turn's foreground work (Bash commands, subagents) to the background, as Ctrl+B does in
+   * the terminal: the blocking tool call returns at once, so Claude takes the instruction at that step instead of after
+   * a command that can run for minutes. The work keeps running and its result reaches Claude as a task notification.
+   * Until Claude takes the instruction, foreground work it starts meanwhile is moved aside too (`foregroundStarted`).
+   */
+  steer(input: Message, options: { background?: boolean } = {}): Promise<void> {
     const id = input.uuid;
     if (!this.canSteer() || !validId(id) || !validId(this.sessionId) || input.session_id !== this.sessionId
       || input.type !== 'user' || input.parent_tool_use_id != null || !record(input.message) || input.message.role !== 'user') {
@@ -193,12 +199,31 @@ export class ClaudeControl {
     // Register before write: a replay can arrive before the write callback.
     return new Promise<void>((resolve, reject) => {
       const fail = (message: string) => this.failSteer(id, message);
-      this.steers.set(id, { sessionId: this.sessionId!, resolve, reject, ...(this.turnIdle ? { timer: this.steerTimer(id) } : {}) });
-      // "now" interrupts the native turn; "next" folds into its next processing checkpoint.
+      this.steers.set(id, { sessionId: this.sessionId!, resolve, reject, ...(this.turnIdle ? { timer: this.steerTimer(id) } : {}), ...(options.background ? { background: true as const } : {}) });
+      // "next" folds into the turn's next processing checkpoint (a tool result); "now" only ends the turn there.
       try {
-        void this.options.write({ ...input, priority: 'next' }).catch(() => fail('Claude Code disconnected while the instruction was being sent. Delivery is uncertain.'));
+        void this.options.write({ ...input, priority: 'next' }).then(() => { if (options.background && !this.turnIdle) this.backgroundForegroundWork(); },
+          () => fail('Claude Code disconnected while the instruction was being sent. Delivery is uncertain.'));
       } catch { fail('Claude Code disconnected while the instruction was being sent. Delivery is uncertain.'); }
     });
+  }
+
+  /**
+   * Claude started foreground work (a task registered with is_backgrounded false) in the running turn. An instruction
+   * sent to be taken at once that Claude has not taken yet would wait for it, so it is moved aside as well: the
+   * instruction may have arrived while Claude was still writing, before there was anything to move.
+   */
+  foregroundStarted(): void {
+    if (this.turnIdle || ![...this.steers.values()].some(pending => pending.background)) return;
+    this.backgroundForegroundWork();
+  }
+
+  /** Its answer is not awaited: a Claude Code without this request, or with nothing in the foreground, changes nothing. */
+  private backgroundForegroundWork(): void {
+    if (this.closed) return;
+    const request = { type: 'control_request', request_id: `tower-steer-background-${randomUUID()}`, request: { subtype: 'background_tasks' } };
+    // best-effort: the instruction is already queued; without this Claude takes it at its next step, as before.
+    void Promise.resolve().then(() => this.options.write(request)).catch(() => {});
   }
 
   close(): void {

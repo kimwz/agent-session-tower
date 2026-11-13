@@ -10,6 +10,7 @@ import { restoreRuns } from '../../../server/runs/run-history.js';
 import { RunManager } from './sql-fixture.js';
 import type { Run, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
+import { thinkingSignature } from '../../helpers/claude-signature.ts';
 
 const nativeId = '10000000-0000-4000-8000-000000000001';
 
@@ -78,18 +79,29 @@ test('Claude result before steering replay keeps stdin open through the subseque
   await until(() => f.received.some(frame => frame.uuid === f.followup.id));
   const input = f.received.find(frame => frame.uuid === f.followup.id)!;
   assert.equal(input.priority, 'next');
+  // As in the terminal, what runs in the foreground moves to the background so Claude takes the message now.
+  await until(() => f.received.some(frame => frame.request?.subtype === 'background_tasks'));
+  assert.ok(f.received.findIndex(frame => frame.request?.subtype === 'background_tasks') > f.received.indexOf(input));
+  // Claude starts a foreground command before it takes the message: that one is moved aside too.
+  f.emit({ type: 'system', subtype: 'task_started', session_id: nativeId, task_id: 'b1', tool_use_id: 'tool-1', description: 'wait', task_type: 'local_bash', is_backgrounded: false });
+  await until(() => f.received.filter(frame => frame.request?.subtype === 'background_tasks').length === 2);
   f.emit({ type: 'result', session_id: nativeId, is_error: false });
   assert.equal(f.child.stdin.writableEnded, false);
   assert.equal((await pending).steering?.state, 'sending', 'answered once handed over');
   f.emit({ ...input, isReplay: true });
   await until(() => f.run(f.followup.id).steering?.state === 'delivered');
   assert.equal(f.child.stdin.writableEnded, false);
+  f.emit({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'Weighing the new direction privately', signature: thinkingSignature('thinking') }] } });
+  f.emit({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'Switching to the new direction.', signature: thinkingSignature('narration') }] } });
   f.emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'Updated direction' }] } });
   f.emit({ type: 'result', session_id: nativeId, is_error: false });
   await until(() => f.run(f.first.id).status === 'completed');
   assert.equal(f.run(f.followup.id).status, 'completed');
   assert.equal(f.launches(), 1);
   assert.match(f.run(f.first.id).output, /Updated direction/);
+  // Claude's narration is the agent's words, shown as in the terminal; its reasoning stays out.
+  assert.match(f.run(f.first.id).output, /Switching to the new direction\./);
+  assert.doesNotMatch(f.run(f.first.id).output, /privately/);
 });
 
 test('Claude replay and completion in one output chunk settle both runs without another process', async t => {

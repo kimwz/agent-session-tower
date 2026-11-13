@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionService } from '../../../server/sessions/service.js';
 import { parseMessages } from '../../../server/sessions/parser.js';
+import { thinkingSignature } from '../../helpers/claude-signature.ts';
 import { isClaudeRegistryCommand, parseCodexOpenFiles } from '../../../server/sessions/processes.js';
 
 const rootId = '11111111-1111-4111-8111-111111111111';
@@ -553,6 +554,21 @@ test('a background task notice Claude Code writes as a user turn reads as a noti
   assert.equal(parseMessages('claude', { ...row, origin: undefined, message: { role: 'user', content: 'Please explain <task-notification> tags' } })[0]?.role, 'user');
 });
 
+test('Claude\'s narration between tool calls reads as the agent\'s words, marked as a summary; its reasoning stays hidden', () => {
+  const at = '2026-11-13T00:47:17.000Z';
+  const row = (uuid: string, content: unknown[]) => ({ type: 'assistant', uuid, timestamp: at, message: { role: 'assistant', content } });
+  // Claude Code writes each block as its own row: reasoning, narration, then the tool call.
+  assert.deepEqual(parseMessages('claude', row('reason', [{ type: 'thinking', thinking: 'Private reasoning', signature: thinkingSignature('thinking') }])), []);
+  assert.deepEqual(parseMessages('claude', row('narr', [{ type: 'thinking', thinking: '두 작업자가 끝날 때까지 대기하며, 완료되면 보고하겠습니다.\n\n', signature: thinkingSignature('narration') }])),
+    [{ id: 'narr:0', role: 'assistant', text: '두 작업자가 끝날 때까지 대기하며, 완료되면 보고하겠습니다.', timestamp: at, summary: true }]);
+  // Within one row it keeps its place among the other blocks.
+  const mixed = parseMessages('claude', row('mixed', [{ type: 'text', text: 'Before' }, { type: 'thinking', thinking: 'Between', signature: thinkingSignature('narration') },
+    { type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'ls' } }]));
+  assert.deepEqual(mixed.map(message => [message.role, message.text, message.summary]), [['assistant', 'Before', undefined], ['assistant', 'Between', true], ['tool', '{\n  "command": "ls"\n}', undefined]]);
+  // A user row never carries narration.
+  assert.deepEqual(parseMessages('claude', { type: 'user', uuid: 'u', timestamp: at, message: { role: 'user', content: [{ type: 'thinking', thinking: 'x', signature: thinkingSignature('narration') }] } }), []);
+});
+
 test('a message sent while Claude works reads as the owner speaking, though Claude Code writes it only as the command it took', () => {
   const row = { type: 'attachment', uuid: 'queued', timestamp: '2026-09-27T10:21:55.026Z', attachment: { type: 'queued_command',
     prompt: [{ type: 'text', text: 'Both run in the Korean region, so latency is fine.' }], source_uuid: 'run-1', commandMode: 'prompt' } };
@@ -783,4 +799,21 @@ test('cold inspection failure blocks maintenance while ordinary hot session refr
   await service.refresh(true);assert.equal(service.get(`codex:${rootId}`)?.title,'hot instruction');
   assert.equal(service.retentionRecords().complete,false);assert.ok(service.retentionRecords().issues.some(issue=>issue.includes('cold inspection failure')));
   service.setColdRegistry([],[],async()=>({complete:true,issues:[]}));await service.refresh(true);assert.equal(service.retentionRecords().complete,true);
+});
+
+test('Claude\'s narration shows in the conversation but leaves the session\'s count and last message as they were', async t => {
+  const { service, claude } = await fixture(t);
+  const at = (second: number) => new Date(Date.now() + second * 1000).toISOString();
+  const message = (type: string, content: unknown, second: number) => ({ type, uuid: `${type}-${second}`, sessionId: rootId, cwd: '/work', timestamp: at(second), message: { role: type, content } });
+  await writeFile(claude, lines([message('user', 'Wait for both workers', 1),
+    message('assistant', [{ type: 'text', text: 'Waiting.' }], 2),
+    message('assistant', [{ type: 'thinking', thinking: 'Both still run; I will report when they finish.', signature: thinkingSignature('narration') }], 3),
+  ]));
+  await service.refresh();
+  const id = `claude:${rootId}`;
+  // Counting it would mark every older conversation with narration unread, and reset its outcome, on the first read.
+  assert.equal(service.get(id)?.messageCount, 2);
+  assert.equal(service.get(id)?.lastMessage, 'Waiting.');
+  assert.deepEqual((await service.detail(id))?.messages.map(item => [item.text, item.summary]),
+    [['Wait for both workers', undefined], ['Waiting.', undefined], ['Both still run; I will report when they finish.', true]]);
 });

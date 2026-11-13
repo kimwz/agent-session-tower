@@ -124,6 +124,78 @@ test('steering sends once at next priority and waits for the matching conversati
   assert.equal(f.written.length, 3); assert.deepEqual(f.errors, []);
 });
 
+test('an instruction sent now moves the running turn\'s foreground work to the background right after it', async t => {
+  const f = fixture(); t.after(() => f.control.close()); f.initialize();
+  void f.control.steer({ ...f.input, uuid: 'steer-now' }, { background: true }).catch(() => {});
+  await until(() => f.written.length === 4);
+  assert.deepEqual(f.written[2], { ...f.input, uuid: 'steer-now', priority: 'next' });
+  assert.deepEqual(f.written[3].request, { subtype: 'background_tasks' });
+  assert.equal(f.written[3].type, 'control_request');
+  assert.match(f.written[3].request_id, /^tower-steer-background-/);
+  // Claude's answer to it is not a permission request and changes nothing.
+  assert.equal(f.control.handle({ type: 'control_response', response: { subtype: 'success', request_id: f.written[3].request_id, response: {} } }), true);
+  assert.equal(f.control.handle({ ...f.input, uuid: 'steer-now', isReplay: true }), true);
+  assert.deepEqual(f.errors, []);
+});
+
+test('the background request goes only once the instruction is written, and its failure never fails the instruction', async t => {
+  for (const failure of ['reject', 'throw'] as const) {
+    const written: Record<string, any>[] = [];
+    let release!: () => void;
+    const control = new ClaudeControl({
+      write: (message: Record<string, any>) => {
+        if (message.request?.subtype === 'background_tasks') { written.push(message); if (failure === 'throw') throw new Error('sync'); return Promise.reject(new Error('async')); }
+        written.push(message);
+        return message.uuid === 'steer-held' ? new Promise<void>(resolve => { release = resolve; }) : Promise.resolve();
+      },
+      onApproval: () => {}, onCancelled: () => {}, onError: error => assert.fail(error), initializeTimeoutMs: 5000, steerTimeoutMs: 5000,
+    });
+    t.after(() => control.close());
+    control.start({ type: 'user', session_id: 'native-session', parent_tool_use_id: null, message: { role: 'user', content: 'hi' } });
+    control.handle({ type: 'control_response', response: { subtype: 'success', request_id: written[0].request_id } });
+    const input = { type: 'user', session_id: 'native-session', parent_tool_use_id: null, uuid: 'steer-held', message: { role: 'user', content: 'now' } };
+    const sent = control.steer(input, { background: true });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(written.some(message => message.request?.subtype === 'background_tasks'), false, 'not before the instruction is written');
+    release();
+    await until(() => written.some(message => message.request?.subtype === 'background_tasks'));
+    assert.equal(control.handle({ ...input, isReplay: true }), true);
+    await sent;
+    assert.equal(control.canSteer(), true);
+  }
+});
+
+test('nothing is moved to the background for an instruction that waits for the step underway, or between turns', async t => {
+  const f = fixture(); t.after(() => f.control.close()); f.initialize();
+  void f.control.steer({ ...f.input, uuid: 'steer-next' }).catch(() => {});
+  await until(() => f.written.length === 3);
+  await new Promise(resolve => setImmediate(resolve));
+  // The turn is still running here: only the missing option keeps the request back.
+  f.control.foregroundStarted();
+  assert.deepEqual(f.written.slice(2).map(message => message.uuid), ['steer-next']);
+  f.control.setTurnIdle(true);
+  void f.control.steer({ ...f.input, uuid: 'steer-idle' }, { background: true }).catch(() => {});
+  await until(() => f.written.length === 4);
+  await new Promise(resolve => setImmediate(resolve));
+  f.control.foregroundStarted();
+  assert.deepEqual(f.written.slice(2).map(message => message.uuid), ['steer-next', 'steer-idle']);
+});
+
+test('foreground work started before Claude takes the instruction is moved aside too, and none after it took it', async t => {
+  const f = fixture(); t.after(() => f.control.close()); f.initialize();
+  // Sent while Claude was still writing: nothing ran in the foreground yet.
+  const sent = f.control.steer({ ...f.input, uuid: 'steer-early' }, { background: true });
+  await until(() => f.written.length === 4);
+  f.control.foregroundStarted();
+  await until(() => f.written.length === 5);
+  assert.deepEqual(f.written[4].request, { subtype: 'background_tasks' });
+  assert.equal(f.control.handle({ ...f.input, uuid: 'steer-early', isReplay: true }), true);
+  await sent;
+  f.control.foregroundStarted();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.written.length, 5, 'Claude took it: later work stays in the foreground');
+});
+
 test('steering rejects a different session without writing', async t => {
   const f = fixture(); t.after(() => f.control.close()); f.initialize();
   await assert.rejects(f.control.steer({ ...f.input, uuid: 'steer-1', session_id: 'other' }), { disposition: 'rejected' });

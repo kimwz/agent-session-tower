@@ -20,6 +20,7 @@ import { checkClaudeSubscription, MASTER_APPROVED_TOOLS, MASTER_TOOL_TIMEOUT_SEC
 import { turnEnv } from './turn-env.js';
 import type { OwnedProcess, Prepared, TurnHost } from './turn-host.js';
 import { WakeupTracker } from './wakeup.js';
+import { narrationText } from '../sessions/claude-narration.js';
 import { TODO_TOOLS_SERVER } from '../todo/agent-tools.js';
 
 const BACKGROUND_FOLLOW_UP_MS = 60_000;
@@ -426,6 +427,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       }
       if ((event.session_id === undefined || event.session_id === session.nativeId) && tasks.observe(event) && !turnActive) owned.finishInput?.();
       if (mainContext && event.type === 'system' && event.subtype === 'compact_boundary') contextInput = undefined;
+      if (event.type === 'system' && event.subtype === 'task_started' && event.is_backgrounded === false && (event.session_id === undefined || event.session_id === session.nativeId)) owned.claude?.foregroundStarted();
       if (mainContext) wakeups.observe(event);
       if (mainContext && event.type === 'stream_event' && event.event?.type === 'message_start') tasks.observeReply(event.event.message?.id);
       if (mainContext && event.type === 'assistant' && !event.isMeta && !event.is_meta) {
@@ -457,6 +459,9 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         for (const [index, block] of (event.message?.content ?? []).entries()) {
           if (block.type === 'text' && replies && mainContext && !streamedMessages.has(messageId)) replied(replies.add(`${messageId}:a${index}`, String(block.text), true));
           if (block.type === 'text' && !messageHasPartial) show(String(block.text) + '\n\n');
+          // Narration arrives whole as a thinking block, never as text deltas.
+          const narration = narrationText(block);
+          if (narration !== undefined) show(narration.trim() + '\n\n');
           if (block.type === 'tool_use') show(`[${block.name}]\n`);
         }
         messageHasPartial = false;

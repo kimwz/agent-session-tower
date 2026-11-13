@@ -113,6 +113,8 @@ export interface ChatMessage {
   /** For a tool call and its result: the id they share (Codex gives them different ids of their own). */
   callId?: string;
   isError?: boolean;
+  /** Claude's narration: the server's summary of what the agent said between tool calls (server/sessions/claude-narration.ts). */
+  summary?: true;
 }
 export interface SessionDetail {
   session: Session;

@@ -10,7 +10,9 @@ import type { TestContext } from 'node:test';
  * is a folder with something in it. `path` itself stays writable. Call `release()` once the store has started.
  */
 export async function blockQuarantine(t: TestContext, path: string): Promise<{ aside: string; release: () => void }> {
-  const now = Date.now();
+  // A file moved aside earlier in the same millisecond already holds this millisecond's name.
+  let now = Date.now();
+  while (existsSync(`${path}.unreadable-${now}`)) now++;
   const aside = `${path}.unreadable-${now}`;
   await mkdir(aside);
   await writeFile(`${aside}/occupied`, '');

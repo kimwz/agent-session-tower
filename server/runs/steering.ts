@@ -10,3 +10,12 @@ export interface SteeringInput {
   prompt: string;
   imagePaths?: readonly string[];
 }
+
+/**
+ * Whether inserting `run` moves the turn's foreground work aside so the turn takes it at once (see ClaudeControl.steer):
+ * yes for a message someone sent, no for Tower's own notices (update wrap-up, permission decisions), which wait for the
+ * step underway.
+ */
+export function movesForegroundAside(run: { updateWrapUp?: true; permissionNotice?: unknown }): boolean {
+  return !run.updateWrapUp && !run.permissionNotice;
+}

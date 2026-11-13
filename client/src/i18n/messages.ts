@@ -1205,6 +1205,8 @@ export const english: Record<string, string> = {
   '도구 실행': 'Tool call',
   '나': 'You',
   '에이전트': 'Agent',
+  '에이전트 · 요약': 'Agent · summary',
+  'Claude 서버가 에이전트가 도구 사이에 한 말을 요약한 문장입니다.': 'Claude\'s server summary of what the agent said between tool calls.',
   '간략히 보기': 'Show less',
   '메시지 전체 보기': 'Show full message',
   '{0}개의 작업': 'Operations: {0}',
