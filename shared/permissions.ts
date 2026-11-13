@@ -421,11 +421,43 @@ const MCP_TOOL = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/;
 const MCP_DANGER = new Set(['send', 'post', 'publish', 'deploy', 'delete', 'remove', 'drop', 'destroy', 'purge', 'truncate', 'exec', 'execute', 'sql', 'transfer', 'pay', 'charge', 'upload', 'invite']);
 const inside = (path: string, folder: string) => path === folder || path.startsWith(folder.endsWith('/') ? folder : `${folder}/`);
 
-/** A shell named by itself or by its path, and what may follow a program's name (`bash.log` is not `bash`). */
-const SHELL = String.raw`(\S*\/)?(sh|bash|zsh|dash|ksh|su)`;
-const END = String.raw`(\s|$|["';&|)\x60])`;
-/** A wrapper running the program after it, with its options and their values or variables (`sudo -u root`, `env A=1`). */
-const WRAPPER = String.raw`(\S*\/)?(sudo|doas|env)(\s+-\S+(\s+[a-z_][\w-]*)?|\s+\w+=\S*)*\s+`;
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'su']);
+/** Options of each wrapper that take the next word as their value (`sudo -u root`, `env -C dir`; sudo's `-S` takes none). */
+const VALUE_OPTIONS: Record<string, Set<string>> = {
+  sudo: new Set(['-u', '-g', '-C', '-D', '-h', '-p', '-r', '-t', '-T', '-U', '--user', '--group', '--chdir', '--host', '--prompt', '--role', '--type', '--close-from', '--other-user']),
+  doas: new Set(['-u', '-C']),
+  // env's -S splits its value into the command itself: what follows is the program.
+  env: new Set(['-u', '-C', '--unset', '--chdir']),
+};
+
+/**
+ * Whether a download is handed to a shell: piped into one (through wrappers and their options: `| sudo -E bash -`,
+ * `| sudo -u root sh`, `| sudo env bash`, `| sudo su -`), into a wrapper's own shell (`| sudo -s` with nothing after it),
+ * or given to a shell as its script (`bash -lc "$(curl …)"`, ``bash -c "`curl …`"``, `bash <(curl …)`). Only the
+ * program a wrapper runs counts: `| sudo tee /tmp/bash` saves a file.
+ */
+function downloadIntoShell(command: string): boolean {
+  if (/(^|[\s;&|(`'"])(\S*\/)?(sh|bash|zsh|dash|ksh)\s+(-[a-z]+\s+)*(-[a-z]*c\s+["']?(\$\(|`)|<\()\s*(curl|wget)\b/i.test(command)) return true;
+  for (const match of command.matchAll(/(?:^|[^\w-])(?:curl|wget)\b[^\n|]*\|(?!\|)([^|;&\n]*)/gi)) {
+    // The words of the pipe's next step, quotes dropped; a word left by a quote that closes an ssh command ends it too.
+    const words = match[1]!.replace(/["'`)]/g, ' ').trim().split(/\s+/).filter(Boolean);
+    let index = 0, ownShell = false;
+    while (index < words.length) {
+      const name = words[index]!.replace(/^.*\//, '');
+      if (!['sudo', 'doas', 'env'].includes(name)) break;
+      index++;
+      while (index < words.length && (words[index]!.startsWith('-') || /^\w+=/.test(words[index]!))) {
+        const word = words[index]!;
+        // Options keep their case: sudo `-s` runs a shell, `-S` only reads a password.
+        if (name !== 'env' && (/^-[A-Za-z]*[si][A-Za-z]*$/.test(word) || word === '--shell' || word === '--login')) ownShell = true;
+        index += VALUE_OPTIONS[name]!.has(word) ? 2 : 1;
+      }
+    }
+    const program = words[index]?.replace(/^.*\//, '').toLowerCase();
+    if (program === undefined ? ownShell : SHELLS.has(program)) return true;
+  }
+  return false;
+}
 
 /**
  * Why Tower's reviewer may not decide this rule for work in `cwd`, or undefined when it may. Broad rules, Bash rules
@@ -443,13 +475,7 @@ export function runBlock(command: string): string | undefined {
   // A program may be named by its path (/sbin/shutdown) too.
   if (/(^|[\s;&|(`$'"{])(\S*\/)?(shutdown|reboot|halt|poweroff|mkfs[\w.]*|diskutil|fdisk)(\s|$|["';&|)`])/.test(text)) return '컴퓨터 전체에 영향을 주는 명령은 소유자가 정합니다.';
   if (/(^|[\s;&|(`$'"{])(\S*\/)?dd(\s|$|["';&|)`])[^\n]*\bof=["']?\/dev\//.test(text)) return '장치에 직접 쓰는 명령은 소유자가 정합니다.';
-  // A download piped into a shell, also through a wrapper and its options (`| sudo -E bash -`, `| sudo -u root sh`,
-  // `| sudo su -`), into a wrapper's own shell (`| sudo -s`, `--login`; options keep their case: `-S` only reads a
-  // password), or given to a shell as its script (`bash -c "$(curl …)"`, `bash <(curl …)`). Only the program the wrapper
-  // runs counts (`| sudo tee /tmp/bash.log` is not a shell).
-  if (new RegExp(String.raw`(curl|wget)\b[^\n|]*\|\s*(${WRAPPER})?${SHELL}${END}`).test(text)
-    || /(curl|wget)\b[^\n|]*\|\s*(\S*\/)?(sudo|doas)(\s+-\S+)*?\s+(-[A-Za-z]*[si][A-Za-z]*|--shell|--login)(\s|$)/.test(command.replace(/\\\r?\n/g, ' '))
-    || new RegExp(String.raw`(^|[\s;&|(\x60'"])${SHELL}\s+(-[a-z]+\s+)*(-c\s+["']?\$\(|<\()\s*(curl|wget)\b`).test(text)) return '내려받은 것을 바로 셸로 실행하는 명령은 소유자가 정합니다.';
+  if (downloadIntoShell(command.replace(/\\\r?\n/g, ' '))) return '내려받은 것을 바로 셸로 실행하는 명령은 소유자가 정합니다.';
   return undefined;
 }
 
