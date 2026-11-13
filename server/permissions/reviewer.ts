@@ -144,7 +144,10 @@ export class PermissionReviewer {
         else result = { ...result, files };
       }
       if (result.verdict === 'approve' && request.rule.kind === 'command') {
-        const limit = autoReviewBlock({ kind: 'command', value: result.rule?.value ?? request.rule.value }, request.cwd);
+        const value = result.rule?.value ?? request.rule.value;
+        // An owner's overlapping rule would leave a reviewer's rule unused: the one command, run once, is what helps.
+        const limit = autoReviewBlock({ kind: 'command', value }, request.cwd)
+          ?? (service.ownerCommandRuleOverlaps(value, request) ? '겹치는 소유자 규칙이 이미 있어 새 규칙을 더하지 않습니다.' : undefined);
         const unsupported = result.scope === 'conversation' && (request.provider === 'codex' || request.rule.providers.includes('codex'));
         if (limit || unsupported) result = { ...result, verdict: 'narrow',
           reason: `${result.reason} (${limit ?? 'Codex는 대화 한정 규칙을 지원하지 않습니다.'})`,

@@ -568,6 +568,23 @@ test('where the owner has an overlapping rule, the reviewer does not add one: th
   assert.equal(f.service.overview().rules.find(entry => entry.id === rule.id)!.source, 'owner');
 });
 
+test('a reviewer approval beside an overlapping owner rule sends the agent to permissions_run instead of the owner', async t => {
+  const f = await fixture(t);
+  await f.service.save({ kind: 'command', value: 'gh pr merge', providers: ['claude', 'codex'], scope: 'project', cwd: f.project });
+  await f.service.saveAutoReview(ON);
+  const told: string[] = [];
+  const reviewer = new PermissionReviewer({ service: f.service, sources: sources(f, []), reachable: () => true, notify: async (_request, message) => { told.push(message); },
+    model: async () => ({ verdict: 'approve', rule: null, scope: null, suggestion: null, reason: '머지는 요청된 작업입니다.', missing: [] }) });
+  const { request } = await f.service.request({ kind: 'command', value: 'gh pr merge 6', providers: ['claude', 'codex'], scope: 'project', reason: 'merge' }, agent('claude:one'));
+  reviewer.wake();
+  await reviewer.flush();
+  const item = f.service.overview().requests.find(entry => entry.id === request.id)!;
+  assert.deepEqual([item.status, item.review!.verdict], ['withdrawn', 'narrow']);
+  assert.match(item.review!.reason!, /겹치는 소유자 규칙/);
+  assert.match(told.join('\n'), /permissions_run/);
+  assert.deepEqual(f.service.overview().rules.map(rule => rule.value), ['gh pr merge'], 'no reviewer rule beside the owner’s');
+});
+
 test('an agent the reviewer cannot tell is never sent back for a narrower rule; an oversized input fails to the owner', async t => {
   const f = await fixture(t);
   await f.service.saveAutoReview(ON);

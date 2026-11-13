@@ -404,6 +404,14 @@ export class PermissionService {
    * Where the owner has a rule of their own that overlaps (`git push --force-with-lease` beside `git push`), the deny
    * rules of an automatically allowed one would override theirs, and theirs could widen it: the owner decides.
    */
+  /**
+   * Whether an owner's rule already covers part of what this command rule allows. Tower then keeps no reviewer rule
+   * beside it (the owner's alone applies), so the agent is better sent to permissions_run for its one command.
+   */
+  ownerCommandRuleOverlaps(value: string, request: Pick<PermissionRequest, 'sessionId' | 'cwd' | 'rule'>): boolean {
+    return this.ownerRuleOverlaps({ kind: 'command', value, providers: request.rule.providers, scope: 'project', cwd: request.cwd }, request);
+  }
+
   private ownerRuleOverlaps(given: PermissionRuleInput, request: Pick<PermissionRequest, 'sessionId' | 'cwd'>): boolean {
     return this.effective().some(item => item.source !== 'auto' && item.kind === given.kind && (item.scope !== 'conversation' || item.sessionId === request.sessionId)
       && (item.scope === 'global' || within(request.cwd, item.cwd!) || within(item.cwd!, request.cwd))

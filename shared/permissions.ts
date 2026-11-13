@@ -426,15 +426,15 @@ const inside = (path: string, folder: string) => path === folder || path.startsW
  * written as Claude rules, file rules outside the project and the never-allowed commands always wait for the owner.
  */
 /**
- * Why Tower's reviewer may not allow running this exact command once, or undefined when it may: raising privileges,
- * acting on the whole machine, or running a download straight into a shell always wait for the owner. The rest is the
- * reviewer's to judge, the whole command in view (a specific `kill 13229` or `rm dist/old.log` can be fine).
+ * Why Tower's reviewer may not allow running this exact command once, or undefined when it may: acting on the whole
+ * machine or running a download straight into a shell always wait for the owner. The rest is the reviewer's to judge,
+ * the whole command in view (a specific `kill 13229` or `rm dist/old.log` can be fine). `sudo` is judged too: it is
+ * mostly a deploy step on a server reached by ssh, and the reviewer tells that from raising privileges on this computer.
  */
 export function runBlock(command: string): string | undefined {
   // Lines joined by a backslash are one command to the shell; the command itself runs as written.
   const text = command.toLowerCase().replace(/\\\r?\n/g, ' ');
-  // A program may be named by its path (/usr/bin/sudo) too.
-  if (/(^|[\s;&|(`$'"{])(\S*\/)?(sudo|doas|su)(\s|$|["';&|)`])/.test(text)) return '권한을 올리는 명령(sudo 등)은 소유자가 정합니다.';
+  // A program may be named by its path (/sbin/shutdown) too.
   if (/(^|[\s;&|(`$'"{])(\S*\/)?(shutdown|reboot|halt|poweroff|mkfs[\w.]*|diskutil|fdisk)(\s|$|["';&|)`])/.test(text)) return '컴퓨터 전체에 영향을 주는 명령은 소유자가 정합니다.';
   if (/(^|[\s;&|(`$'"{])(\S*\/)?dd(\s|$|["';&|)`])[^\n]*\bof=["']?\/dev\//.test(text)) return '장치에 직접 쓰는 명령은 소유자가 정합니다.';
   if (/(curl|wget)\b[^\n|]*\|\s*(\S*\/)?((sudo|env)\s+)?(\S*\/)?(sh|bash|zsh|dash|ksh)\b/.test(text)) return '내려받은 것을 바로 셸로 실행하는 명령은 소유자가 정합니다.';
