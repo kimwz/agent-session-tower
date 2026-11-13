@@ -138,6 +138,33 @@ test('an instruction sent now moves the running turn\'s foreground work to the b
   assert.deepEqual(f.errors, []);
 });
 
+test('the background request goes only once the instruction is written, and its failure never fails the instruction', async t => {
+  for (const failure of ['reject', 'throw'] as const) {
+    const written: Record<string, any>[] = [];
+    let release!: () => void;
+    const control = new ClaudeControl({
+      write: (message: Record<string, any>) => {
+        if (message.request?.subtype === 'background_tasks') { written.push(message); if (failure === 'throw') throw new Error('sync'); return Promise.reject(new Error('async')); }
+        written.push(message);
+        return message.uuid === 'steer-held' ? new Promise<void>(resolve => { release = resolve; }) : Promise.resolve();
+      },
+      onApproval: () => {}, onCancelled: () => {}, onError: error => assert.fail(error), initializeTimeoutMs: 5000, steerTimeoutMs: 5000,
+    });
+    t.after(() => control.close());
+    control.start({ type: 'user', session_id: 'native-session', parent_tool_use_id: null, message: { role: 'user', content: 'hi' } });
+    control.handle({ type: 'control_response', response: { subtype: 'success', request_id: written[0].request_id } });
+    const input = { type: 'user', session_id: 'native-session', parent_tool_use_id: null, uuid: 'steer-held', message: { role: 'user', content: 'now' } };
+    const sent = control.steer(input, { now: true });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(written.some(message => message.request?.subtype === 'background_tasks'), false, 'not before the instruction is written');
+    release();
+    await until(() => written.some(message => message.request?.subtype === 'background_tasks'));
+    assert.equal(control.handle({ ...input, isReplay: true }), true);
+    await sent;
+    assert.equal(control.canSteer(), true);
+  }
+});
+
 test('nothing is moved to the background between turns or for an instruction that waits for the step underway', async t => {
   const f = fixture(); t.after(() => f.control.close()); f.initialize();
   void f.control.steer({ ...f.input, uuid: 'steer-next' }).catch(() => {});

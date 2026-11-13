@@ -19,8 +19,10 @@ export function narrationText(block: unknown): string | undefined {
 
 function blockKind(signature: string): string | undefined {
   // Signatures are a few kilobytes; a far larger value is not one.
-  if (!signature || signature.length > 1_000_000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(signature)) return undefined;
+  if (!signature || signature.length > 1_000_000) return undefined;
   const bytes = Buffer.from(signature, 'base64');
+  // Node skips what is not base64; the server writes canonical padded base64, so anything else is not its signature.
+  if (bytes.toString('base64') !== signature) return undefined;
   const envelope = field(bytes, 2);
   const header = envelope && field(envelope, 1);
   const kind = header && field(header, 8);
@@ -36,7 +38,8 @@ function field(message: Buffer, number: number): Buffer | undefined {
   let offset = 0;
   while (offset < message.length) {
     const key = varint(message, offset);
-    if (!key || key.value < 8) return undefined;
+    // Field numbers run from 1 to 2^29 - 1, so a key is at least 8 and at most 2^32 - 1.
+    if (!key || key.value < 8 || key.value > 0xffffffff) return undefined;
     offset = key.next;
     const wire = key.value % 8;
     if (wire === 0) { const value = varint(message, offset); if (!value) return undefined; offset = value.next; }

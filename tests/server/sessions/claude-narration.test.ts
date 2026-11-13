@@ -23,6 +23,11 @@ test('anything that does not decode to narration is left out', () => {
     // A well-formed kind followed by a broken field, at the top and inside the envelope.
     { type: 'thinking', thinking: 'Broken tail', signature: Buffer.concat([Buffer.from(narration, 'base64'), Buffer.from([0x1a, 0x02, 0xaa])]).toString('base64') },
     { type: 'thinking', thinking: 'Broken inner tail', signature: brokenEnvelope() },
+    // Node would skip the stray character and decode the rest.
+    { type: 'thinking', thinking: 'Not canonical base64', signature: thinkingSignature('narration', Buffer.alloc(41, 7)) + 'A' },
+    { type: 'thinking', thinking: 'Unpadded', signature: thinkingSignature('narration', Buffer.alloc(42, 7)).replace(/=+$/, '') },
+    // A field number above the protobuf maximum (2^29 - 1) after a well-formed kind.
+    { type: 'thinking', thinking: 'Field number too large', signature: Buffer.concat([Buffer.from(narration, 'base64'), Buffer.from([0x80, 0x80, 0x80, 0x80, 0x10, 0x00])]).toString('base64') },
     { type: 'redacted_thinking', data: 'x', signature: narration },
     { type: 'text', text: 'Plain text', signature: narration },
     null, 'narration',
