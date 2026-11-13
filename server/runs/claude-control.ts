@@ -207,15 +207,12 @@ export class ClaudeControl {
     });
   }
 
-  /**
-   * Its answer is not awaited: the instruction is already queued, and a Claude Code without this request (or with
-   * nothing running in the foreground) takes it at the next step as before.
-   */
+  /** Its answer is not awaited: a Claude Code without this request, or with nothing in the foreground, changes nothing. */
   private backgroundForegroundWork(): void {
     if (this.closed) return;
-    try {
-      void this.options.write({ type: 'control_request', request_id: `tower-steer-background-${randomUUID()}`, request: { subtype: 'background_tasks' } }).catch(() => {});
-    } catch { /* the instruction is queued either way */ }
+    const request = { type: 'control_request', request_id: `tower-steer-background-${randomUUID()}`, request: { subtype: 'background_tasks' } };
+    // best-effort: the instruction is already queued; without this Claude takes it at its next step, as before.
+    void Promise.resolve().then(() => this.options.write(request)).catch(() => {});
   }
 
   close(): void {
