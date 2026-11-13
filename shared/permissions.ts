@@ -437,7 +437,11 @@ export function runBlock(command: string): string | undefined {
   // A program may be named by its path (/sbin/shutdown) too.
   if (/(^|[\s;&|(`$'"{])(\S*\/)?(shutdown|reboot|halt|poweroff|mkfs[\w.]*|diskutil|fdisk)(\s|$|["';&|)`])/.test(text)) return '컴퓨터 전체에 영향을 주는 명령은 소유자가 정합니다.';
   if (/(^|[\s;&|(`$'"{])(\S*\/)?dd(\s|$|["';&|)`])[^\n]*\bof=["']?\/dev\//.test(text)) return '장치에 직접 쓰는 명령은 소유자가 정합니다.';
-  if (/(curl|wget)\b[^\n|]*\|\s*(\S*\/)?((sudo|env)\s+)?(\S*\/)?(sh|bash|zsh|dash|ksh)\b/.test(text)) return '내려받은 것을 바로 셸로 실행하는 명령은 소유자가 정합니다.';
+  // A download piped into a shell, also through a wrapper with options (`| sudo -E bash -`, `| sudo -s`), or handed to one
+  // as its script (`bash -c "$(curl …)"`, `bash <(curl …)`).
+  if (/(curl|wget)\b[^\n|]*\|\s*(\S*\/)?((sudo|doas|env)\b[^|;&\n]*?\s)?(\S*\/)?(sh|bash|zsh|dash|ksh)\b/.test(text)
+    || /(curl|wget)\b[^\n|]*\|\s*(\S*\/)?(sudo|doas)(\s+-\S+)*\s+-[a-z]*[si][a-z]*(\s|$)/.test(text)
+    || /(sh|bash|zsh|dash|ksh)\b[^\n]*(\$\(|<\(|`)\s*(curl|wget)\b/.test(text)) return '내려받은 것을 바로 셸로 실행하는 명령은 소유자가 정합니다.';
   return undefined;
 }
 

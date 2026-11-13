@@ -586,6 +586,13 @@ test('a reviewer approval beside an overlapping owner rule sends the agent to pe
   }
   assert.match(told.join('\n'), /permissions_run/);
   assert.deepEqual(f.service.overview().rules.map(rule => rule.value), ['gh pr merge'], 'no reviewer rule beside the owner’s');
+  // The model's own narrowings are still capped, counted without the send-backs above.
+  for (const [index, expected] of [[1, 'withdrawn'], [2, 'withdrawn'], [3, 'pending']] as const) {
+    const { request } = await f.service.request({ kind: 'command', value: 'gh release', scope: 'project', reason: 'release' }, agent('claude:one', `n${index}`));
+    await f.service.startReview(request.id!);
+    await f.service.applyReview(request.id!, { verdict: 'narrow', suggestion: 'gh release create v1', reason: '더 좁게' });
+    assert.equal(f.service.overview().requests.find(entry => entry.id === request.id)!.status, expected, `narrowing ${index}`);
+  }
 });
 
 test('an agent the reviewer cannot tell is never sent back for a narrower rule; an oversized input fails to the owner', async t => {
