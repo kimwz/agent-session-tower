@@ -2,6 +2,10 @@
 // agent) lives inside Claude's process, and only that process hands Claude its completion notice. Tower follows the
 // tasks from the stream and keeps the process's input open while they run. Work a run waits for keeps that run open
 // until it has ended and Claude has taken its notice; the rest is detached and only keeps the process.
+//
+// A background agent can end its own task while background work it started still runs: Claude Code then reports the
+// agent as completed ("waiting on its own background work"), and registers it again under the same task id once that
+// work reports. The work it started is followed like the main conversation's own; its notice goes to the agent.
 
 type Message = Record<string, any>;
 export interface FinishedTask { status: string; summary?: string; outputFile?: string }
@@ -17,7 +21,7 @@ const OPEN_ENDED_TYPES = new Set(['in_process_teammate']);
  * monitors (bounded by their timeout) and any other command, such as an agent CLI, a build or tests.
  */
 type Kind = 'service' | 'work';
-/** Main-conversation Bash calls kept to classify the tasks they start; the most recent ones are enough. */
+/** Bash calls kept per conversation (main, subagents) to classify the tasks they start; the most recent ones are enough. */
 const MAX_COMMANDS = 200;
 const AGENT_CLI = /(?:^|[\s;&|(`/])(?:codex|claude|gemini|opencode|aider)(?=\s|$)/;
 /** Longer commands (a heredoc prompt, a script) are not a service started on its own: work. */
@@ -89,8 +93,16 @@ export class BackgroundTaskTracker {
    * that reply was found too close to tell); `unsure` marks a notice only such a close reply may have taken.
    */
   private readonly unread = new Map<string, { task: FinishedTask; endedAt: number; reply: number; unsure?: true; detached?: true }>();
-  /** What each Bash call of the main conversation runs, by tool use id, classified from its whole command. */
-  private readonly commands = new Map<string, Kind>();
+  /**
+   * What each Bash call runs, by tool use id, classified from its whole command: the main conversation's calls, and
+   * subagents' calls apart, so that each decides only what a task of its own conversation is.
+   */
+  private readonly commands = { main: new Map<string, Kind>(), subagent: new Map<string, Kind>() };
+  /**
+   * Started by a subagent: Claude hands their notice to that subagent, never to the main conversation, so no notice
+   * follows their end for Tower to wait for or hand over.
+   */
+  private readonly subagentOwned = new Set<string>();
   /** Model replies of the main conversation seen so far, and the one under way. */
   private replies = 0;
   private reply?: string;
@@ -100,20 +112,21 @@ export class BackgroundTaskTracker {
 
   private kindOf(event: Message): Kind {
     if (event.task_type !== 'local_bash') return 'work';
-    return (validId(event.tool_use_id) && this.commands.get(event.tool_use_id)) || 'work';
+    const commands = event.owned_by_subagent === true ? this.commands.subagent : this.commands.main;
+    return (validId(event.tool_use_id) && commands.get(event.tool_use_id)) || 'work';
   }
 
-  /** A main-conversation Bash call names the command its task runs: a task starts after its tool use. */
+  /** A Bash call, the main conversation's or a subagent's, names the command its task runs: a task starts after its tool use. */
   private observeToolUses(event: Message): void {
-    if (event.parent_tool_use_id != null) return;
+    const commands = event.parent_tool_use_id == null ? this.commands.main : this.commands.subagent;
     for (const block of Array.isArray(event.message?.content) ? event.message.content : []) {
       if (block?.type !== 'tool_use' || !validId(block.id)) continue;
       // A monitor ends at its timeout unless it was made persistent.
       const kind: Kind | undefined = block.name === 'Bash' && typeof block.input?.command === 'string' ? longLivedService(block.input.command) ? 'service' : 'work'
         : block.name === 'Monitor' && block.input?.persistent === true ? 'service' : undefined;
       if (!kind) continue;
-      this.commands.delete(block.id); this.commands.set(block.id, kind);
-      if (this.commands.size > MAX_COMMANDS) this.commands.delete(this.commands.keys().next().value!);
+      commands.delete(block.id); commands.set(block.id, kind);
+      if (commands.size > MAX_COMMANDS) commands.delete(commands.keys().next().value!);
     }
   }
 
@@ -123,10 +136,10 @@ export class BackgroundTaskTracker {
     const id = event.task_id;
     if (!validId(id)) return undefined;
     if (event.subtype === 'task_started') {
-      // Ambient tasks (such as a live monitor feed) are not work of this turn and may never end. A subagent's own
-      // tasks report to that subagent; the background agent itself stands for them.
-      if (event.ambient === true || event.skip_transcript === true || event.owned_by_subagent === true || OPEN_ENDED_TYPES.has(event.task_type)
+      // Ambient tasks (such as a live monitor feed) are not work of this turn and may never end.
+      if (event.ambient === true || event.skip_transcript === true || OPEN_ENDED_TYPES.has(event.task_type)
         || this.running.has(id) || this.foreground.has(id) || this.detached.has(id)) return undefined;
+      if (event.owned_by_subagent === true) this.subagentOwned.add(id); else this.subagentOwned.delete(id);
       if (event.is_backgrounded === false) { this.foreground.set(id, this.kindOf(event)); return undefined; }
       this.running.set(id, this.kindOf(event));
       return 'started';
@@ -137,6 +150,9 @@ export class BackgroundTaskTracker {
     const status = event.subtype === 'task_notification' ? event.status : event.subtype === 'task_updated' ? event.patch?.status : undefined;
     if (!TERMINAL.has(status)) return moved ? 'started' : undefined;
     this.foreground.delete(id);
+    // Its notice goes to the subagent that started it, which Claude then resumes as a task of its own. A notification
+    // after its status update finds it gone and changes nothing.
+    if (this.subagentOwned.delete(id)) return this.running.delete(id) || this.detached.delete(id) ? 'ended' : undefined;
     const summary = text(event.summary, 300), outputFile = text(event.output_file, 1000);
     const finished: FinishedTask = { status, ...(summary ? { summary } : {}), ...(outputFile ? { outputFile } : {}) };
     // Nobody waits for it: Claude takes its notice by itself, which only keeps its process a moment longer.

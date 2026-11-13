@@ -205,12 +205,46 @@ test('Claude exiting while its background work runs is not reported as success',
   assert.match(done.error ?? '', /exited before it took the results of background work/);
 });
 
-test('ambient, subagent-owned and teammate tasks never hold a turn open', async t => {
+test('ambient, hidden and teammate tasks never hold a turn open', async t => {
   const { manager, cleanup } = await fixture({ first: [started('feed', { ambient: true }), started('mate', { task_type: 'in_process_teammate' }), started('hidden', { skip_transcript: true }),
-    started('nested', { owned_by_subagent: true })] });
+    started('nested', { owned_by_subagent: true, ambient: true })] });
   t.after(cleanup);
   const run = await manager.enqueue(SESSION, 'Watch', {}, { origin: { kind: 'owner' } });
   assert.equal((await settled(manager, run.id)).status, 'completed');
+});
+
+/** A background command a subagent started: Claude hands its notice to that subagent, never the main conversation. */
+const childOf = (taskId: string, agent: string, extra: Record<string, unknown> = {}) => started(taskId, { task_type: 'local_bash', owned_by_subagent: true, parent_task_id: agent, ...extra });
+const updated = (taskId: string, status: string) => ({ type: 'system', subtype: 'task_updated', task_id: taskId, patch: { status } });
+
+test("a background agent that stops while its own background work runs keeps the owner's run open until it reports", async t => {
+  // Session 8a3303e6 on Claude Code 2.1.323: the agent started four reviews in the background and stopped; Claude
+  // reported the agent completed ("waiting on its own background work"). Tower closed input, and Claude exited with the
+  // reviews. When the work ends, Claude registers the agent again under the same id in the same write.
+  const { manager, entries, release, cleanup } = await fixture({
+    first: [started('agent-1'), childOf('review-1', 'agent-1'), childOf('review-2', 'agent-1'), updated('agent-1', 'completed'), notified('agent-1'), takes('agent-1'), says('The worker is waiting for its reviews.')],
+    later: [{ when: 'reviews', frames: [updated('review-1', 'completed'), notified('review-1'), updated('review-2', 'completed'), notified('review-2'), started('agent-1')] },
+      { when: 'report', frames: [updated('agent-1', 'completed'), notified('agent-1'), takes('agent-1'), says('The reviews passed.'), result] }] },
+  { finishRecheckMs: CLAUDE_FINISH_RECHECK_MS });
+  t.after(cleanup);
+  fakeClock(t);
+  const run = await manager.enqueue(SESSION, 'Fix it and review it', {}, { origin: { kind: 'owner' } });
+  assert.equal((await until(() => find(manager, run.id).backgroundWait)).tasks, 2, 'the reviews hold the run');
+  const owned = await until(() => ownedTurn(manager, run.id));
+  await until(() => owned.claude?.turnIdle && find(manager, run.id).output.includes('waiting for its reviews'));
+  t.mock.timers.tick(CLAUDE_FINISH_RECHECK_MS);
+  assert.equal(owned.child.stdin.writableEnded, false, 'input stays open while the reviews run');
+  assert.equal(find(manager, run.id).status, 'running');
+  await release('reviews');
+  await until(() => find(manager, run.id).backgroundWait?.tasks === 1);
+  t.mock.timers.tick(CLAUDE_FINISH_RECHECK_MS);
+  assert.equal(owned.child.stdin.writableEnded, false, 'the resumed agent holds the run');
+  assert.equal(find(manager, run.id).status, 'running');
+  await release('report');
+  await endsAtGrace(t, manager, run.id, 'The reviews passed.', 'Fix it and review it', entries);
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.doesNotMatch(done.output, /asking Claude to continue/, "the reviews' notices were the agent's, never handed to the main conversation");
 });
 
 test('when Claude does not pick up a finished task by itself, Tower hands it the notice', async t => {
@@ -758,4 +792,39 @@ test('the tracker classifies each task by its own Bash call, in any order, and m
   tracker.observe(started('late', { task_type: 'local_bash', tool_use_id: 't-late' }));
   tracker.observe(call('t-late', 'npm run dev'));
   assert.equal(tracker.holding(false), 3);
+});
+
+test("a subagent's background work holds until it ends and leaves no notice for the main conversation", () => {
+  const tracker = new BackgroundTaskTracker();
+  tracker.observe(started('agent'));
+  assert.equal(tracker.observe(childOf('child', 'agent')), 'started');
+  assert.equal(tracker.observe(updated('agent', 'completed')), 'ended');
+  assert.deepEqual([tracker.runningCount, tracker.holding(false), tracker.unreadCount], [1, 1, 1]);
+  tracker.observeReplay(takes('agent'));
+  assert.equal(tracker.observe(updated('child', 'completed')), 'ended');
+  assert.equal(tracker.observe(notified('child')), undefined, 'its notification after the update changes nothing');
+  assert.deepEqual([tracker.outstanding, tracker.detachedCount], [0, 0]);
+  assert.deepEqual(tracker.takeUnread(), []);
+  // Claude registers the agent again once its work reports.
+  assert.equal(tracker.observe(started('agent')), 'started');
+  // Kept by a process no run waits for any more, it ends without a notice to drop.
+  tracker.observe(childOf('child-2', 'agent'));
+  tracker.detach();
+  assert.equal(tracker.detachedCount, 2);
+  assert.equal(tracker.observe(notified('child-2', 'killed')), 'ended');
+  assert.deepEqual([tracker.detachedCount, tracker.detachedUnreadCount], [1, 0]);
+});
+
+test("a subagent's own Bash calls decide what its tasks are, and only its", () => {
+  const tracker = new BackgroundTaskTracker();
+  const call = (id: string, command: string, parent: string | null) => ({ type: 'assistant', parent_tool_use_id: parent, message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command } }] } });
+  tracker.observe(call('t-dev', 'npm run dev', 'agent-call'));
+  tracker.observe(call('t-tests', 'npm test', 'agent-call'));
+  tracker.observe(childOf('dev', 'agent', { tool_use_id: 't-dev' }));
+  tracker.observe(childOf('tests', 'agent', { tool_use_id: 't-tests' }));
+  assert.deepEqual([tracker.holding(false), tracker.holding(true)], [1, 2], "an owner's run does not wait for a subagent's dev server");
+  // A main-conversation call never classifies a subagent's task.
+  tracker.observe(call('t-main', 'npm run dev', null));
+  tracker.observe(childOf('other', 'agent', { tool_use_id: 't-main' }));
+  assert.equal(tracker.holding(false), 2);
 });
