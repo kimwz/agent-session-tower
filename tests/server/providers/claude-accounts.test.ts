@@ -334,3 +334,19 @@ test('a refused saved sign-in shows its last usage as an earlier reading', async
   assert.equal(alpha.reason, 'not_signed_in');
   assert.equal(alpha.usage?.windows[0].usedPercent, 90);
 });
+
+test('after a sign-in Tower could not identify, going back to a saved account shows it in use again', async t => {
+  const f = await fixture(t);
+  await f.signIn('alpha', 'u-alpha', 'alpha@example.com');
+  await f.observe();
+  await until(() => f.accounts.list()[0]?.active);
+  const alpha = f.accounts.list()[0];
+  const saved = await readClaudeStore({ env: f.accounts.accountEnv(alpha.id), platform: 'darwin', keychain: f.keychain });
+  // A `/login` to an account whose profile cannot be read, then back to alpha.
+  await writeClaudeOAuth(oauth('mystery'), f.store);
+  await f.observe();
+  await until(() => !f.accounts.list()[0].active);
+  await writeClaudeOAuth(saved.kind === 'stored' ? saved.blob.claudeAiOauth as Record<string, unknown> : {}, f.store);
+  await f.observe();
+  await until(() => f.accounts.list()[0].active);
+});

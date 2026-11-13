@@ -154,10 +154,12 @@ export class ClaudeAccounts {
     const credential = credentialOf(oauth, this.now());
     if (!oauth || !credential.account) { this.activeId = undefined; this.settled = undefined; return; }
     if (credential.account === this.settled) return;
-    if (this.failed?.fingerprint === credential.account && this.now() < this.failed.until) { this.activeId = undefined; return; }
+    // The sign-in in use is unknown until this one is identified; a later return to a known one is then looked at again.
+    if (this.failed?.fingerprint === credential.account && this.now() < this.failed.until) { this.activeId = undefined; this.settled = undefined; return; }
     try { await this.identify(oauth, credential); }
     catch (error) {
       this.activeId = undefined;
+      this.settled = undefined;
       this.failed = { fingerprint: credential.account, until: this.now() + SYNC_RETRY };
       throw error;
     }
