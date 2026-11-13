@@ -3043,4 +3043,7 @@ export const english: Record<string, string> = {
   "전환하면 새로 시작하는 Claude 실행부터 그 계정을 씁니다. 진행 중인 작업은 끊기지 않습니다.": "After switching, Claude runs that start from now on use that account. Work in progress is not interrupted.",
   "코드 붙여넣기": "Paste the code",
   "확인 중…": "Checking…",
+  "전환함": "Switched",
+  "목록에서 지움": "Removed from the list",
+  "추가 시작": "Started adding",
 };

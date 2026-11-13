@@ -7,19 +7,23 @@ import { api, relativeTime } from '../common/lib';
 import { useI18n } from '../i18n/i18n';
 import { usagePercent, usageUnavailableReason, usageWindowLabel } from './provider-usage';
 
-const post = (token: string, path: string, body: Record<string, unknown> = {}) => api<ClaudeAccountsAnswer>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(body) });
+/** Where a computer's saved Claude accounts are managed: this computer's own path, or a joined computer's over its link. */
+export type ClaudeAccountsTarget = { token: string; base: string };
+const list = (target: ClaudeAccountsTarget) => api<ClaudeAccountsAnswer>(target.base);
+const post = (target: ClaudeAccountsTarget, action: string, body: Record<string, unknown> = {}) => api<ClaudeAccountsAnswer>(`${target.base}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: target.token }, body: JSON.stringify(body) });
 const LOGIN_ACTIVE: ClaudeLoginStatus['state'][] = ['starting', 'waiting_code', 'verifying'];
 
 /** The Claude accounts saved on this computer, inside the Claude usage tooltip: usage at a glance, one click to switch. */
-export function ClaudeAccounts({ token, onAddAccount }: { token: string; onAddAccount: () => void }) {
+export function ClaudeAccounts({ target, onAddAccount }: { target: ClaudeAccountsTarget; onAddAccount: () => void }) {
+  const base = target.base;
   const { t } = useI18n();
   const [answer, setAnswer] = useState<ClaudeAccountsAnswer>();
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
   const load = useCallback(async () => {
-    try { setAnswer(await api<ClaudeAccountsAnswer>('/api/claude-accounts')); }
+    try { setAnswer(await api<ClaudeAccountsAnswer>(base)); }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
-  }, []);
+  }, [base]);
   useEffect(() => {
     void load();
     const timer = setInterval(() => void load(), 20_000);
@@ -37,8 +41,8 @@ export function ClaudeAccounts({ token, onAddAccount }: { token: string; onAddAc
     <header><strong>{t('Claude 계정')}</strong><button type="button" className="claude-account-add" onClick={onAddAccount}><Plus size={12} aria-hidden="true" />{t('계정 추가')}</button></header>
     {!answer && !error && <p className="claude-accounts-note">{t('계정 목록을 불러오는 중')}</p>}
     {answer && !accounts.length && <p className="claude-accounts-note">{t('저장된 계정이 없습니다. 지금 로그인된 계정은 곧 자동으로 저장됩니다.')}</p>}
-    <ul>{accounts.map(account => <ClaudeAccountRow key={account.id} account={account} busy={busy} onSwitch={() => act(`switch:${account.id}`, () => post(token, '/api/claude-accounts/switch', { id: account.id }))}
-      onRemove={() => act(`remove:${account.id}`, () => post(token, '/api/claude-accounts/remove', { id: account.id }))} onSignIn={onAddAccount} />)}</ul>
+    <ul>{accounts.map(account => <ClaudeAccountRow key={account.id} account={account} busy={busy} onSwitch={() => act(`switch:${account.id}`, () => post(target, 'switch', { id: account.id }))}
+      onRemove={() => act(`remove:${account.id}`, () => post(target, 'remove', { id: account.id }))} onSignIn={onAddAccount} />)}</ul>
     {error && <p className="claude-accounts-error" role="alert">{error}</p>}
     {accounts.length > 1 && <p className="claude-accounts-note">{t('전환하면 새로 시작하는 Claude 실행부터 그 계정을 씁니다. 진행 중인 작업은 끊기지 않습니다.')}</p>}
   </section>;
@@ -66,7 +70,7 @@ function ClaudeAccountRow({ account, busy, onSwitch, onRemove, onSignIn }: { acc
 }
 
 /** Adding an account: starts Tower's sign-in on open, follows it, and cancels it when closed before it ends. */
-export function ClaudeLoginDialog({ token, onClose }: { token: string; onClose: () => void }) {
+export function ClaudeLoginDialog({ target, onClose }: { target: ClaudeAccountsTarget; onClose: () => void }) {
   const { t } = useI18n();
   const dialog = useRef<HTMLDialogElement>(null);
   const title = useId();
@@ -77,23 +81,23 @@ export function ClaudeLoginDialog({ token, onClose }: { token: string; onClose: 
   const active = !login || LOGIN_ACTIVE.includes(login.state);
   useEffect(() => { dialog.current?.showModal(); return () => dialog.current?.close(); }, []);
   useEffect(() => {
-    post(token, '/api/claude-accounts/login/start').then(answer => setLogin(answer.login)).catch(reason => setError(reason instanceof Error ? reason.message : String(reason)));
+    post(target, 'login/start').then(answer => setLogin(answer.login)).catch(reason => setError(reason instanceof Error ? reason.message : String(reason)));
   }, []);
   // The sign-in finishes on the server; follow it while it runs.
   useEffect(() => {
     if (!active || error) return;
     // best-effort: a missed reading is followed by the next one.
-    const timer = setInterval(() => { void api<ClaudeAccountsAnswer>('/api/claude-accounts').then(answer => setLogin(answer.login)).catch(() => {}); }, 1500);
+    const timer = setInterval(() => { void list(target).then(answer => setLogin(answer.login)).catch(() => {}); }, 1500);
     return () => clearInterval(timer);
-  }, [active, error]);
+  }, [active, error, target.base]);
   const close = () => {
     // best-effort: an uncancelled sign-in ends by itself after ten minutes.
-    if (login && LOGIN_ACTIVE.includes(login.state)) void post(token, '/api/claude-accounts/login/cancel').catch(() => {});
+    if (login && LOGIN_ACTIVE.includes(login.state)) void post(target, 'login/cancel').catch(() => {});
     onClose();
   };
   const submit = async () => {
     setSending(true); setError(undefined);
-    try { setLogin((await post(token, '/api/claude-accounts/login/code', { code })).login); setCode(''); }
+    try { setLogin((await post(target, 'login/code', { code })).login); setCode(''); }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setSending(false); }
   };

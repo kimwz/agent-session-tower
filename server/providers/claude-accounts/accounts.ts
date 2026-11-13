@@ -338,7 +338,7 @@ export class ClaudeAccounts {
         let usage: ProviderUsage;
         try {
           const { credential } = await this.inactiveCredential(account);
-          usage = await readClaudeUsage({ env: this.accountEnv(account.id), signal: this.stopping.signal, credential, ...(this.options.fetch ? { fetch: this.options.fetch } : {}) });
+          usage = await readClaudeUsage({ env: this.accountEnv(account.id), signal: this.stopping.signal, credential, now: () => this.now(), ...(this.options.fetch ? { fetch: this.options.fetch } : {}) });
         } catch (error) {
           changed = true;
           if (!(error instanceof AccountError)) this.usageReasons.set(account.id, 'unreachable');

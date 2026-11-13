@@ -26,6 +26,8 @@ export interface Host {
   models?: boolean;
   /** Its conversations can be compacted from here. */
   compaction?: boolean;
+  /** Connected, and its Tower lets this page manage its saved Claude accounts. */
+  claudeAccounts?: boolean;
   /** It follows this Tower's settings: its permission rules and requests are managed from this page. */
   following?: true;
   /** Some state of it is known to this page, even if out of date. */
@@ -48,6 +50,11 @@ const scoped = new Map<string, { raw: Snapshot; named: Snapshot }>();
 
 /** Where a computer stands for this page: what it shows and whether work can be sent to it. */
 export type HostState = 'here' | 'ready' | 'loading' | 'read-only' | 'offline' | 'updating' | 'update-required' | 'removed-by-node';
+/** Where a computer's saved Claude accounts are managed from this page: its own path, a joined computer's over its link, or none. */
+export function claudeAccountsPath(host: Pick<Host, 'node' | 'claudeAccounts'>): string | undefined {
+  return host.node ? host.claudeAccounts ? `/api/nodes/${host.node}/claude-accounts` : undefined : '/api/claude-accounts';
+}
+
 export function hostState(host: Host): HostState {
   if (!host.node) return 'here';
   if (host.status === 'update-required') return 'update-required';
@@ -100,7 +107,7 @@ export function combinedView(local: Snapshot | null, nodes: ReadonlyMap<string, 
   if (!listed.length) return { view: local, hosts: [here], complete };
   const parts = listed.flatMap(node => { const snapshot = nodes.get(node.id); return snapshot ? [named(node.id, snapshot)] : []; });
   const hosts = [here, ...listed.map((node): Host => ({ node: node.id, name: node.label || node.name, status: node.status, live: node.status === 'connected' && node.streaming,
-    canWork: node.status === 'connected' && node.streaming && node.features.includes('work'), workspace: node.status === 'connected' && node.features.includes('workspace'), ...(node.features.includes('read') ? { reporting: true } : {}), ...(node.status === 'connected' && node.features.includes('triggers') ? { triggers: true } : {}), ...(node.status === 'connected' && node.features.includes('models') ? { models: true } : {}), ...(node.features.includes('compaction') ? { compaction: true } : {}), ...(node.following ? { following: true as const } : {}), known: Boolean(nodes.get(node.id)) && !nodes.get(node.id)!.scanning, ...(node.updating ? { updating: true } : {}), ...(node.version ? { version: node.version, versions: versionsOf(node.version, nodes.get(node.id)) } : {}), providers: nodes.get(node.id)?.providers ?? [],
+    canWork: node.status === 'connected' && node.streaming && node.features.includes('work'), workspace: node.status === 'connected' && node.features.includes('workspace'), ...(node.features.includes('read') ? { reporting: true } : {}), ...(node.status === 'connected' && node.features.includes('triggers') ? { triggers: true } : {}), ...(node.status === 'connected' && node.features.includes('models') ? { models: true } : {}), ...(node.features.includes('compaction') ? { compaction: true } : {}), ...(node.status === 'connected' && node.features.includes('claudeAccounts') ? { claudeAccounts: true } : {}), ...(node.following ? { following: true as const } : {}), known: Boolean(nodes.get(node.id)) && !nodes.get(node.id)!.scanning, ...(node.updating ? { updating: true } : {}), ...(node.version ? { version: node.version, versions: versionsOf(node.version, nodes.get(node.id)) } : {}), providers: nodes.get(node.id)?.providers ?? [],
     // A computer out of reach shows no rings rather than old numbers that look current.
     ...(node.status === 'connected' && node.streaming && nodes.get(node.id)?.system ? { system: nodes.get(node.id)!.system } : {}) }))];
   return { hosts, complete, view: { ...local,
