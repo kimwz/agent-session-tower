@@ -41,7 +41,7 @@ import { VoiceTurnEnd } from './master/voice-turn-end.js';
 import type { WebCredentials } from './tower-tools/tower-client.js';
 import { ownerMcpOverHttp, startOwnerMcp } from './owner-mcp/tools.js';
 import { startSlackMcp, startTowerMcp } from './slack/mcp-bridge.js';
-import { getProviderHealth } from './providers/discovery.js';
+import { findExecutable, getProviderHealth } from './providers/discovery.js';
 import { createMonitorServer } from './http/server.js';
 import { acquireStateLock, MonitorAlreadyRunning } from './instance/state-lock.js';
 import { existingServerUrl } from './instance/existing-server.js';
@@ -49,7 +49,9 @@ import { networkAccess } from './http/remote-access.js';
 import { AuthStore } from './auth/store.js';
 import { readWebAsset } from './http/web-assets.js';
 import { projectSessionStates } from './sessions/snapshot.js';
-import { ProviderCapabilities } from './providers/capabilities.js';
+import { claudeEnvironmentSignIn, ProviderCapabilities } from './providers/capabilities.js';
+import { ClaudeAccounts } from './providers/claude-accounts/accounts.js';
+import { ClaudeLogin } from './providers/claude-accounts/login.js';
 import { RepositoryMonitor, watchedRepositoryPaths } from './repositories/monitor.js';
 import { installAgentGuidance } from './agent-guidance/install.js';
 import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSummary } from '../shared/skills.js';
@@ -371,7 +373,12 @@ async function main() {
   // CPU, memory and disk of this computer, for the rings on its host node.
   const system = new SystemMonitor(systemSources(stateDir), changed);
   // The Codex probe starts the CLI, so it never runs while this account's Codex is being updated.
-  const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed, stateDir, unlessUpdating: (provider, read) => unlessUpdating(stateDir, provider, read) });
+  // The Claude accounts saved on this computer, switched from the usage meter; each meter reading of Claude Code's own
+  // sign-in tells them which one is in use.
+  const claudeAccounts = new ClaudeAccounts({ stateDir, onChange: changed, refreshMeter: () => { void capabilities.refresh(); } });
+  const claudeLogin = new ClaudeLogin({ directory: claudeAccounts.directory, executable: () => findExecutable('claude'), adopt: directory => claudeAccounts.adopt(directory), onChange: changed });
+  const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed, stateDir, unlessUpdating: (provider, read) => unlessUpdating(stateDir, provider, read),
+    onClaudeReading: (credential, usage) => claudeAccounts.observe(credential, usage) });
   // This Tower keeps itself current when it runs as the service; its worker keeps Claude Code and Codex current.
   let pairedControllers = (): number => 0;
   const latestReleases = new LatestReleases();
@@ -813,7 +820,7 @@ async function main() {
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })), managed: managedSync,
       // The trust is made first when it is still pending (right after joining), so the folder can be shared at once.
       afterClone: async id => { await followingSecrets?.align(id); await followingSecrets?.shareFolders(id, managedSync?.folders(id) ?? []); } } : { error: linkError },
-    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp, todoTools,
+    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp, todoTools, claudeAccounts: { accounts: claudeAccounts, login: claudeLogin, available: () => !claudeEnvironmentSignIn(process.env) },
     decisions: {
       overview: () => decisions.overview(),
       // Turning the key or the canvas outcomes on or off shows or hides them at once.
@@ -898,6 +905,7 @@ async function main() {
     secretRelay.start();
   }
   capabilities.start();
+  claudeAccounts.start();
   repositories.start();
   system.start();
   await outcomes.start();
@@ -921,7 +929,7 @@ async function main() {
     followingSecrets?.close();
     secretRelay?.close();
     const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => { remoteRouter.dispose(); return nodeViews.flush(); });
-    const stoppingCapabilities = capabilities.stop();
+    const stoppingCapabilities = Promise.all([capabilities.stop(), claudeAccounts.stop(), claudeLogin.stop()]);
     const stoppingRepositories = repositories.stop();
     const stoppingPublic = publicListener.close();
     history.stop();

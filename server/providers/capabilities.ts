@@ -2,13 +2,14 @@ import { spawn, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
-import { homedir, userInfo } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { EffortOption, ModelOption, Provider, ProviderAccount, ProviderHealth, ProviderUsage, UsageWindow } from '../../shared/types.js';
 import { CLAUDE_EFFORT_LEVELS, validEffort, validModelId } from './models.js';
 import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../../shared/app-identity.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { claudeStorage, oauthOf, readClaudeStore, systemKeychain } from './claude-accounts/storage.js';
 
 const execute = promisify(execFile);
 const MAX_JSON = 2 * 1024 * 1024;
@@ -121,13 +122,7 @@ async function privateJson(path: string): Promise<unknown> {
   } finally { await file.close(); }
 }
 
-export function claudeStorage(env: NodeJS.ProcessEnv, defaultHome = homedir()): { directory: string; service: string; account: string } {
-  const override = env.CLAUDE_SECURESTORAGE_CONFIG_DIR !== undefined ? env.CLAUDE_SECURESTORAGE_CONFIG_DIR : env.CLAUDE_CONFIG_DIR;
-  const directory = (override || join(defaultHome, '.claude')).normalize('NFC');
-  const suffix = override ? `-${createHash('sha256').update(directory).digest('hex').slice(0, 8)}` : '';
-  const username = env.USER || userInfo().username;
-  return { directory, service: `Claude Code-credentials${suffix}`, account: /^[a-zA-Z0-9._-]+$/.test(username) ? username : 'claude-code-user' };
-}
+export { claudeStorage };
 
 type CredentialReaderOptions = {
   env?: NodeJS.ProcessEnv; platform?: string; signal: AbortSignal;
@@ -141,48 +136,45 @@ type CredentialReaderOptions = {
  */
 export type ClaudeCredential = { token?: string; account?: string; reason?: Reason; stored?: boolean; plan?: string };
 // A token refresh also changes it; that only costs one early reading.
-const accountOf = (secret: string): string => createHash('sha256').update(`tower-claude-account:${secret}`).digest('hex').slice(0, 16);
+export const accountOf = (secret: string): string => createHash('sha256').update(`tower-claude-account:${secret}`).digest('hex').slice(0, 16);
 const ACCOUNT = /^[a-f0-9]{16}$/;
+
+/** The environment selects a sign-in other than Claude Code's own stored one: an API key, another provider, a token. */
+export function claudeEnvironmentSignIn(env: NodeJS.ProcessEnv): boolean {
+  return Boolean(env.CLAUDE_CODE_OAUTH_TOKEN) || accountFromEnvironment(env);
+}
+const accountFromEnvironment = (env: NodeJS.ProcessEnv): boolean => Boolean(env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || env.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR || env.CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR
+  || ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_SIMPLE'].some(key => env[key] === '1' || env[key] === 'true')
+  || env.ANTHROPIC_BASE_URL && env.ANTHROPIC_BASE_URL.replace(/\/$/, '') !== 'https://api.anthropic.com');
+
+/** A stored `claudeAiOauth` record as a credential: usable token, or why not. */
+export function credentialOf(oauth: Record<string, unknown> | undefined, now = Date.now()): ClaudeCredential {
+  if (!oauth || typeof oauth.accessToken !== 'string' || !oauth.accessToken || /[\r\n]/.test(oauth.accessToken)) return { reason: 'not_signed_in' };
+  // The refresh token outlives each access token, so the fingerprint changes less often.
+  const account = accountOf(typeof oauth.refreshToken === 'string' && oauth.refreshToken ? oauth.refreshToken : oauth.accessToken);
+  const plan = planId(oauth.subscriptionType);
+  const stored = { account, stored: true, ...(plan ? { plan } : {}) };
+  if (typeof oauth.expiresAt === 'number' && oauth.expiresAt <= now) return { reason: 'not_signed_in', ...stored };
+  if (!Array.isArray(oauth.scopes) || !oauth.scopes.includes('user:profile')) return { reason: 'not_supported', ...stored };
+  return { token: oauth.accessToken, ...stored };
+}
 
 /** Read the same native storage, without refresh, permission changes or copies. */
 export async function readClaudeCredential(options: CredentialReaderOptions): Promise<ClaudeCredential> {
   const env = options.env || process.env;
   // Match native auth precedence: an explicit account must never fall through to
   // the unrelated personal subscription stored on this machine.
-  if (env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || env.CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR || env.CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR
-    || ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_SIMPLE'].some(key => env[key] === '1' || env[key] === 'true')
-    || env.ANTHROPIC_BASE_URL && env.ANTHROPIC_BASE_URL.replace(/\/$/, '') !== 'https://api.anthropic.com') return { reason: 'not_supported' };
+  if (accountFromEnvironment(env)) return { reason: 'not_supported' };
   if (env.CLAUDE_CODE_OAUTH_TOKEN) {
     if (!env.CLAUDE_CODE_OAUTH_SCOPES?.split(/\s+/).includes('user:profile')) return { reason: 'not_supported' };
     return /[\r\n]/.test(env.CLAUDE_CODE_OAUTH_TOKEN) ? { reason: 'credentials_unavailable' } : { token: env.CLAUDE_CODE_OAUTH_TOKEN, account: accountOf(env.CLAUDE_CODE_OAUTH_TOKEN) };
   }
-  const storage = claudeStorage(env);
-  let credentials: unknown;
-  if ((options.platform || process.platform) === 'darwin') {
-    try {
-      const readKeychain = options.keychain || (async (account, service, signal) => (await execute('/usr/bin/security', ['find-generic-password', '-a', account, '-w', '-s', service], { timeout: 2000, maxBuffer: MAX_JSON, signal })).stdout);
-      const raw = await readKeychain(storage.account, storage.service, options.signal);
-      // A present keychain account takes precedence even when it has no OAuth record.
-      credentials = JSON.parse(raw);
-    } catch (error) {
-      if (options.signal.aborted) return { reason: 'credentials_unavailable' };
-      // Keychain lookup failures use native plaintext fallback; never echo stderr.
-      if (error instanceof SyntaxError) return { reason: 'credentials_unavailable' };
-    }
-  }
-  if (credentials === undefined) {
-    try { credentials = await (options.readJson || privateJson)(join(storage.directory, '.credentials.json')); }
-    catch (error) { return { reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'not_signed_in' : 'credentials_unavailable' }; }
-  }
-  const oauth = object(object(credentials)?.claudeAiOauth);
-  if (!oauth || typeof oauth.accessToken !== 'string' || !oauth.accessToken || /[\r\n]/.test(oauth.accessToken)) return { reason: 'not_signed_in' };
-  // The refresh token outlives each access token, so the fingerprint changes less often.
-  const account = accountOf(typeof oauth.refreshToken === 'string' && oauth.refreshToken ? oauth.refreshToken : oauth.accessToken);
-  const plan = planId(oauth.subscriptionType);
-  const stored = { account, stored: true, ...(plan ? { plan } : {}) };
-  if (typeof oauth.expiresAt === 'number' && oauth.expiresAt <= Date.now()) return { reason: 'not_signed_in', ...stored };
-  if (!Array.isArray(oauth.scopes) || !oauth.scopes.includes('user:profile')) return { reason: 'not_supported', ...stored };
-  return { token: oauth.accessToken, ...stored };
+  const keychain = options.keychain;
+  const reading = await readClaudeStore({ env, signal: options.signal, ...(options.platform ? { platform: options.platform } : {}),
+    ...(keychain ? { keychain: { ...systemKeychain, read: (account, service, signal) => keychain(account, service, signal!) } } : {}), ...(options.readJson ? { readJson: options.readJson } : {}) });
+  if (reading.kind === 'none') return { reason: 'not_signed_in' };
+  if (reading.kind === 'unreadable') return { reason: 'credentials_unavailable' };
+  return credentialOf(oauthOf(reading));
 }
 
 const MAX_CLAUDE_CONFIG = 32 * 1024 * 1024;
@@ -379,6 +371,8 @@ type CapabilityOptions = {
   claudeCredential?: (signal: AbortSignal) => Promise<ClaudeCredential>;
   claudeUsage?: (credential: ClaudeCredential, signal: AbortSignal) => Promise<ProviderUsage>;
   claudeEmail?: (env: NodeJS.ProcessEnv) => Promise<string | undefined>;
+  /** Each reading of Claude Code's own sign-in and its quota, for the saved accounts of this computer. */
+  onClaudeReading?: (credential: ClaudeCredential, usage: ProviderUsage) => void;
   now?: () => number;
 };
 
@@ -440,6 +434,7 @@ export class ProviderCapabilities {
     // An environment token can belong to another account than the profile Claude Code keeps in its configuration.
     const account = credential.stored ? accountOrNone(await (this.options.claudeEmail || readClaudeEmail)(this.options.env || process.env), credential.plan) : undefined;
     const paced = await this.readClaudeQuota(credential, now, signal);
+    if (!signal.aborted) this.options.onClaudeReading?.(credential, paced.usage);
     return { ...paced, ...(account ? { account } : {}) };
   }
   private async readClaudeQuota(credential: ClaudeCredential, now: number, signal: AbortSignal): Promise<{ usage: ProviderUsage; sameAccount: boolean }> {

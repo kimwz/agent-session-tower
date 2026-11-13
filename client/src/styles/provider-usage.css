@@ -83,3 +83,45 @@
 .tower-versions-tooltip dd span { color: #90a8c3; font-size: 10px; }
 .tower-versions-tooltip .waiting dd em { color: #e9ba78; }
 .tower-versions-tooltip .idle dd em { color: #869ab5; font-weight: 400; }
+
+/* Saved Claude accounts inside the Claude usage tooltip, and adding one */
+.usage-tooltip:has(.claude-accounts) { width: min(320px, calc(100vw - 24px)); overflow-y: auto; overscroll-behavior: contain; }
+.claude-accounts { margin-top: 12px; padding-top: 10px; border-top: 1px solid #30465f; }
+.claude-accounts > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.claude-accounts > header strong { font-size: 12px; }
+.claude-accounts button { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border: 1px solid #4b6687; border-radius: 6px; background: #1d3049; color: #d8e5f5; font-size: 11px; cursor: pointer; }
+.claude-accounts button:hover:not(:disabled) { background: #284262; }
+.claude-accounts button:disabled { opacity: .5; cursor: default; }
+.claude-accounts ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.claude-account { padding: 8px; border: 1px solid #2e4560; border-radius: 8px; background: #182a40; display: grid; gap: 4px; }
+.claude-account.active { border-color: #d8a379; box-shadow: inset 3px 0 0 #d8a379; }
+.claude-account.problem { border-color: #8a5b4f; }
+.claude-account-head { display: flex; align-items: center; gap: 6px; }
+.claude-account-name { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; font-weight: 600; color: #e3edf9; overflow-wrap: anywhere; }
+.claude-account-name i { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: #4d5f76; }
+.claude-account.active .claude-account-name i { background: #d8a379; }
+.claude-account-head em { font-style: normal; font-size: 10px; color: #d8a379; }
+.claude-accounts .claude-account-remove { padding: 3px; border-color: transparent; background: none; color: #8ba0bb; }
+.claude-account small { color: #8ba0bb; font-size: 10px; }
+.claude-account .claude-account-stale { color: #e1b776; }
+.claude-account-usage { display: grid; gap: 3px; }
+.claude-account-usage > span { display: grid; grid-template-columns: 34px 1fr 32px; align-items: center; gap: 6px; }
+.claude-account-usage > span > b { font-weight: 400; color: #a2b5cd; font-size: 10px; }
+.claude-account-usage .usage-bar { padding-top: 0; }
+.claude-account-usage em { font-style: normal; text-align: right; font-variant-numeric: tabular-nums; }
+.claude-accounts-note { color: #8ba0bb !important; font-size: 10px; }
+.claude-accounts-error { color: #ec8a7d !important; overflow-wrap: anywhere; }
+.claude-accounts .spin { animation: claude-account-spin 1s linear infinite; }
+@keyframes claude-account-spin { to { transform: rotate(360deg); } }
+.claude-login-dialog { width: min(440px, calc(100vw - 32px)); border: 1px solid #4b6687; border-radius: 12px; padding: 18px; background: #152335; color: #d8e5f5; font-size: 13px; }
+.claude-login-dialog::backdrop { background: #070e19aa; }
+.claude-login-dialog > header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.claude-login-dialog > header button { border: 0; background: none; color: #a2b5cd; cursor: pointer; }
+.claude-login-dialog ol { margin: 0 0 12px; padding-left: 18px; display: grid; gap: 10px; line-height: 1.5; }
+.claude-login-dialog a { display: inline-flex; align-items: center; gap: 5px; margin-top: 6px; color: #97bff9; }
+.claude-login-dialog form { display: flex; gap: 8px; }
+.claude-login-dialog input { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid #4b6687; border-radius: 8px; background: #0f1b2b; color: #e3edf9; font: inherit; font-family: ui-monospace, monospace; }
+.claude-login-dialog form button, .claude-login-dialog footer button { padding: 8px 14px; border: 1px solid #4b6687; border-radius: 8px; background: #23426a; color: #e3edf9; cursor: pointer; }
+.claude-login-dialog button:disabled { opacity: .5; cursor: default; }
+.claude-login-dialog footer { display: flex; justify-content: flex-end; margin-top: 14px; }
+.claude-login-done { color: #a9dcc0; }
