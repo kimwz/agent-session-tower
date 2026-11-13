@@ -52,7 +52,8 @@ function fakeAnthropic() {
     }
     if (url.endsWith('/api/oauth/usage')) {
       usageReads.push(token);
-      return Response.json({ five_hour: { utilization: 42, resets_at: new Date(NOW + 2 * HOUR).toISOString() }, seven_day: { utilization: 7, resets_at: new Date(NOW + 72 * HOUR).toISOString() } });
+      // The usage reader judges resets by the real clock (an elapsed reset marks the reading stale), not the accounts' NOW.
+      return Response.json({ five_hour: { utilization: 42, resets_at: new Date(Date.now() + 2 * HOUR).toISOString() }, seven_day: { utilization: 7, resets_at: new Date(Date.now() + 72 * HOUR).toISOString() } });
     }
     return new Response('not found', { status: 404 });
   }) as typeof globalThis.fetch;
