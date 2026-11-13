@@ -14,12 +14,13 @@ const NOW = Date.parse('2026-11-13T00:00:00Z');
 /** An in-memory keychain: one item per service, as `security` keeps them for one user. */
 function fakeKeychain() {
   const items = new Map<string, string>();
+  let locked = false;
   const keychain: Keychain = {
-    read: async (_account, service) => { const value = items.get(service); if (value === undefined) throw new Error('not found'); return value; },
+    read: async (_account, service) => { if (locked) throw new Error('security find-generic-password failed (exit 36)'); return items.get(service); },
     write: async (_account, service, data) => { items.set(service, data); },
     remove: async (_account, service) => { items.delete(service); },
   };
-  return { items, keychain };
+  return { items, keychain, lock: (value: boolean) => { locked = value; } };
 }
 
 const oauth = (name: string, expiresAt = NOW + 8 * HOUR) => ({ accessToken: `access-${name}`, refreshToken: `refresh-${name}`, expiresAt, scopes: ['user:inference', 'user:profile'], subscriptionType: 'max' });
@@ -67,7 +68,7 @@ async function fixture(t: test.TestContext) {
   await mkdir(defaultDir, { recursive: true });
   // A configured store directory keeps every test away from this computer's own Claude sign-in.
   const env = { USER: 'tester', CLAUDE_CONFIG_DIR: defaultDir };
-  const { items, keychain } = fakeKeychain();
+  const { items, keychain, lock } = fakeKeychain();
   const anthropic = fakeAnthropic();
   let changes = 0;
   const meter: number[] = [];
@@ -90,7 +91,7 @@ async function fixture(t: test.TestContext) {
     const { credentialOf } = await import('../../../server/providers/capabilities.js');
     accounts.observe(credentialOf(record, NOW), { status: 'available', windows: [{ id: 'five_hour', usedPercent: 90, windowMinutes: 300 }], updatedAt: new Date(NOW).toISOString() });
   };
-  return { root, home, env, items, keychain, anthropic, accounts, store, signIn, active, observe, meter, changes: () => changes };
+  return { root, home, env, items, keychain, lock, anthropic, accounts, store, signIn, active, observe, meter, changes: () => changes };
 }
 
 test('only the claudeAiOauth record is replaced; other sign-ins in the store and the file fallback stay', async t => {
@@ -115,6 +116,22 @@ test('no plaintext copy is made where none existed, and an unreadable keychain i
   items.set(claudeStorage(env).service, 'not json');
   await assert.rejects(writeClaudeOAuth(oauth('b'), { env, platform: 'darwin', keychain }));
   assert.equal(items.get(claudeStorage(env).service), 'not json');
+});
+
+test('a sign-in kept only in the file moves into a new keychain item whole, and a keychain Tower cannot read is never written', async t => {
+  const { env, items, keychain, root, lock } = await fixture(t);
+  const service = claudeStorage(env).service;
+  const file = join(root, 'default-claude', '.credentials.json');
+  await writeFile(file, JSON.stringify({ claudeAiOauth: oauth('old'), mcpOAuth: { server: { token: 'kept' } } }));
+  await writeClaudeOAuth(oauth('new'), { env, platform: 'darwin', keychain });
+  const blob = JSON.parse(items.get(service)!);
+  assert.equal(blob.claudeAiOauth.refreshToken, 'refresh-new');
+  assert.deepEqual(blob.mcpOAuth, { server: { token: 'kept' } }, 'the keychain now read first still holds the MCP sign-ins');
+  lock(true);
+  await assert.rejects(writeClaudeOAuth(oauth('other'), { env, platform: 'darwin', keychain }));
+  lock(false);
+  assert.equal(JSON.parse(items.get(service)!).claudeAiOauth.refreshToken, 'refresh-new');
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).claudeAiOauth.refreshToken, 'refresh-new');
 });
 
 test('a sign-in Tower sees for the first time is saved automatically, with its full profile', async t => {

@@ -25,18 +25,22 @@ export function claudeStorage(env: NodeJS.ProcessEnv, defaultHome = homedir()): 
   return { directory, service: `Claude Code-credentials${suffix}`, account: /^[a-zA-Z0-9._-]+$/.test(username) ? username : 'claude-code-user' };
 }
 
-/** The keychain as `security` sees it; tests replace it. */
+/** The keychain as `security` sees it; tests replace it. `read` answers undefined for no such item and throws on any other failure. */
 export type Keychain = {
-  read(account: string, service: string, signal?: AbortSignal): Promise<string>;
+  read(account: string, service: string, signal?: AbortSignal): Promise<string | undefined>;
   write(account: string, service: string, data: string): Promise<void>;
   remove(account: string, service: string): Promise<void>;
 };
+
+// `security` exits 44 (errSecItemNotFound) when there is no such item.
+const NO_SUCH_ITEM = 44;
+class SecurityError extends Error { constructor(command: string, readonly exitCode?: number) { super(`security ${command} failed${exitCode !== undefined ? ` (exit ${exitCode})` : ''}`); } }
 
 function run(args: string[], options: { input?: string; signal?: AbortSignal } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = execFile('/usr/bin/security', args, { timeout: 5000, maxBuffer: MAX_JSON, ...(options.signal ? { signal: options.signal } : {}) }, (error, stdout) => {
       // `security` can print item attributes on failure; only the exit status leaves this function.
-      if (error) reject(new Error(`security ${args[0]} failed${typeof error.code === 'number' ? ` (exit ${error.code})` : ''}`));
+      if (error) reject(new SecurityError(args[0], typeof error.code === 'number' ? error.code : undefined));
       else resolve(stdout);
     });
     if (options.input !== undefined) child.stdin?.end(options.input);
@@ -44,7 +48,10 @@ function run(args: string[], options: { input?: string; signal?: AbortSignal } =
 }
 
 export const systemKeychain: Keychain = {
-  read: (account, service, signal) => run(['find-generic-password', '-a', account, '-w', '-s', service], { signal }),
+  async read(account, service, signal) {
+    try { return await run(['find-generic-password', '-a', account, '-w', '-s', service], { signal }); }
+    catch (error) { if (error instanceof SecurityError && error.exitCode === NO_SUCH_ITEM) return undefined; throw error; }
+  },
   async write(account, service, data) {
     const hex = Buffer.from(data, 'utf8').toString('hex');
     const command = `add-generic-password -U -a "${account}" -s "${service}" -X "${hex}"\n`;
@@ -115,14 +122,18 @@ export async function writeClaudeOAuth(oauth: Json, options: StoreOptions = {}):
   const file = join(storage.directory, '.credentials.json');
   if ((options.platform || process.platform) !== 'darwin') return replaceInFile(file, oauth, true);
   const keychain = options.keychain || systemKeychain;
-  let blob: Json = {};
-  let raw: string | undefined;
-  try { raw = await keychain.read(storage.account, storage.service); } catch { /* best-effort: no item yet, so a new one is made. */ }
+  // A keychain Tower cannot read (locked, denied) is never written: the item there may hold sign-ins Tower does not know.
+  const raw = await keychain.read(storage.account, storage.service);
+  let blob: Json;
   if (raw !== undefined) {
-    // An item Tower cannot parse is never overwritten: it may hold sign-ins Tower does not know.
+    // An item Tower cannot parse is never overwritten either.
     const parsed = object(JSON.parse(raw));
     if (!parsed) throw new Error('The Claude Code keychain item is not readable JSON.');
     blob = parsed;
+  } else {
+    // No item yet: Claude Code reads the file, so the new item starts from everything the file holds (MCP sign-ins too).
+    try { blob = object(await readFileJson(file)) || {}; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; blob = {}; }
   }
   await keychain.write(storage.account, storage.service, JSON.stringify({ ...blob, claudeAiOauth: oauth }));
   if (await fileExists(file)) await replaceInFile(file, oauth, false);

@@ -85,7 +85,8 @@
 .tower-versions-tooltip .idle dd em { color: #869ab5; font-weight: 400; }
 
 /* Saved Claude accounts inside the Claude usage tooltip, and adding one */
-.usage-tooltip:has(.claude-accounts) { width: min(320px, calc(100vw - 24px)); overflow-y: auto; overscroll-behavior: contain; }
+/* Scrolling would clip the hover bridge above the tooltip, so this one opens without a gap. */
+.usage-tooltip:has(.claude-accounts) { top: 100%; width: min(320px, calc(100vw - 24px)); overflow-y: auto; overscroll-behavior: contain; }
 .claude-accounts { margin-top: 12px; padding-top: 10px; border-top: 1px solid #30465f; }
 .claude-accounts > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .claude-accounts > header strong { font-size: 12px; }
