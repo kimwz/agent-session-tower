@@ -39,13 +39,21 @@ createInterface({ input: process.stdin }).on('line', line => {
   log({ user: message.message.content[0].text });
   if (turns++ === 0) {
     send({ type: 'system', subtype: 'init', session_id: id, permissionMode: 'auto' });
-    sendAll([...script.first, ...(script.noResult ? [] : [{ type: 'result', is_error: false, result: 'first done' }])]);
-    const fire = step => { sendAll(step.frames ?? []); if (step.exit) { if (step.stderr) process.stderr.write(step.stderr); process.exit(step.code ?? 0); } };
-    const released = [];
-    for (const step of script.later ?? []) if (step.when) released.push(step); else setTimeout(() => fire(step), step.at);
-    if (released.length) {
-      const check = setInterval(() => { if (!existsSync(process.env.LOG + '.' + released[0].when)) return; fire(released.shift()); if (!released.length) clearInterval(check); }, 5);
-    }
+    // A resumed process first takes the notices its predecessor left, in a turn of its own (\`before\`), and takes the
+    // launch prompt only after it (once \`promptWhen\` is released, when given).
+    sendAll(script.before ?? []);
+    const begin = () => {
+      // Claude replays the message it takes (--replay-user-messages), the launch prompt included (\`noPromptReplay\`: not).
+      sendAll([...(script.noPromptReplay ? [] : [{ type: 'user', isReplay: true, uuid: message.uuid, parent_tool_use_id: null, message: message.message }]), ...script.first, ...(script.noResult ? [] : [{ type: 'result', is_error: false, result: 'first done' }])]);
+      const fire = step => { sendAll(step.frames ?? []); if (step.exit) { if (step.stderr) process.stderr.write(step.stderr); process.exit(step.code ?? 0); } };
+      const released = [];
+      for (const step of script.later ?? []) if (step.when) released.push(step); else setTimeout(() => fire(step), step.at);
+      if (released.length) {
+        const check = setInterval(() => { if (!existsSync(process.env.LOG + '.' + released[0].when)) return; fire(released.shift()); if (!released.length) clearInterval(check); }, 5);
+      }
+    };
+    if (!script.promptWhen) { begin(); return; }
+    const waiting = setInterval(() => { if (!existsSync(process.env.LOG + '.' + script.promptWhen)) return; clearInterval(waiting); begin(); }, 5);
     return;
   }
   if (script.unacknowledgedReply) { sendAll([...(script.onMessage ?? []), { type: 'result', is_error: false, result: 'finished without replay' }]); return; }
@@ -827,4 +835,73 @@ test("a subagent's own Bash calls decide what its tasks are, and only its", () =
   tracker.observe(call('t-main', 'npm run dev', null));
   tracker.observe(childOf('other', 'agent', { tool_use_id: 't-main' }));
   assert.equal(tracker.holding(false), 2);
+});
+
+test('a resumed process taking its predecessor\'s notices first does not end the run: input stays open for messages and for the work', async t => {
+  // Claude Code 2.1.32x: a process that resumes a conversation answers the notices of background work its predecessor
+  // left in a turn of its own, with a result, before it takes the launch prompt (seen live, and on office-tower-1).
+  const { manager, entries, release, cleanup } = await fixture({
+    before: [notified('earlier-agent', 'stopped'), says('The earlier worker was stopped.'), { type: 'result', is_error: false, result: '' }],
+    promptWhen: 'prompt',
+    first: [says('Started the worker.'), started('agent-1')],
+    later: [{ when: 'agent-done', frames: [notified('agent-1'), takes('agent-1'), says('The worker finished.'), result] }],
+  }, { finishRecheckMs: 20 });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Start the worker', {}, { origin: { kind: 'owner' } });
+  const owned = await until(() => ownedTurn(manager, run.id));
+  await until(() => find(manager, run.id).output.includes('The earlier worker was stopped.'));
+  // Past the finish grace: before the fix, input closed here and nothing could be inserted any more.
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(owned.child.stdin.writableEnded, false, 'input stays open for the launch prompt\'s turn');
+  assert.match(find(manager, run.id).output, /Claude first took notices its previous process left/);
+  const next = await manager.enqueue(SESSION, 'Also check the logs', {}, { origin: { kind: 'owner' } });
+  await until(() => find(manager, next.id).canSteer === true);
+  await manager.cancel(next.id);
+  assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Start the worker'], 'Tower sent Claude nothing during its own turn');
+  await release('prompt');
+  // The run's own turn answers and waits for its worker, as any turn does.
+  await until(() => find(manager, run.id).output.includes('Started the worker.') && find(manager, run.id).backgroundWait);
+  assert.equal(owned.child.stdin.writableEnded, false, 'input stays open while the worker runs');
+  await release('agent-done');
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /The worker finished\./);
+});
+
+test('a run whose prompt Claude never replays still ends at its answer and after its work, as before', async t => {
+  // Without the prompt's replay the first result is the run's answer; a notice after it belongs to the run.
+  const { manager, release, cleanup } = await fixture({ noPromptReplay: true, first: [says('Started the worker.'), started('agent-1')],
+    later: [{ when: 'agent-done', frames: [notified('agent-1'), takes('agent-1'), says('The worker finished.'), result] }] }, { finishRecheckMs: 20 });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Start the worker', {}, { origin: { kind: 'owner' } });
+  await until(() => find(manager, run.id).backgroundWait);
+  await release('agent-done');
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /The worker finished\./);
+});
+
+test('Tower\'s own continuation after an earlier process\'s notices is the run\'s prompt, and so is a prompt Claude does not replay', async t => {
+  for (const noPromptReplay of [false, true]) {
+    const { manager, cleanup } = await fixture({ noPromptReplay,
+      before: [notified('earlier-agent', 'stopped'), { type: 'result', is_error: false, result: '' }],
+      first: [says('Continued the work.')] }, { finishRecheckMs: 20 });
+    // A recovery or update continuation starts with Tower's mark, like a notice Tower hands over.
+    const run = await manager.enqueue(SESSION, '[Agent Session Tower] The previous Claude process exited; resume the work.', {}, { origin: { kind: 'owner' } });
+    const done = await settled(manager, run.id);
+    await cleanup();
+    assert.equal(done.status, 'completed', noPromptReplay ? 'not replayed' : 'replayed');
+    assert.match(done.output, /Continued the work\./);
+  }
+});
+
+test('after the notices\' own turn, an answer that comes only in the result is still shown', async t => {
+  // The own turn showed text; the run's turn answers with its result alone. Each turn's reply is its own.
+  const { manager, cleanup } = await fixture({ before: [notified('earlier-agent', 'stopped'), says('The earlier worker was stopped.'), { type: 'result', is_error: false, result: '' }],
+    first: [] }, { finishRecheckMs: 20 });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Report the state', {}, { origin: { kind: 'owner' } });
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /first done/);
 });
