@@ -4,7 +4,7 @@ import { createElement, Fragment } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { matchChatRuns } from '../../../client/src/chat/chat-runs.js';
 import { ChatTranscript } from '../../../client/src/chat/ChatTranscript.js';
-import { RunControl } from '../../../client/src/chat/RunControl.js';
+import { DeliveredSteers, foldDeliveredSteers, isRunGroup, RunControl } from '../../../client/src/chat/RunControl.js';
 import type { Attachment, ChatMessage, Run } from '../../../shared/types.js';
 
 const at = (milliseconds: number) => new Date(Date.UTC(2026, 8, 15) + milliseconds).toISOString();
@@ -229,4 +229,28 @@ test('a master instruction a running turn took minutes later still says it comes
   // The owner's matching is unchanged.
   const { sender: _sender, ...owner } = steered;
   assert.equal(matchChatRuns([late], [owner], 'session').matches.get('late'), undefined);
+});
+
+test('two or more messages delivered into the running turn fold into one line with the newest; opening it lists each', () => {
+  const delivered = (id: string, prompt: string, extra: Partial<Run> = {}) => run(id, { prompt, status: 'running', finishedAt: undefined,
+    steering: { targetRunId: 'target', state: 'delivered', requestedAt: at(10_000), deliveredAt: at(11_000) }, ...extra });
+  const target = run('target', { status: 'running', finishedAt: undefined });
+  const asking = delivered('asking', 'APPROVAL', { approvals: [{ id: 'a', kind: 'command', title: 'run', createdAt: at(1) } as never] });
+  const failed = run('failed', { status: 'error', error: 'x' });
+  const first = delivered('first', 'FIRST_INSERT', { createdAt: at(1000) }), second = delivered('second', 'SECOND_INSERT', { createdAt: at(2000) }), third = delivered('third', 'THIRD_INSERT', { createdAt: at(3000) });
+  // A single delivered message, one still being sent and one waiting on an approval stay as they are.
+  assert.deepEqual(foldDeliveredSteers([first, target]), [first, target]);
+  const sending = delivered('sending', 'SENDING', { steering: { targetRunId: 'target', state: 'sending', requestedAt: at(10_000) } });
+  assert.deepEqual(foldDeliveredSteers([asking, first, sending, target]), [asking, first, sending, target]);
+  // The group takes the place of the first delivered message in the list and holds them oldest first.
+  const folded = foldDeliveredSteers([asking, third, failed, first, second, target]);
+  assert.equal(folded.length, 4);
+  assert.deepEqual(folded.map(entry => isRunGroup(entry) ? entry.map(run => run.id) : entry.id), ['asking', ['first', 'second', 'third'], 'failed', 'target']);
+  const closed = renderToStaticMarkup(createElement(DeliveredSteers, { runs: [first, second, third] }));
+  assert.equal((closed.match(/현재 작업에 전달됨/g) || []).length, 1);
+  assert.match(closed, /aria-expanded="false"/); assert.match(closed, />3개</); assert.match(closed, /THIRD_INSERT/);
+  assert.doesNotMatch(closed, /FIRST_INSERT|SECOND_INSERT/);
+  const open = renderToStaticMarkup(createElement(DeliveredSteers, { runs: [first, second, third], initiallyOpen: true }));
+  assert.match(open, /aria-expanded="true"/);
+  assert.deepEqual([...open.matchAll(/<li[^>]*>([^<]*)<\/li>/g)].map(match => match[1]), ['FIRST_INSERT', 'SECOND_INSERT', 'THIRD_INSERT']);
 });

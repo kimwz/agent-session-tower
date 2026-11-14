@@ -894,6 +894,7 @@ export const english: Record<string, string> = {
   '끼워넣는 중': 'Sending into current turn',
   '현재 작업에 전달됨': 'Delivered to current turn',
   '전달 여부 확인 필요': 'Delivery needs verification',
+  '전달된 메시지 모두 보기': 'Show every delivered message',
   '요청을 끼워넣지 못했습니다.': 'Could not send the queued request into the current turn.',
   '끼워넣기 요청의 내용은 변경할 수 없습니다.': 'The queued request content cannot be changed when steering.',
   '이 실행기는 요청 끼워넣기를 지원하지 않습니다.': 'This runner does not support steering.',
