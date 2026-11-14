@@ -10,7 +10,6 @@ import { towerInstructionsBlock } from '../sessions/parser.js';
 import { attachmentPrompt, claudeImageBlocks } from '../stores/attachments.js';
 import { automaticApprovals, claudeStartMode } from './approval-policy.js';
 import { BackgroundTaskTracker, messageText, type FinishedTask } from './background-tasks.js';
-import { isTaskNotification } from '../../shared/task-notification.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 import { ClaudeControl } from './claude-control.js';
 import { ReplyLog } from './replies.js';
@@ -429,8 +428,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         return;
       }
       const mainContext = event.parent_tool_use_id == null && (event.session_id === undefined || event.session_id === session.nativeId);
-      // A notice Claude replays is not the prompt, should a version replay the notices it takes.
-      if (promptPending && mainContext && event.type === 'user' && event.isReplay && !isTaskNotification(messageText(event))) {
+      // A notice Claude replays is not the prompt, should a version replay the notices it takes (Tower's own words are).
+      if (promptPending && mainContext && event.type === 'user' && event.isReplay && !messageText(event).trimStart().startsWith('<task-notification>')) {
         promptPending = false;
         // The run's own turn starts here, as any turn does, not where Claude's turn for the old notices did.
         if (ownTurnFirst) { ownTurnFirst = false; resetTurn(); tasks.observeTurnStart(); }
@@ -484,7 +483,9 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         }
         messageHasPartial = false;
       } else if (event.type === 'result' && mainContext && promptPending && ownTurnFirst) {
-        // The turn that took an earlier process's notices: the run's own turn comes next, with input still open.
+        // The turn that took an earlier process's notices: the run's own turn comes next, with input still open. A
+        // result after it with no new notice is the run's own, even if Claude never replayed the prompt.
+        ownTurnFirst = false;
         note('\n[Tower] Claude first took notices its previous process left; this request comes next.\n');
       } else if (event.type === 'result' && mainContext) {
         // The run's answer: its prompt was taken, whether or not Claude replayed it (a later notice is the run's own).

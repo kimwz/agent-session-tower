@@ -880,3 +880,17 @@ test('a run whose prompt Claude never replays still ends at its answer and after
   assert.equal(done.status, 'completed');
   assert.match(done.output, /The worker finished\./);
 });
+
+test('Tower\'s own continuation after an earlier process\'s notices is the run\'s prompt, and so is a prompt Claude does not replay', async t => {
+  for (const noPromptReplay of [false, true]) {
+    const { manager, cleanup } = await fixture({ noPromptReplay,
+      before: [notified('earlier-agent', 'stopped'), { type: 'result', is_error: false, result: '' }],
+      first: [says('Continued the work.')] }, { finishRecheckMs: 20 });
+    // A recovery or update continuation starts with Tower's mark, like a notice Tower hands over.
+    const run = await manager.enqueue(SESSION, '[Agent Session Tower] The previous Claude process exited; resume the work.', {}, { origin: { kind: 'owner' } });
+    const done = await settled(manager, run.id);
+    await cleanup();
+    assert.equal(done.status, 'completed', noPromptReplay ? 'not replayed' : 'replayed');
+    assert.match(done.output, /Continued the work\./);
+  }
+});
