@@ -168,6 +168,15 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   const waitMaxMs = host.options.backgroundWaitMaxMs ?? BACKGROUND_WAIT_MAX_MS;
   const finishRecheckMs = host.options.claudeFinishRecheckMs ?? CLAUDE_FINISH_RECHECK_MS;
   let turnActive = true;
+  /**
+   * Until Claude takes the launch prompt: the first message it replays, as it takes stdin in order (Claude does not
+   * replay the notices it takes by itself). A process that resumes a conversation first takes the notices of
+   * background work its predecessor left (`task_notification`), in a turn of its own that reports a result before
+   * Claude takes the prompt. That result is not this run's: closing input there left Claude working on the prompt with
+   * no way to insert messages, and killing its background work 10 minutes after its last turn.
+   */
+  let promptPending = true;
+  let ownTurnFirst = false;
   /** Tower handed Claude the notice itself and Claude has not yet replayed it. */
   let noticeId: string | undefined;
   let waitTimedOut = false;
@@ -418,6 +427,12 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         return;
       }
       const mainContext = event.parent_tool_use_id == null && (event.session_id === undefined || event.session_id === session.nativeId);
+      if (promptPending && mainContext && event.type === 'user' && event.isReplay) {
+        promptPending = false;
+        // The run's own turn starts here, as any turn does, not where Claude's turn for the old notices did.
+        if (ownTurnFirst) { ownTurnFirst = false; sawCompletion = false; shown = false; sawPartial = false; messageHasPartial = false; tasks.observeTurnStart(); }
+      }
+      if (promptPending && mainContext && event.type === 'system' && event.subtype === 'task_notification') ownTurnFirst = true;
       // Anything the main conversation says after a result is a follow-up turn, typically Claude taking a task's notice.
       if (mainContext && ['assistant', 'user', 'stream_event'].includes(event.type)) beginTurn();
       if (mainContext && event.type === 'user' && event.isReplay) {
@@ -465,6 +480,9 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
           if (block.type === 'tool_use') show(`[${block.name}]\n`);
         }
         messageHasPartial = false;
+      } else if (event.type === 'result' && mainContext && promptPending && ownTurnFirst) {
+        // The turn that took an earlier process's notices: the run's own turn comes next, with input still open.
+        note('\n[Tower] Claude first took notices its previous process left; this request comes next.\n');
       } else if (event.type === 'result' && mainContext) {
         const capacity = contextInput && mainContext ? modelContextWindow(event.modelUsage, contextInput.model) : undefined;
         if (current && contextInput && contextCapacity(capacity) && sawSessionId && !streamError) {
