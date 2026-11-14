@@ -1,6 +1,6 @@
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
-import { memo } from 'react';
-import { Check, Clock, LoaderCircle, RefreshCw, Send, ShieldQuestion, Square, Trash2, TriangleAlert } from 'lucide-react';
+import { memo, useState } from 'react';
+import { Check, ChevronDown, Clock, LoaderCircle, RefreshCw, Send, ShieldQuestion, Square, Trash2, TriangleAlert } from 'lucide-react';
 import type { Run } from '../../../shared/types';
 import { cleanPreview, scheduledLabel } from '../common/lib';
 import { RunApprovalCard } from './RunApprovalCard';
@@ -31,6 +31,47 @@ export const RunControl = memo(function RunControl({ run, onCancel, onRetry, can
     {approvals.map(approval => <RunApprovalCard key={approval.id} runId={run.id} approval={approval} token={token} disabled={disabled || cancelling || !onSnapshotRefresh} onSnapshotRefresh={onSnapshotRefresh || (() => {})} />)}
   </div>;
 });
+
+/** A message already inserted into the running turn: it has nothing left to act on, only to be read. */
+export function deliveredSteer(run: Run): boolean {
+  return run.steering?.state === 'delivered' && (run.status === 'running' || run.status === 'queued') && !run.approvals?.length;
+}
+
+/**
+ * The run controls in display order, with two or more delivered inserts folded into one entry (oldest first) where the
+ * first of them stood, so a turn that took many messages keeps the conversation readable.
+ */
+export function foldDeliveredSteers(runs: readonly Run[]): Array<Run | readonly Run[]> {
+  // Oldest first whatever order the list came in, so the line shows the newest message.
+  const delivered = runs.filter(deliveredSteer).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  if (delivered.length < 2) return [...runs];
+  const out: Array<Run | readonly Run[]> = [];
+  for (const run of runs) {
+    if (!deliveredSteer(run)) out.push(run);
+    else if (!out.includes(delivered)) out.push(delivered);
+  }
+  return out;
+}
+
+export const isRunGroup = (entry: Run | readonly Run[]): entry is readonly Run[] => Array.isArray(entry);
+
+/** Delivered inserts as one line with the newest message; opening it lists each one. */
+export function DeliveredSteers({ runs, initiallyOpen = false }: { runs: readonly Run[]; initiallyOpen?: boolean }) {
+  useI18n();
+  const [open, setOpen] = useState(initiallyOpen);
+  const text = (run: Run) => run.prompt || (run.attachments?.length ? run.attachments.map(file => file.name).join(', ') : t("보낸 요청"));
+  const newest = text(runs[runs.length - 1]!);
+  return <div className={`run-control delivered-steers${open ? ' open' : ''}`}>
+    <button type="button" className="run-control-line delivered-steers-line" aria-expanded={open} title={open ? t('접기') : t('전달된 메시지 모두 보기')} onClick={() => setOpen(!open)}>
+      <Check size={12} aria-hidden="true" />
+      <strong>{t('현재 작업에 전달됨')}</strong>
+      <span className="delivered-steers-count">{t('{0}개', { 0: runs.length })}</span>
+      {!open && <span className="run-control-preview" title={newest}>{cleanPreview(newest, 140)}</span>}
+      <ChevronDown className="delivered-steers-chevron" size={12} aria-hidden="true" />
+    </button>
+    {open && <ol className="delivered-steers-list">{runs.map(run => <li key={run.id} data-run-id={run.id} title={text(run)}>{cleanPreview(text(run), 300)}</li>)}</ol>}
+  </div>;
+}
 
 /** Why a queued message waits instead of going into the turn running now. */
 export function steerBlockedNote(reason: NonNullable<Run['steerBlocked']>): string {
