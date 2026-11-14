@@ -43,8 +43,8 @@ createInterface({ input: process.stdin }).on('line', line => {
     // launch prompt only after it (once \`promptWhen\` is released, when given).
     sendAll(script.before ?? []);
     const begin = () => {
-      // Claude replays the message it takes (--replay-user-messages), the launch prompt included.
-      sendAll([{ type: 'user', isReplay: true, uuid: message.uuid, parent_tool_use_id: null, message: message.message }, ...script.first, ...(script.noResult ? [] : [{ type: 'result', is_error: false, result: 'first done' }])]);
+      // Claude replays the message it takes (--replay-user-messages), the launch prompt included (\`noPromptReplay\`: not).
+      sendAll([...(script.noPromptReplay ? [] : [{ type: 'user', isReplay: true, uuid: message.uuid, parent_tool_use_id: null, message: message.message }]), ...script.first, ...(script.noResult ? [] : [{ type: 'result', is_error: false, result: 'first done' }])]);
       const fire = step => { sendAll(step.frames ?? []); if (step.exit) { if (step.stderr) process.stderr.write(step.stderr); process.exit(step.code ?? 0); } };
       const released = [];
       for (const step of script.later ?? []) if (step.when) released.push(step); else setTimeout(() => fire(step), step.at);
@@ -853,8 +853,11 @@ test('a resumed process taking its predecessor\'s notices first does not end the
   // Past the finish grace: before the fix, input closed here and nothing could be inserted any more.
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(owned.child.stdin.writableEnded, false, 'input stays open for the launch prompt\'s turn');
+  assert.match(find(manager, run.id).output, /Claude first took notices its previous process left/);
   const next = await manager.enqueue(SESSION, 'Also check the logs', {}, { origin: { kind: 'owner' } });
   await until(() => find(manager, next.id).canSteer === true);
+  await manager.cancel(next.id);
+  assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Start the worker'], 'Tower sent Claude nothing during its own turn');
   await release('prompt');
   // The run's own turn answers and waits for its worker, as any turn does.
   await until(() => find(manager, run.id).output.includes('Started the worker.') && find(manager, run.id).backgroundWait);
@@ -863,5 +866,17 @@ test('a resumed process taking its predecessor\'s notices first does not end the
   const done = await settled(manager, run.id);
   assert.equal(done.status, 'completed');
   assert.match(done.output, /The worker finished\./);
-  assert.deepEqual((await entries()).map(entry => entry.user ?? 'end').slice(0, 1), ['Start the worker']);
+});
+
+test('a run whose prompt Claude never replays still ends at its answer and after its work, as before', async t => {
+  // Without the prompt's replay the first result is the run's answer; a notice after it belongs to the run.
+  const { manager, release, cleanup } = await fixture({ noPromptReplay: true, first: [says('Started the worker.'), started('agent-1')],
+    later: [{ when: 'agent-done', frames: [notified('agent-1'), takes('agent-1'), says('The worker finished.'), result] }] }, { finishRecheckMs: 20 });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Start the worker', {}, { origin: { kind: 'owner' } });
+  await until(() => find(manager, run.id).backgroundWait);
+  await release('agent-done');
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /The worker finished\./);
 });

@@ -10,6 +10,7 @@ import { towerInstructionsBlock } from '../sessions/parser.js';
 import { attachmentPrompt, claudeImageBlocks } from '../stores/attachments.js';
 import { automaticApprovals, claudeStartMode } from './approval-policy.js';
 import { BackgroundTaskTracker, messageText, type FinishedTask } from './background-tasks.js';
+import { isTaskNotification } from '../../shared/task-notification.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 import { ClaudeControl } from './claude-control.js';
 import { ReplyLog } from './replies.js';
@@ -193,12 +194,13 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
     followUpTimer = waitTimer = undefined;
   };
   const endWait = () => { if (current?.backgroundWait) { delete current.backgroundWait; host.changed(current); } };
+  /** Each turn reports its own completion and its own reply. */
+  const resetTurn = () => { sawCompletion = false; shown = false; sawPartial = false; messageHasPartial = false; };
   const beginTurn = () => {
     if (turnActive) return;
     clearFinishTimer();
     turnActive = true; clearWaitTimers(); endWait(); tasks.observeTurnStart(); owned.claude?.setTurnIdle(false);
-    // Each turn reports its own completion and its own reply.
-    sawCompletion = false; shown = false; sawPartial = false; messageHasPartial = false;
+    resetTurn();
   };
   const spawnTurn = (): OwnedProcess => {
     try {
@@ -375,7 +377,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       clearFinishTimer(); clearWaitTimers();
       if (last.backgroundWait) { delete last.backgroundWait; host.changed(last); }
       current = last = next;
-      sawCompletion = false; shown = false; sawPartial = false; messageHasPartial = false; waitTimedOut = false; waitDeadline = undefined;
+      resetTurn(); waitTimedOut = false; waitDeadline = undefined;
       replies = masterReplies(next);
       return owned.claude.steer(turnMessage(next, session, attachments, next.id));
     };
@@ -427,10 +429,11 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         return;
       }
       const mainContext = event.parent_tool_use_id == null && (event.session_id === undefined || event.session_id === session.nativeId);
-      if (promptPending && mainContext && event.type === 'user' && event.isReplay) {
+      // A notice Claude replays is not the prompt, should a version replay the notices it takes.
+      if (promptPending && mainContext && event.type === 'user' && event.isReplay && !isTaskNotification(messageText(event))) {
         promptPending = false;
         // The run's own turn starts here, as any turn does, not where Claude's turn for the old notices did.
-        if (ownTurnFirst) { ownTurnFirst = false; sawCompletion = false; shown = false; sawPartial = false; messageHasPartial = false; tasks.observeTurnStart(); }
+        if (ownTurnFirst) { ownTurnFirst = false; resetTurn(); tasks.observeTurnStart(); }
       }
       if (promptPending && mainContext && event.type === 'system' && event.subtype === 'task_notification') ownTurnFirst = true;
       // Anything the main conversation says after a result is a follow-up turn, typically Claude taking a task's notice.
@@ -484,6 +487,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         // The turn that took an earlier process's notices: the run's own turn comes next, with input still open.
         note('\n[Tower] Claude first took notices its previous process left; this request comes next.\n');
       } else if (event.type === 'result' && mainContext) {
+        // The run's answer: its prompt was taken, whether or not Claude replayed it (a later notice is the run's own).
+        promptPending = false;
         const capacity = contextInput && mainContext ? modelContextWindow(event.modelUsage, contextInput.model) : undefined;
         if (current && contextInput && contextCapacity(capacity) && sawSessionId && !streamError) {
           current.contextUsage = { ...contextInput, contextWindow: capacity, usedPercent: contextInput.usedTokens / capacity * 100,
