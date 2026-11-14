@@ -894,3 +894,14 @@ test('Tower\'s own continuation after an earlier process\'s notices is the run\'
     assert.match(done.output, /Continued the work\./);
   }
 });
+
+test('after the notices\' own turn, an answer that comes only in the result is still shown', async t => {
+  // The own turn showed text; the run's turn answers with its result alone. Each turn's reply is its own.
+  const { manager, cleanup } = await fixture({ before: [notified('earlier-agent', 'stopped'), says('The earlier worker was stopped.'), { type: 'result', is_error: false, result: '' }],
+    first: [] }, { finishRecheckMs: 20 });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Report the state', {}, { origin: { kind: 'owner' } });
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /first done/);
+});
