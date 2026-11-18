@@ -22,7 +22,7 @@ export async function answerRpc(bridge: ToolBridge, frame: any): Promise<RpcRepl
   if (frame.id === undefined) return undefined;
   if (typeof frame.id !== 'string' && typeof frame.id !== 'number') return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid request ID' } };
   const answer = (result: unknown): RpcReply => ({ jsonrpc: '2.0', id: frame.id, result });
-  if (frame.method === 'initialize') return answer({ protocolVersion: ['2024-11-05', '2025-03-26', '2025-06-18'].includes(frame.params?.protocolVersion) ? frame.params.protocolVersion : '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: bridge.name, version: '1.0.0' } });
+  if (frame.method === 'initialize') return answer({ protocolVersion: ['2024-11-05', '2025-03-26', '2025-06-18'].includes(frame.params?.protocolVersion) ? frame.params.protocolVersion : '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: bridge.name, version: '1.0.0' } });
   if (frame.method === 'ping') return answer({});
   if (frame.method === 'tools/list') {
     try { return answer({ tools: await bridge.listTools() }); }

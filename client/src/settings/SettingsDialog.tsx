@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { ArchiveRestore, Bell, KeyRound, BrainCircuit, ChevronRight, Cpu, ListChecks, LoaderCircle, Network, ShieldCheck, SlidersHorizontal, Sparkles, UserRoundCog, X, Zap, type LucideIcon } from 'lucide-react';
+import { ArchiveRestore, Bell, KeyRound, BrainCircuit, ChevronRight, Cpu, ListChecks, LoaderCircle, Network, Plug, ShieldCheck, SlidersHorizontal, Sparkles, UserRoundCog, X, Zap, type LucideIcon } from 'lucide-react';
 import type { ProviderHealth } from '../../../shared/types';
 import type { TriggerOverview } from '../../../shared/triggers';
 import { useI18n } from '../i18n/i18n';
@@ -17,6 +17,7 @@ import { NotificationPanel } from '../notifications/NotificationPanel';
 import { AccountSection } from '../auth/AccountPanel';
 import { GeneralSettings } from './GeneralSettings';
 import { BackupPanel } from '../backup/BackupPanel';
+import { RemoteMcpPanel } from '../remote-mcp/RemoteMcpPanel';
 import { SecretsPanel } from '../secrets/SecretsPanel';
 import type { SecretCanvas } from '../secrets/secrets-client';
 import { ModelsPanel } from '../models/ModelsPanel';
@@ -45,17 +46,17 @@ export interface SettingsPlace { section: SettingsSection; cwd?: string; remoteT
 // Its drag-and-drop library stays with the Todo page's chunk, out of every page's first load.
 const TodoSettings = lazy(() => import('./TodoSettings').then(module => ({ default: module.TodoSettings })));
 
-const ICONS: Record<SettingsSection, LucideIcon> = { general: SlidersHorizontal, todos: ListChecks, models: Cpu, triggers: Zap, skills: Sparkles, permissions: ShieldCheck, decisions: BrainCircuit, remote: Network, notifications: Bell, backup: ArchiveRestore, secrets: KeyRound, account: UserRoundCog };
+const ICONS: Record<SettingsSection, LucideIcon> = { general: SlidersHorizontal, todos: ListChecks, models: Cpu, triggers: Zap, skills: Sparkles, permissions: ShieldCheck, decisions: BrainCircuit, remote: Network, mcp: Plug, notifications: Bell, backup: ArchiveRestore, secrets: KeyRound, account: UserRoundCog };
 const GROUPS: { caption?: string; sections: SettingsSection[] }[] = [
   { sections: ['general', 'todos', 'models'] },
   { caption: '자동화', sections: ['triggers', 'skills', 'permissions', 'decisions'] },
-  { caption: '연결', sections: ['remote', 'notifications'] },
+  { caption: '연결', sections: ['remote', 'mcp', 'notifications'] },
   { caption: '데이터', sections: ['secrets', 'backup'] },
   { sections: ['account'] },
 ];
 
 export function sectionLabel(section: SettingsSection, t: (key: string) => string): string {
-  const labels: Record<SettingsSection, string> = { general: '일반', todos: '할 일', models: '모델', triggers: '트리거', skills: '스킬', permissions: '권한', decisions: '빠른 판단', remote: '원격 컴퓨터', notifications: '알림', backup: '백업', secrets: '시크릿', account: '계정' };
+  const labels: Record<SettingsSection, string> = { general: '일반', todos: '할 일', models: '모델', triggers: '트리거', skills: '스킬', permissions: '권한', decisions: '빠른 판단', remote: '원격 컴퓨터', mcp: '외부 MCP', notifications: '알림', backup: '백업', secrets: '시크릿', account: '계정' };
   return t(labels[section]);
 }
 
@@ -124,6 +125,7 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
         pending={attention.permissions} waitingOn={attention.permissionsOn} onClearFolder={clearFolder} onChanged={onChanged} onOpenSession={openSession} />;
       case 'decisions': return <DecisionPanel token={context.token} />;
       case 'remote': return <RemotePanel token={context.token} projects={context.projects} controlledBy={context.controlledBy} initialTab={place.remoteTab} />;
+      case 'mcp': return <RemoteMcpPanel token={context.token} />;
       case 'notifications': return <NotificationPanel token={context.token} />;
       case 'secrets': return <SecretsPanel token={context.token} computers={context.computers} canvas={context.secretCanvas} focus={place.section === 'secrets' ? place.secretId : undefined} />;
       case 'backup': return <BackupPanel token={context.token} />;

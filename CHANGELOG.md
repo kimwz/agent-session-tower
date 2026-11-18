@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.187.0] - 2026-11-18
+
+- **다른 컴퓨터의 Claude Code·Codex에서 공개 주소(`https://<공개 주소>/mcp`)로 Tower를 MCP로 쓸 수 있습니다.** 지금까지 `/mcp`는 이 컴퓨터의 localhost에서만 답해, 밖에서는 SSH 터널을 열어야 했습니다. 이제 **설정 › 외부 MCP**에서 만든 키를 `X-Tower-Mcp-Key` 헤더로 보내는 클라이언트는 Tower의 HTTPS 공개 주소에서 같은 다섯 도구(`tower_api`, `tower_query`, `session_read`, `terminal_read`, `tower_guide`)를 씁니다.
+  - **인증은 두 겹입니다.** Cloudflare Access 로그인을 통과해야 Tower까지 오고(Access 앱에서 Managed OAuth를 켜면 MCP 클라이언트가 처음 한 번 Access 로그인 창을 엽니다), Tower에서는 키를 확인합니다. 키는 한 번만 보이고, 해시로만 저장되며, 같은 화면에서 폐기하면 즉시 막힙니다. 원격 화면에서 키를 만들 때는 Tower 비밀번호를 다시 묻습니다.
+  - **권한은 다른 곳에서 로그인한 소유자 화면과 같습니다.** 다만 백업·복원, 저장소 복구, 세션 압축·보관, 시크릿 보관함, Tower 비밀번호·계정 관리, Claude 계정, Tower·작업자 업데이트, 키 관리는 쓸 수 없습니다. **읽기 전용** 키는 조회만 하고, **읽기·쓰기** 키는 세션 시작, 메시지, 트리거, 터미널 입력도 합니다.
+  - 키가 없거나 틀리면 403으로 거절합니다. 401로 답하면 클라이언트가 로그인을 다시 시작하기 때문입니다. HTTPS가 아닌 주소와 브라우저에서 온 요청은 받지 않습니다. 이 컴퓨터의 `/mcp`는 지금처럼 키 없이 동작합니다.
+- MCP 클라이언트가 Tower가 모르는 프로토콜 버전을 요청하면, 가장 오래된 `2024-11-05` 대신 Tower가 아는 가장 최신 버전 `2025-06-18`로 답합니다.
+
 ## [1.186.0] - 2026-11-14
 
 - **진행 중인 작업에 끼워넣은 메시지가 한 줄로 접힙니다.** 작업 중에 메시지를 여러 번 보내면 입력창 위에 "현재 작업에 전달됨" 줄이 메시지마다 하나씩 쌓여, 좁은 화면에서는 대화가 거의 보이지 않았습니다. 이제 이미 전달된 메시지가 두 개 이상이면 "현재 작업에 전달됨 · N개 · 가장 최근 메시지" 한 줄로 보이고, 누르면 보낸 메시지를 순서대로 모두 펼쳐 볼 수 있습니다. 끼워넣는 중이거나 승인을 기다리는 메시지, 중지 버튼이 있는 작업 줄은 지금처럼 따로 보입니다.

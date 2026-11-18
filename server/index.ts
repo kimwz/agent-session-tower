@@ -40,6 +40,8 @@ import { masterRoutes } from './master/routes.js';
 import { VoiceTurnEnd } from './master/voice-turn-end.js';
 import type { WebCredentials } from './tower-tools/tower-client.js';
 import { ownerMcpOverHttp, startOwnerMcp } from './owner-mcp/tools.js';
+import { RemoteMcpKeys } from './remote-mcp/keys.js';
+import { remoteMcpOverHttp } from './remote-mcp/tools.js';
 import { startSlackMcp, startTowerMcp } from './slack/mcp-bridge.js';
 import { getProviderHealth } from './providers/discovery.js';
 import { createMonitorServer } from './http/server.js';
@@ -775,6 +777,8 @@ async function main() {
   // The master agent runs in its own process; this web only starts it, tells it how to reach this API, and relays.
   let webCredentials: WebCredentials | undefined;
   const localMcp = ownerMcpOverHttp(stateDir, () => webCredentials?.port);
+  const remoteMcpTools = remoteMcpOverHttp(stateDir, () => webCredentials?.port);
+  const remoteMcp = { keys: await RemoteMcpKeys.open(stateDir), answer: remoteMcpTools.answer };
   const masterCallerSecret = randomBytes(32).toString('hex');
   // A todo's issue master open (or still being handed to retention) brings the host back after a restart, as the main
   // master's binding does.
@@ -828,7 +832,7 @@ async function main() {
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })), managed: managedSync,
       // The trust is made first when it is still pending (right after joining), so the folder can be shared at once.
       afterClone: async id => { await followingSecrets?.align(id); await followingSecrets?.shareFolders(id, managedSync?.folders(id) ?? []); } } : { error: linkError },
-    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp, todoTools, claudeAccounts: claudeAccountRoutes,
+    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp, remoteMcp, todoTools, claudeAccounts: claudeAccountRoutes,
     decisions: {
       overview: () => decisions.overview(),
       // Turning the key or the canvas outcomes on or off shows or hides them at once.
@@ -945,6 +949,7 @@ async function main() {
     // The master host keeps running; this web only lets go of it.
     master.dispose();
     localMcp.close();
+    remoteMcpTools.close();
     attachmentUploads.close();
     dispose();
     server.closeAllConnections();

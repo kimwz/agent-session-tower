@@ -66,3 +66,15 @@
 .backup-scope .primary-button:hover:not(:disabled) { background:#305e92; border-color:#729cd0; }
 .backup-scope .primary-button:focus-visible { outline:2px solid #91baff; outline-offset:3px; }
 .backup-scope .primary-button:disabled { opacity:.5; cursor:not-allowed; }
+.remote-mcp-scope .secondary-button { display:inline-flex; align-items:center; gap:6px; }
+.remote-mcp-scope section { margin-bottom:18px; }
+.remote-mcp-copy { display:flex; align-items:flex-start; gap:8px; margin-bottom:10px; }
+.remote-mcp-copy code, .remote-mcp-copy pre { flex:1; min-width:0; margin:0; padding:8px 10px; border:1px solid var(--line); border-radius:6px; font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; user-select:all; }
+.remote-mcp-created { padding:12px; border:1px solid #3e6d55; border-radius:8px; }
+.remote-mcp-form { display:flex; flex-direction:column; gap:12px; align-items:flex-start; }
+.remote-mcp-form > label { display:flex; flex-direction:column; gap:5px; width:100%; max-width:360px; font-size:13px; }
+.remote-mcp-form fieldset { display:flex; flex-direction:column; gap:10px; margin:0; padding:12px 14px; border:1px solid var(--line); border-radius:8px; width:100%; box-sizing:border-box; }
+.remote-mcp-form fieldset legend { padding:0 6px; color:#a8b8ce; font-size:12px; }
+.remote-mcp-form fieldset label { display:grid; grid-template-columns:auto 1fr; column-gap:9px; align-items:center; font-size:13px; cursor:pointer; }
+.remote-mcp-form fieldset small { grid-column:2; color:#91a1b7; font-size:12px; line-height:1.5; }
+.notification-devices strong svg { vertical-align:-2px; }

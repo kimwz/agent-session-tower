@@ -29,6 +29,7 @@ const NOT_FOR_AGENTS = new Map<string, string>([
   ['/api/nodes/{}/{}', 'the joined-computer prefix; every route takes it through node'],
   ...['settings','session','sharing','session-connect','session-disconnect','session-reallow','initialize','unlock','lock','password','create','remove','trust','untrust','preview','import','view-unlock','value','value-update','view-lock'].map(action => [`/api/secrets/${action}`, 'dedicated owner Vault input; agents use run-scoped reference-only secret MCP tools'] as [string, string]),
   ['/api/auth/credentials', 'the login password also opens the secret vault; only the owner\'s own page changes it'],
+  ...['/api/remote-mcp', '/api/remote-mcp/create', '/api/remote-mcp/revoke'].map(route => [route, 'keys of the owner\'s outside MCP clients; only the owner\'s own page makes or revokes them'] as [string, string]),
 ]);
 
 /** `(a|b)` alternatives expanded, and parameters (`{id}` or a capturing pattern) written `{}`. */
