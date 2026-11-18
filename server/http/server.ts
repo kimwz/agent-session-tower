@@ -52,6 +52,8 @@ import { MAX_BACKUP_FILE_BYTES } from '../../shared/backup.js';
 import type { AutoPromptSuggestionRequest, AutoPromptSuggestionResponse, DecisionOverview } from '../../shared/decisions.js';
 import { TowerError, statusOf } from '../../shared/errors.js';
 import { sendStoredAttachment, sendWorkspaceMedia, sseSink } from './sinks.js';
+import { REMOTE_MCP_KEY_HEADER, type RemoteMcpKeyView, type RemoteMcpOverview } from '../../shared/remote-mcp.js';
+import type { RemoteMcpKeys } from '../remote-mcp/keys.js';
 
 export interface Backend {
   storageStatus?(): WorkerStorageStatus | undefined;
@@ -169,6 +171,11 @@ export interface HttpOptions {
   };
   /** Tower's tools for the owner's own agents on this computer, as MCP over HTTP at `/mcp` (see owner-mcp). */
   localMcp?: { answer(body: unknown): Promise<unknown> };
+  /**
+   * The owner's outside MCP clients at `/mcp` on the public HTTPS address, each with a Tower key (see remote-mcp). Their
+   * tools call back over loopback as a remote agent (`X-Tower-Agent: remote`).
+   */
+  remoteMcp?: { keys: RemoteMcpKeys; answer(body: unknown, key: RemoteMcpKeyView): Promise<unknown> };
   /** The Todo tools of the agents' turns (todo/agent-mcp.ts): opened by their own key, at this computer only. */
   todoTools?: { key: string; answer(body: Record<string, unknown>): unknown };
   /**
@@ -196,13 +203,15 @@ const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png',
   '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.json': 'application/json', '.webmanifest': 'application/manifest+json',
 };
+/** Who a remote agent's calls are from, in place of an address: they come over loopback but are not this computer's. */
+const REMOTE_AGENT_IP = 'remote-agent';
 /** What a browser fetches to install the page as an app and to show its notifications, before or without signing in. */
 const APP_SHELL = new Set(['/favicon.svg', '/manifest.webmanifest', '/sw.js', '/icon-192.png', '/icon-512.png', '/icon-1024.png', '/apple-touch-icon.png']);
 function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'filePath'> {
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, storageRefusal, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp, todoTools, claudeAccounts }: HttpOptions) {
+export function createMonitorServer({ attachmentStores, attachmentUploads, port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, storageRefusal, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp, remoteMcp, todoTools, claudeAccounts }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   // The Tower password's part in the vault: value viewing of each sign-in, and unlock, lock and credential changes in one turn.
@@ -230,6 +239,30 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
     res.statusCode = status;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     sendBody(res, JSON.stringify(body));
+  };
+  /**
+   * `/mcp` for a caller not at this computer: the owner's outside MCP client, through an HTTPS public address (where
+   * Cloudflare Access already let only the owner in), with a Tower key. Refusals are 403, never 401, so a client signed
+   * in to Access is not sent to sign in again.
+   */
+  const answerRemoteMcp = async (req: IncomingMessage, res: ServerResponse, secureOrigin: boolean) => {
+    const refuse = (message: string) => json(res, 403, { jsonrpc: '2.0', id: null, error: { code: -32001, message } });
+    if (req.headers.origin || req.headers['sec-fetch-site']) return refuse('MCP는 브라우저에서 부를 수 없습니다.');
+    if (!remoteMcp) return refuse('이 Tower는 원격 MCP를 제공하지 않습니다.');
+    if (!secureOrigin) return refuse('원격 MCP는 Tower의 HTTPS 공개 주소로만 쓸 수 있습니다.');
+    const key = remoteMcp.keys.verify(req.headers[REMOTE_MCP_KEY_HEADER.toLowerCase()]);
+    if (!key) return refuse(`Tower 원격 MCP 키가 없거나 올바르지 않습니다. 설정 › 외부 MCP에서 만든 키를 ${REMOTE_MCP_KEY_HEADER} 헤더로 보내세요.`);
+    if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
+    if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON 요청이 필요합니다.' });
+    let body: Record<string, unknown>;
+    try { body = await readJson(req, 1_000_000); }
+    catch (error) {
+      if (statusOf(error) !== 400) throw error;
+      return json(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Invalid JSON (one message per request)' } });
+    }
+    const reply = await remoteMcp.answer(body, key);
+    if (reply === undefined) { res.writeHead(202).end(); return; }
+    return json(res, 200, reply);
   };
   const staticCompression = new StaticCompression();
   const snapshot = () => publicSnapshot(backend.snapshot());
@@ -311,6 +344,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
     const origin = req.headers.origin;
     if (origin && !origins.has(origin)) return json(res, 403, { error: '허용되지 않은 출처입니다.' });
     if (linkReopen) return sendLinkReopen(res, req.url!, req.method === 'HEAD');
+    // Reached on one of the HTTPS public addresses this Tower was given (such as through Cloudflare Access).
+    const secureOrigin = origins.has(`https://${req.headers.host}`) && !origins.has(`http://${req.headers.host}`);
     try {
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
       const path = decodeURIComponent(url.pathname);
@@ -325,9 +360,15 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
           remoteAccess: Boolean(remote), service: Boolean(service), ...(worker ? { storage: worker } : {}),
         });
       }
-      const identity = await ownerIdentity(req);
-      const sessionId = sessionCookie(req);
-      const authenticated = identity.local || Boolean(auth?.session(sessionId, identity.ip));
+      const connection = await ownerIdentity(req);
+      // The tools of the owner's outside MCP client call this web over loopback and say so. They are served as a page
+      // signed in from elsewhere, so whatever only this computer may do stays closed to them; claimed from elsewhere,
+      // or by anything else here, it only ever takes rights away.
+      const remoteAgent = connection.local && req.headers['x-tower-agent'] === 'remote';
+      const identity = remoteAgent ? { ip: REMOTE_AGENT_IP, local: false } : connection;
+      const sessionId = remoteAgent ? '' : sessionCookie(req);
+      const authenticated = identity.local || remoteAgent || Boolean(auth?.session(sessionId, identity.ip));
+      if (path === '/mcp' && !connection.local) return await answerRemoteMcp(req, res, secureOrigin);
       const authStatus = (signedIn = authenticated): AuthStatus => ({
         local: identity.local, authenticated: signedIn, configured: Boolean(auth?.configured()), token,
         ...(signedIn && auth?.username() ? { username: auth.username() } : {}),
@@ -383,6 +424,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       const masterCall = Boolean(master && typeof caller === 'string' && caller.length === master.callerSecret.length && timingSafeEqual(Buffer.from(caller), Buffer.from(master.callerSecret)));
       // An agent of the owner's on this computer (`agent-session-tower mcp`) says so, and its changes count apart too.
       const localAgent = !masterCall && identity.local && req.headers['x-tower-agent'] === 'local';
+      // What only the owner does in person (backups, storage recovery, compaction, retention) is refused to every agent.
+      const agentAsking = masterCall || localAgent || remoteAgent || Boolean(req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()]);
       // A job this request made, not one an earlier request with the same id made (that one keeps whom it was for).
       const madeNow = (createdAt: unknown, asked: number) => typeof createdAt === 'string' && Date.parse(createdAt) >= asked;
       // An issue master calls as the master does, naming its todo; only the verified master is believed.
@@ -421,15 +464,15 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
           const voice = master && !masterCall ? VOICE_REPORT.exec(path)?.[1] : undefined;
           const address = req.socket.remoteAddress || 'local';
           // Dragging and ticking off todos sends many small changes; they have a budget of their own.
-          const todo = path === TODO_OPS_PATH && !masterCall && !localAgent;
-          const key = masterCall ? '\0master' : localAgent ? '\0local-agent' : todo ? `\0todo ${address}` : voice === 'off' ? `\0voice-off ${address}` : voice ? `\0voice ${address}` : address;
+          const todo = path === TODO_OPS_PATH && !masterCall && !localAgent && !remoteAgent;
+          const key = masterCall ? '\0master' : localAgent ? '\0local-agent' : remoteAgent ? '\0remote-agent' : todo ? `\0todo ${address}` : voice === 'off' ? `\0voice-off ${address}` : voice ? `\0voice ${address}` : address;
           const now = Date.now();
           const rate = rates.get(key);
           if (!rate || now - rate.at > 60_000) rates.set(key, { count: 1, at: now });
-          else if (++rate.count > (masterCall || localAgent ? 120 : voice === 'off' ? 60 : voice || todo ? 240 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+          else if (++rate.count > (masterCall || localAgent || remoteAgent ? 120 : voice === 'off' ? 60 : voice || todo ? 240 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
           // A joined computer allows this computer 60 changes a minute, shared with the owner's pages: the master and
           // the owner's local agents together keep to half of it, so the pages always have room there.
-          const node = masterCall || localAgent ? /^\/api\/nodes\/([a-f0-9]{32})\//.exec(path)?.[1] : undefined;
+          const node = masterCall || localAgent || remoteAgent ? /^\/api\/nodes\/([a-f0-9]{32})\//.exec(path)?.[1] : undefined;
           if (node) {
             // Counted over the last minute, not a fixed one, so no minute of the joined computer's sees more than 30.
             const recent = (agentWrites.get(node) ?? []).filter(at => now - at < 60_000);
@@ -456,7 +499,10 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         if (!identity.local) trackStream(sessionId, res, () => res.destroy());
         if (await master.handle(req, res, path, url, identity)) return;
       }
-      const secureOrigin = origins.has(`https://${req.headers.host}`) && !origins.has(`http://${req.headers.host}`);
+      // The owner's own operations (secrets, permission rules and decisions, model settings…) stay with the owner's pages,
+      // here and on joined computers, which take this computer's requests as the owner's.
+      const ownOperation = /^\/api\/(?:nodes\/[a-f0-9]{32}\/)?v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/.exec(path)?.[1];
+      if (remoteAgent && ownOperation && isOperationName(ownOperation) && 'ownerOnly' in OPERATIONS[ownOperation] && OPERATIONS[ownOperation].ownerOnly) return json(res, 403, { error: 'Only the owner can do this in Tower.' });
       const operation = path.match(/^\/api\/v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/);
       if (operation && req.method === 'POST') {
         if (!isOperationName(operation[1])) return json(res, 404, { error: 'Unknown Tower operation.' });
@@ -470,6 +516,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         return json(res, 200, { result });
       }
       if (path === '/api/runner/force-update' && req.method === 'POST') {
+        // It may stop running turns: the owner's own act, never one of an outside MCP client.
+        if (remoteAgent) return json(res, 403, { error: '작업자 업데이트는 소유자만 요청할 수 있습니다.' });
         if (!forceRunnerUpdate) return json(res, 503, { error: 'Updates are unavailable.' });
         const answer = await forceRunnerUpdate();
         return json(res, answer.status, answer.body);
@@ -540,8 +588,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       }
       if (path === '/api/backup' || path.startsWith('/api/backup/')) {
         if (!backup) return json(res, 503, { error: '백업을 사용할 수 없습니다.' });
-        // The master agent never makes or applies a backup: it holds every secret Tower keeps.
-        if (masterCall) return json(res, 403, { error: '백업은 소유자만 할 수 있습니다.' });
+        // The master agent and outside MCP clients never make or apply a backup: it holds every secret Tower keeps.
+        if (masterCall || remoteAgent) return json(res, 403, { error: '백업은 소유자만 할 수 있습니다.' });
         if (path === '/api/backup' && req.method === 'GET') return json(res, 200, await backup.overview());
         if (req.method === 'POST') {
           const sendFile = (file: { name: string; text: string; notice?: string }) => {
@@ -652,7 +700,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         await auth!.unblock(body.ip);
         return json(res, 200, auth!.overview());
       }
-      if (path.startsWith('/api/storage/') && req.method === 'POST' && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '저장소 복구는 소유자만 할 수 있습니다.' });
+      if (path.startsWith('/api/storage/') && req.method === 'POST' && agentAsking) return json(res, 403, { error: '저장소 복구는 소유자만 할 수 있습니다.' });
       if (path === '/api/storage/status' && req.method === 'GET') return json(res, 200, backend.storageStatus?.() ?? { state: 'unavailable', code: 'worker-contract-missing' });
       const storageRecovery = /^\/api\/storage\/(snapshot|adopt|reconcile|runs-receipt)$/.exec(path);
       if (storageRecovery && req.method === 'POST') {
@@ -660,7 +708,7 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         return json(res, 200, await backend.storageRecovery(storageRecovery[1], await readJson(req)));
       }
       if (path === '/api/storage/retry' && req.method === 'POST') {
-        if (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()]) return json(res, 403, { error: '저장소 복구는 소유자만 할 수 있습니다.' });
+        if (agentAsking) return json(res, 403, { error: '저장소 복구는 소유자만 할 수 있습니다.' });
         if (!backend.storageRetry) throw new TowerError('unavailable', 'Storage recovery is unavailable.');
         return json(res, 200, await backend.storageRetry());
       }
@@ -673,8 +721,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
       // The owner's compact button, here or for a joined computer's conversation: an agent's turn or the master never
       // starts or stops one (checked before a joined computer's request is passed on, which would carry no caller).
       if (req.method === 'POST' && /^\/api\/(nodes\/[a-f0-9]{32}\/)?sessions\/[^/]+\/compaction(\/cancel)?$/.test(path)
-        && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '세션 압축은 소유자만 할 수 있습니다.' });
-      if ((path === '/api/retention' || path.startsWith('/api/retention/')) && (masterCall || localAgent || req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()])) return json(res, 403, { error: '세션 보관 관리는 소유자만 할 수 있습니다.' });
+        && agentAsking) return json(res, 403, { error: '세션 압축은 소유자만 할 수 있습니다.' });
+      if ((path === '/api/retention' || path.startsWith('/api/retention/')) && agentAsking) return json(res, 403, { error: '세션 보관 관리는 소유자만 할 수 있습니다.' });
       if (req.method === 'GET' && path === '/api/retention') {
         if (!backend.retention) return json(res, 503, { error: '세션 보관 정책을 사용할 수 없습니다.' });
         return json(res, 200, await backend.retention('overview'));
@@ -754,7 +802,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         const cursor = req.headers['last-event-id'];
         if (Array.isArray(cursor)) return json(res, 400, { error: '터미널 출력 위치가 올바르지 않습니다.' });
         await workspaceTerminals.attach(terminalMatch[1], sseSink(res), cursor);
-        if (!identity.local) {
+        // A remote agent has no sign-in to follow; its read ends on its own tool's short timeout.
+        if (!identity.local && !remoteAgent) {
           if (!auth?.session(sessionId, identity.ip)) res.end();
           else trackStream(sessionId, res, () => { res.end(); });
         }
@@ -807,6 +856,38 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         ? notAgent && (identity.local || Boolean(auth?.session(sessionId, identity.ip)))
         : ownerPage && (identity.local || secureOrigin || ('encrypted' in req.socket && Boolean(req.socket.encrypted)));
       if (await claudeAccountRoute(req, res, path, claudeAccounts, json, accountsAllowed)) return;
+      if (path === '/api/remote-mcp' || path.startsWith('/api/remote-mcp/')) {
+        // Keys are made and revoked only on the owner's own page, as the vault's settings are: never by an agent, the
+        // master or an outside MCP client, and only over this computer or an HTTPS address.
+        const allowed = req.method === 'GET' ? notAgent && (identity.local || Boolean(auth?.session(sessionId, identity.ip)))
+          : ownerPage && (identity.local || secureOrigin || ('encrypted' in req.socket && Boolean(req.socket.encrypted)));
+        if (!allowed) return json(res, 403, { error: '원격 MCP 키는 소유자의 화면에서만 관리할 수 있습니다.' });
+        if (!remoteMcp) return json(res, 503, { error: '원격 MCP를 사용할 수 없습니다.' });
+        const overview = (): RemoteMcpOverview => ({ ...remoteMcp.keys.list(), passwordRequired: !identity.local,
+          endpoints: [...(remote?.origins ?? [])].filter(origin => origin.startsWith('https://')).map(origin => `${new URL(origin).origin}/mcp`) });
+        if (req.method === 'GET' && path === '/api/remote-mcp') return json(res, 200, overview());
+        if (req.method === 'POST' && path === '/api/remote-mcp/create') {
+          const body = await readJson(req, 4096);
+          if (Object.keys(body).some(key => !['name', 'scope', 'password'].includes(key))) return json(res, 400, { error: '키 요청 형식이 올바르지 않습니다.' });
+          // A key outlives the sign-in that made it, so a page from elsewhere proves the Tower password again.
+          if (!identity.local) {
+            if (!auth) return json(res, 503, { error: '계정 관리를 사용할 수 없습니다.' });
+            if (typeof body.password !== 'string' || !body.password) return json(res, 400, { error: 'Tower 비밀번호를 입력하세요.' });
+            const checked = await auth.verifyPassword(identity.ip, body.password);
+            if (checked.status === 'blocked') return json(res, 403, { error: '이 IP는 로그인 5회 실패로 차단되었습니다. 로컬 계정 관리에서 해제하세요.' });
+            if (checked.status !== 'success') return json(res, 403, { error: 'Tower 비밀번호가 올바르지 않습니다.' });
+          }
+          const made = await remoteMcp.keys.create({ name: body.name, scope: body.scope });
+          return json(res, 200, { ...overview(), ...made });
+        }
+        if (req.method === 'POST' && path === '/api/remote-mcp/revoke') {
+          const body = await readJson(req, 1024);
+          if (Object.keys(body).some(key => key !== 'id')) return json(res, 400, { error: '폐기할 키를 지정하세요.' });
+          await remoteMcp.keys.revoke(body.id);
+          return json(res, 200, overview());
+        }
+        return json(res, 404, { error: '찾을 수 없습니다.' });
+      }
       if (req.method === 'POST' && path === '/api/groups') {
         const patch = normalizeProjectGroupPatch(await readJson(req));
         if (!backend.setGroup) return json(res, 503, { error: '폴더 그룹을 저장할 수 없습니다.' });
@@ -824,6 +905,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         }
         return json(res, 200, { folders: exclusions.list(), revision: exclusions.revision, ...(exclusions.error ? { error: exclusions.error } : {}) });
       }
+      // Joining, trusting, removing and updating computers is the owner's own act, never an outside MCP client's.
+      if (remoteAgent && req.method === 'POST' && (path === '/api/link' || path.startsWith('/api/link/'))) return json(res, 403, { error: '컴퓨터 연결 관리는 소유자만 할 수 있습니다.' });
       if (links && await handleLinkRoute(req, res, path, links, json)) return;
       const nodeRoute = url.pathname.match(/^\/api\/nodes\/([a-f0-9]{32})\/(.+)$/);
       if (nodes && nodeRoute) {

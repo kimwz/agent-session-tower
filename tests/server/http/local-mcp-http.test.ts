@@ -54,7 +54,9 @@ test('an agent reaching this computer\'s localhost (an SSH tunnel too) uses Towe
 test('/mcp is for this computer only, and never for a browser page', async t => {
   const { base, cookie, remoteFetch, rpc } = await serve(t);
   const list = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
-  assert.equal((await rpc(list, {}, remoteFetch)).status, 401, 'from elsewhere without signing in');
+  // From elsewhere /mcp is the outside clients' address, which needs its own key (remote-mcp-http.test.ts) and answers
+  // 403, never a sign-in prompt an OAuth client would follow.
+  assert.equal((await rpc(list, {}, remoteFetch)).status, 403, 'from elsewhere without signing in');
   assert.equal((await rpc(list, { cookie }, remoteFetch)).status, 403, 'and signed in from elsewhere: the tools would act with localhost\'s rights');
   assert.equal((await rpc(list, { Origin: 'https://evil.example' })).status, 403, 'a page of another site');
   assert.equal((await rpc(list, { Origin: base, 'Sec-Fetch-Site': 'same-origin' })).status, 403, 'nor Tower\'s own page: only agents call it');

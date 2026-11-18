@@ -23,7 +23,8 @@ const PNG = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0
 
 async function fixture(t: TestContext) {
   const dir = await mkdtemp(join(tmpdir(), 'tower-todo-files-'));
-  let clock = new Date('2026-10-17T09:00:00.000Z');
+  // Starts at the real time: uploads' files carry real modification times, which the cleanup compares with this clock.
+  let clock = new Date();
   const open = async () => {
     const store = new TodoStore(dir, { now: () => clock });
     store.start();

@@ -169,6 +169,27 @@ claude mcp add --transport http tower-local http://localhost:8000/mcp
 
 The command finds the Tower running for the state directory (`--state-dir` to pick another) and signs in like your localhost page; nothing is stored. Its tools are `tower_api` (every route the pages use), `tower_query` (one read-only SQL query over Tower's state; needs Node.js 24.10 or later, otherwise use `tower_api`), `session_read`, `terminal_read`, and `tower_guide`, which lists every route, every `/api/v1` operation's input, and how to send whole files (backups, skill bundles) with curl. Its changes have a budget of their own, so a busy agent never slows your pages. It works only for the user Tower runs as, on this computer.
 
+### From outside, through the public HTTPS address
+
+The owner's MCP clients on other computers (Claude Code, Codex) can use Tower at `https://<public address>/mcp` (for example `https://ast.kimwz.kr/mcp`) with two credentials:
+
+- **Cloudflare Access sign-in.** In the Access application, turn on **Managed OAuth** (Advanced settings), with **Allow localhost clients** and **Allow loopback clients** on. Access then answers MCP clients with an OAuth sign-in instead of a browser redirect. The client opens the usual Access sign-in once: `/mcp` in Claude Code, or `codex mcp login`.
+- **A Tower key.** Make one in **Settings → 외부 MCP**. It is shown once, with the commands to add it. The client sends it in the `X-Tower-Mcp-Key` header. From a page not on this computer, making a key asks for the Tower password again.
+
+```sh
+claude mcp add --transport http --scope user tower-remote https://ast.kimwz.kr/mcp --header "X-Tower-Mcp-Key: <key>"
+```
+
+```toml
+[mcp_servers.tower-remote]
+url = "https://ast.kimwz.kr/mcp"
+env_http_headers = { "X-Tower-Mcp-Key" = "TOWER_MCP_KEY" }
+```
+
+The tools are the same five as above. They act with the rights of your page signed in from elsewhere, less what only you do in person: backups and restores, storage recovery, session compaction and retention, the secret vault, the Tower password and account management, Claude accounts, Tower and worker updates, and the keys themselves. A **read** key only reads; a **write** key also starts work, sends messages, changes triggers and types into terminals. Whole files cannot travel through these tools.
+
+`/mcp` from elsewhere answers only over a configured HTTPS public address, never to a browser. A missing, wrong or revoked key gets `403`, never a sign-in prompt. Revoking a key in the same settings section stops it at once. Keys are kept only as hashes in `remote-mcp-keys.json` in the state directory. They are not part of backups.
+
 ## Account usage
 
 The machine node shows separate usage indicators for the Claude Code and Codex accounts connected on that machine. Percentages represent **used capacity**, not remaining capacity. These are account-wide limits, so activity on other devices can count toward them.
