@@ -11,7 +11,8 @@ export function remoteCallAllowed(scope: RemoteMcpKeyView['scope'], name: string
   try {
     const target = apiTarget(String(args.method), String(args.path), typeof args.node === 'string' && args.node ? args.node : undefined, AGENT_REFUSED);
     return target.write ? `읽기 권한 키로는 바꿀 수 없습니다: ${target.method} ${target.local}` : undefined;
-  } catch { return undefined; /* The tools refuse a path they cannot read, with their own reason. */ }
+  // best-effort: the tools refuse a path they cannot read, with their own reason.
+  } catch { return undefined; }
 }
 
 /**

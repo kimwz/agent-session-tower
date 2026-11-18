@@ -901,6 +901,8 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         }
         return json(res, 200, { folders: exclusions.list(), revision: exclusions.revision, ...(exclusions.error ? { error: exclusions.error } : {}) });
       }
+      // Joining, trusting, removing and updating computers is the owner's own act, never an outside MCP client's.
+      if (remoteAgent && req.method === 'POST' && (path === '/api/link' || path.startsWith('/api/link/'))) return json(res, 403, { error: '컴퓨터 연결 관리는 소유자만 할 수 있습니다.' });
       if (links && await handleLinkRoute(req, res, path, links, json)) return;
       const nodeRoute = url.pathname.match(/^\/api\/nodes\/([a-f0-9]{32})\/(.+)$/);
       if (nodes && nodeRoute) {

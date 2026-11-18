@@ -45,7 +45,9 @@ export class RemoteMcpKeys {
     }
     const parsed = File.safeParse(raw);
     if (parsed.success) { store.replace(parsed.data.keys); return store; }
-    const aside = await quarantineFile(store.path).catch(() => undefined);
+    let aside: string | undefined;
+    try { aside = await quarantineFile(store.path); }
+    catch (error) { log(`[remote-mcp] 읽지 못한 키 파일을 옮기지 못했습니다: ${error instanceof Error ? error.message : String(error)}`); }
     store.error = aside ? `저장된 원격 MCP 키를 읽지 못해 ${aside}로 옮겼습니다. 키를 새로 만드세요.` : '저장된 원격 MCP 키를 읽지 못했습니다. 키를 새로 만드세요.';
     log(`[remote-mcp] ${store.error}`);
     return store;
@@ -75,10 +77,10 @@ export class RemoteMcpKeys {
     if (this.keys.length >= MAX_REMOTE_MCP_KEYS) throw new TowerError('conflict', `원격 MCP 키는 ${MAX_REMOTE_MCP_KEYS}개까지 만들 수 있습니다. 쓰지 않는 키를 폐기하세요.`);
     const key = `tower_mcp_${randomBytes(32).toString('base64url')}`;
     const record: KeyRecord = { id: randomUUID(), name, scope: input.scope as RemoteMcpScope, hash: hashOf(key), hint: key.slice(-4), createdAt: new Date().toISOString() };
-    const previous = this.keys;
     this.replace([...this.keys, record]);
     try { await this.save(); }
-    catch (error) { this.replace(previous); throw error; }
+    // Only this key is taken back: a revocation made meanwhile stays revoked.
+    catch (error) { this.replace(this.keys.filter(key => key !== record)); throw error; }
     this.error = undefined;
     return { key, created: view(record) };
   }
@@ -100,6 +102,7 @@ export class RemoteMcpKeys {
 
   /** Writes are queued, each writing the keys as they are when it runs. */
   private save(): Promise<void> {
+    // best-effort: an earlier write's failure went to its own caller; the queue only keeps the order.
     const next = this.writing.catch(() => {}).then(() => writePrivateJson(this.path, `${JSON.stringify({ version: 1, keys: this.keys } satisfies z.infer<typeof File>, null, 2)}\n`));
     this.writing = next;
     return next;

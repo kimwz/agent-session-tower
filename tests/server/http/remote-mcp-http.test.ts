@@ -32,12 +32,15 @@ async function serve(t: test.TestContext) {
   let port: number | undefined;
   const origins = new Set<string>();
   const keys = await RemoteMcpKeys.open(dir);
+  const groups: Array<{ cwd: string; title?: string | null }> = [], linkUpdates: string[] = [];
   const tools = remoteMcpOverHttp(dir, () => port);
   const localMcp = ownerMcpOverHttp(dir, () => port);
   // Backups exist here so that a refusal, not their absence, answers.
   const backup = { overview: async () => ({ ok: true }), saveSettings: async () => ({ ok: true }) } as never;
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, auth, remote: { origins }, localMcp, backup, remoteMcp: { keys, answer: tools.answer },
-    backend: { snapshot: () => snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('unused'); }, cancel: async () => {}, subscribe: () => () => {} } });
+    links: { node: { list: () => [] }, controller: { update: async (id: string) => { linkUpdates.push(id); } } } as never,
+    backend: { snapshot: () => snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('unused'); }, cancel: async () => {}, subscribe: () => () => {},
+      setGroup: async patch => { groups.push(patch); return { cwd: patch.cwd, title: patch.title ?? null } as never; } } });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   port = (server.address() as { port: number }).port;
   const secure = `ast.test:${port}`, plain = `plain.test:${port}`;
@@ -71,7 +74,7 @@ async function serve(t: test.TestContext) {
     assert.equal(reply.status, 200);
     return JSON.parse(reply.body.result.content[0].text);
   };
-  return { send, page, makeKey, rpc, call, secure, plain, token, cookie, port };
+  return { send, page, makeKey, rpc, call, secure, plain, token, cookie, port, groups, linkUpdates };
 }
 
 test('the owner\'s outside MCP client uses Tower at the HTTPS address with a key; a read key only reads', async t => {
@@ -121,11 +124,14 @@ test('without a valid key, or not over the HTTPS address, nobody gets in, and re
 });
 
 test('a write key changes things; what only the owner does in person stays closed to it', async t => {
-  const { makeKey, call } = await serve(t);
+  const { makeKey, call, groups, linkUpdates } = await serve(t);
   const { key } = await makeKey('write');
-  const change = await call(key, 'tower_api', { method: 'POST', path: '/api/groups', body: { cwd: '/work' } });
-  assert.notEqual(change.status, 403, 'an ordinary change goes through');
-  assert.ok(!change.error);
+  const change = await call(key, 'tower_api', { method: 'POST', path: '/api/groups', body: { cwd: '/work', title: 'Work' } });
+  assert.equal(change.state, 'succeeded', 'an ordinary change goes through');
+  assert.deepEqual(groups, [{ cwd: '/work', title: 'Work' }]);
+  const update = await call(key, 'tower_api', { method: 'POST', path: `/api/link/nodes/${'a'.repeat(32)}/update`, body: {} });
+  assert.equal(update.status, 403, 'nor does it update, join or remove computers');
+  assert.deepEqual(linkUpdates, []);
   for (const [method, path, body] of [
     ['GET', '/api/backup'], ['POST', '/api/backup/settings', {}], ['POST', '/api/storage/retry', {}], ['GET', '/api/retention'],
     ['POST', '/api/sessions/s1/compaction', {}], ['POST', '/api/tower/update', {}], ['POST', '/api/runner/force-update', {}],
