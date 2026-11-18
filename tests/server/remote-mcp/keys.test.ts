@@ -91,3 +91,13 @@ test('a key whose saving failed is taken back alone, never undoing a revocation 
   assert.deepEqual(keys.list().keys.map(key => key.name), ['kept']);
   await keys.flush();
 });
+
+test('when an unreadable file cannot be set aside, no new key writes over it', async t => {
+  const dir = await folder(t);
+  const file = join(dir, REMOTE_MCP_KEYS_FILE);
+  await writeFile(file, 'not json', { mode: 0o600 });
+  await chmod(dir, 0o500);
+  const keys = await RemoteMcpKeys.open(dir, () => {}).finally(() => chmod(dir, 0o700));
+  await assert.rejects(keys.create({ name: 'new', scope: 'read' }), /새 키를 만들 수 없습니다/);
+  assert.equal(await readFile(file, 'utf8'), 'not json', 'kept as it was');
+});

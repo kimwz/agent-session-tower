@@ -137,6 +137,8 @@ test('a write key changes things; what only the owner does in person stays close
     ['POST', '/api/sessions/s1/compaction', {}], ['POST', '/api/tower/update', {}], ['POST', '/api/runner/force-update', {}],
     ['GET', '/api/auth/overview'], ['POST', '/api/auth/credentials', { username: 'a', password: 'b' }], ['GET', '/api/secrets/settings'],
     ['GET', '/api/remote-mcp'], ['POST', '/api/remote-mcp/create', { name: 'more', scope: 'write' }], ['POST', '/api/claude-accounts/switch', {}],
+    ['POST', '/api/v1/secrets.create', { secret: { name: 'x', origin: 'https://a.example', header: 'X-A', value: 'v' } }], ['POST', '/api/v1/secrets.delete', { id: '00000000-0000-4000-8000-000000000000' }],
+    ['POST', '/api/v1/permissions.decide', { id: '00000000-0000-4000-8000-000000000000', approve: true }], ['POST', '/api/v1/models.settings', {}],
   ] as const) {
     const answer = await call(key, 'tower_api', { method, path, ...(body ? { body } : {}) });
     assert.equal(answer.status, 403, `${method} ${path}: ${JSON.stringify(answer.body)}`);

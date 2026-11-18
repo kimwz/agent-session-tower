@@ -29,6 +29,8 @@ export class RemoteMcpKeys {
   private keys: KeyRecord[] = [];
   private byHash = new Map<string, KeyRecord>();
   private error?: string;
+  /** An unreadable key file could not be set aside: nothing is written until Tower starts again with it moved. */
+  private held = false;
   private writing: Promise<unknown> = Promise.resolve();
   private lastWrite = 0;
 
@@ -47,7 +49,11 @@ export class RemoteMcpKeys {
     if (parsed.success) { store.replace(parsed.data.keys); return store; }
     let aside: string | undefined;
     try { aside = await quarantineFile(store.path); }
-    catch (error) { log(`[remote-mcp] 읽지 못한 키 파일을 옮기지 못했습니다: ${error instanceof Error ? error.message : String(error)}`); }
+    catch (error) {
+      // The unreadable file stays where it is, and no new key may write over it.
+      store.held = true;
+      log(`[remote-mcp] 읽지 못한 키 파일을 옮기지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+    }
     store.error = aside ? `저장된 원격 MCP 키를 읽지 못해 ${aside}로 옮겼습니다. 키를 새로 만드세요.` : '저장된 원격 MCP 키를 읽지 못했습니다. 키를 새로 만드세요.';
     log(`[remote-mcp] ${store.error}`);
     return store;
@@ -74,6 +80,7 @@ export class RemoteMcpKeys {
     const name = typeof input.name === 'string' ? input.name.trim() : '';
     if (!name || name.length > 60) throw new TowerError('invalid', '키 이름은 1~60자로 정하세요.');
     if (!REMOTE_MCP_SCOPES.includes(input.scope as RemoteMcpScope)) throw new TowerError('invalid', '권한은 read 또는 write입니다.');
+    if (this.held) throw new TowerError('conflict', `읽지 못한 원격 MCP 키 파일(${this.path})을 옮기지 못해 새 키를 만들 수 없습니다. 파일을 확인한 뒤 Tower를 다시 시작하세요.`);
     if (this.keys.length >= MAX_REMOTE_MCP_KEYS) throw new TowerError('conflict', `원격 MCP 키는 ${MAX_REMOTE_MCP_KEYS}개까지 만들 수 있습니다. 쓰지 않는 키를 폐기하세요.`);
     const key = `tower_mcp_${randomBytes(32).toString('base64url')}`;
     const record: KeyRecord = { id: randomUUID(), name, scope: input.scope as RemoteMcpScope, hash: hashOf(key), hint: key.slice(-4), createdAt: new Date().toISOString() };
