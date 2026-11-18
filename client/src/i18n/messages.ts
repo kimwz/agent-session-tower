@@ -1,5 +1,7 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  "Codex를 실행하는 셸의 환경 변수 (설정 파일에 넣지 마세요)": "Environment variable in the shell Codex starts from (not in the settings file)",
+  "Codex 환경 변수 복사": "Copy Codex environment variable",
   "외부 MCP": "External MCP",
   "다른 컴퓨터의 Claude Code·Codex에서 Tower를 MCP로 쓰기": "Use Tower as MCP from Claude Code or Codex on other computers",
   "Cloudflare Access 로그인을 통과한 MCP 클라이언트가 여기서 만든 키를 함께 보내야 연결됩니다. 키는 소유자의 원격 화면 권한으로 동작하며, 백업·복구·시크릿 보관함·계정·업데이트는 쓸 수 없습니다.": "An MCP client connects only after passing the Cloudflare Access sign-in and sending a key made here. Keys act with your remote page's rights; backups, recovery, the secret vault, accounts and updates are not available.",

@@ -10,10 +10,12 @@ const post = <T,>(path: string, token: string, body: unknown) =>
   api<T>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(body) });
 
 /** How to add the endpoint to Claude Code and Codex, with the key shown once. */
-export function clientSetup(endpoint: string, key: string): { claude: string; codex: string } {
+export function clientSetup(endpoint: string, key: string): { claude: string; codex: string; codexEnv: string } {
   return {
     claude: `claude mcp add --transport http --scope user tower-remote ${endpoint} --header "${REMOTE_MCP_KEY_HEADER}: ${key}"`,
-    codex: `[mcp_servers.tower-remote]\nurl = "${endpoint}"\nenv_http_headers = { "${REMOTE_MCP_KEY_HEADER}" = "TOWER_MCP_KEY" }\n# export TOWER_MCP_KEY=${key}\n# codex mcp login tower-remote`,
+    codex: `[mcp_servers.tower-remote]\nurl = "${endpoint}"\nenv_http_headers = { "${REMOTE_MCP_KEY_HEADER}" = "TOWER_MCP_KEY" }`,
+    // Kept out of the settings file: the key goes in the environment Codex starts from.
+    codexEnv: `export TOWER_MCP_KEY=${key}`,
   };
 }
 
@@ -72,6 +74,9 @@ export function RemoteMcpPanel({ token }: { token: string }) {
           <p className="auth-hint">{t('Codex (~/.codex/config.toml)')}</p>
           <div className="remote-mcp-copy"><pre>{setup.codex}</pre>
             <button type="button" className="icon-button" title={t('복사')} aria-label={t('Codex 설정 복사')} onClick={() => void copy('codex', setup.codex)}>{copied === 'codex' ? <Check size={15} /> : <Copy size={15} />}</button></div>
+          <p className="auth-hint">{t('Codex를 실행하는 셸의 환경 변수 (설정 파일에 넣지 마세요)')}</p>
+          <div className="remote-mcp-copy"><pre>{setup.codexEnv}</pre>
+            <button type="button" className="icon-button" title={t('복사')} aria-label={t('Codex 환경 변수 복사')} onClick={() => void copy('codex-env', setup.codexEnv)}>{copied === 'codex-env' ? <Check size={15} /> : <Copy size={15} />}</button></div>
           <p className="auth-hint">{t('처음 연결할 때 Cloudflare Access 로그인 창이 열립니다(Claude Code는 /mcp, Codex는 codex mcp login tower-remote).')}</p>
         </>}
         <button type="button" className="secondary-button" onClick={() => setCreated(null)}>{t('닫기')}</button>

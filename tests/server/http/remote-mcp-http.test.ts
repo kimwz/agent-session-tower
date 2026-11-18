@@ -103,7 +103,7 @@ test('the owner\'s outside MCP client uses Tower at the HTTPS address with a key
 });
 
 test('without a valid key, or not over the HTTPS address, nobody gets in, and refusals never ask to sign in again', async t => {
-  const { makeKey, rpc, send, page, plain } = await serve(t);
+  const { makeKey, rpc, send, page, plain, secure } = await serve(t);
   const made = await makeKey('write');
   for (const [label, reply] of [
     ['no key', await rpc(undefined, 'tools/list')],
@@ -111,12 +111,14 @@ test('without a valid key, or not over the HTTPS address, nobody gets in, and re
     ['the page token or a sign-in instead', await rpc(undefined, 'tools/list', undefined, { headers: { Authorization: 'Bearer x', Cookie: 'tower_session=abc' } })],
     ['plain HTTP public address', await rpc(made.key, 'tools/list', undefined, { host: plain })],
     ['a browser page', await rpc(made.key, 'tools/list', undefined, { headers: { Origin: 'https://evil.example' } })],
+    ['Tower\'s own page', await rpc(made.key, 'tools/list', undefined, { headers: { Origin: `https://${secure}` } })],
     ['a page of Tower', await rpc(made.key, 'tools/list', undefined, { headers: { 'Sec-Fetch-Site': 'same-origin' } })],
   ] as const) {
     assert.equal(reply.status, 403, `${label}: ${JSON.stringify(reply.body).slice(0, 300)}`);
     assert.equal(reply.headers['www-authenticate'], undefined, `${label}: no sign-in challenge`);
   }
   assert.equal((await rpc(undefined, 'tools/list')).body.error.code, -32001);
+  assert.equal((await rpc(made.key, 'tools/list', undefined, { headers: { Origin: `https://${secure}` } })).body.error.code, -32001, 'refused by /mcp itself, not by the origin check');
   assert.equal((await send('GET', '/mcp', { headers: { 'X-Tower-Mcp-Key': made.key } })).status, 405, 'no server-sent stream');
 
   await page('POST', '/api/remote-mcp/revoke', { id: made.created.id });
@@ -139,6 +141,7 @@ test('a write key changes things; what only the owner does in person stays close
     ['GET', '/api/remote-mcp'], ['POST', '/api/remote-mcp/create', { name: 'more', scope: 'write' }], ['POST', '/api/claude-accounts/switch', {}],
     ['POST', '/api/v1/secrets.create', { secret: { name: 'x', origin: 'https://a.example', header: 'X-A', value: 'v' } }], ['POST', '/api/v1/secrets.delete', { id: '00000000-0000-4000-8000-000000000000' }],
     ['POST', '/api/v1/permissions.decide', { id: '00000000-0000-4000-8000-000000000000', approve: true }], ['POST', '/api/v1/models.settings', {}],
+    ['POST', `/api/nodes/${'b'.repeat(32)}/v1/models.update`, { settings: {} }], ['POST', `/api/nodes/${'b'.repeat(32)}/v1/permissions.decide`, { id: '00000000-0000-4000-8000-000000000000', approve: true }],
   ] as const) {
     const answer = await call(key, 'tower_api', { method, path, ...(body ? { body } : {}) });
     assert.equal(answer.status, 403, `${method} ${path}: ${JSON.stringify(answer.body)}`);

@@ -499,12 +499,13 @@ export function createMonitorServer({ attachmentStores, attachmentUploads, port,
         if (!identity.local) trackStream(sessionId, res, () => res.destroy());
         if (await master.handle(req, res, path, url, identity)) return;
       }
+      // The owner's own operations (secrets, permission rules and decisions, model settings…) stay with the owner's pages,
+      // here and on joined computers, which take this computer's requests as the owner's.
+      const ownOperation = /^\/api\/(?:nodes\/[a-f0-9]{32}\/)?v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/.exec(path)?.[1];
+      if (remoteAgent && ownOperation && isOperationName(ownOperation) && 'ownerOnly' in OPERATIONS[ownOperation] && OPERATIONS[ownOperation].ownerOnly) return json(res, 403, { error: 'Only the owner can do this in Tower.' });
       const operation = path.match(/^\/api\/v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/);
       if (operation && req.method === 'POST') {
         if (!isOperationName(operation[1])) return json(res, 404, { error: 'Unknown Tower operation.' });
-        // The owner's own operations (secrets, permission rules and decisions, model settings…) stay with the owner's pages.
-        const definition = OPERATIONS[operation[1]];
-        if (remoteAgent && 'ownerOnly' in definition && definition.ownerOnly) return json(res, 403, { error: 'Only the owner can do this in Tower.' });
         if (!backend.api) return json(res, 503, { error: 'Tower operations are unavailable.' });
         const input = await readJson(req, 1_000_000);
         if (masterCall && operation[1] === 'autoPrompt.submit') input.modelRole = 'master.worker';
