@@ -452,6 +452,7 @@ test('work Claude starts in a turn of its own in a kept process shows its conver
   assert.equal(status(), 'idle');
   await release('build');
   await until(() => find(manager, run.id).backgroundWait?.work === 1);
+  assert.equal(find(manager, run.id).backgroundWait?.tasks, 2, 'the server and the build');
   assert.equal(status(), 'working');
   await release('built');
   await until(() => find(manager, run.id).backgroundWait?.work === 0);
