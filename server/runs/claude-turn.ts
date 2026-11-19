@@ -280,7 +280,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
     };
     const waitLimit = () => {
       waitTimer = undefined;
-      if (!idle() || !current) return;
+      // A process a signal ended is reported by its close handler, never as an answered turn.
+      if (!idle() || !current || child.signalCode) return;
       // A message being inserted is not answered yet: the turn it joins must not end before Claude takes it.
       if (current.approvals?.length || owned.claude?.hasPendingSteers()) { arm('wait', followUpMs); return; }
       // A turn ends as answered only once a new conversation's identity is saved; then it is judged again, as at its
