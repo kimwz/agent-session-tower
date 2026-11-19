@@ -281,9 +281,11 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
     const waitLimit = () => {
       waitTimer = undefined;
       if (!idle() || !current) return;
-      if (current.approvals?.length) { arm('wait', followUpMs); return; }
-      // A turn ends as answered only once a new conversation's identity is saved (see finishInput); a failed save stops it.
-      if (identitySaving) { void identitySaved.then(() => { if (!waitTimer) arm('wait', 0); }); return; }
+      // A message being inserted is not answered yet: the turn it joins must not end before Claude takes it.
+      if (current.approvals?.length || owned.claude?.hasPendingSteers()) { arm('wait', followUpMs); return; }
+      // A turn ends as answered only once a new conversation's identity is saved; then it is judged again, as at its
+      // answer (see finishInput), and a failed save stops it.
+      if (identitySaving) { void identitySaved.then(() => owned.finishInput?.()); return; }
       waitTimedOut = true;
       const minutes = Math.round(waitMaxMs / 60_000);
       // Work an earlier run left (the owner's server) is not this run's to end.
