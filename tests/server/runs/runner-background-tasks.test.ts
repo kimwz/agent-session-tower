@@ -321,6 +321,15 @@ test("background work still running at the limit ends the owner's answered turn 
   assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Run the reviews', 'How is it going?']);
 });
 
+test('a failed turn without any error text still fails at the limit, its work kept', async t => {
+  const { manager, cleanup } = await fixture({ first: [started('review-1')], noResult: true, later: [{ at: 10, frames: [{ type: 'result', is_error: true, errors: [] }] }] }, { waitMaxMs: 200 });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'owner' } });
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'error');
+  assert.match(done.error ?? '', /could not complete this turn/);
+});
+
 test('work others read ends at the limit together with its process', async t => {
   // A trigger's next event is another origin: a process kept for it could take no later run and would hold the
   // conversation, so it stops (closing input alone no longer ends Claude while the work runs).

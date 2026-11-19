@@ -518,7 +518,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         turnActive = false;
         owned.claude?.setTurnIdle(true);
         // A turn Claude started by itself in a kept process has no run to fail.
-        if (event.is_error && current) streamError = (event.errors ?? [event.result ?? 'Claude Code could not complete this turn.']).join('\n');
+        // A failure without any description still fails (an empty message would read as success).
+        if (event.is_error && current) streamError = (event.errors ?? [event.result ?? '']).join('\n').trim() || 'Claude Code could not complete this turn.';
         // A denied tool call (by the user or the auto mode classifier) is part of a turn that
         // still finished; Claude's own reply explains it. Only a failed turn is reported.
         if (event.is_error && current && event.permission_denials?.length) {
