@@ -126,6 +126,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   let configBound: Promise<void> = Promise.resolve();
   /** The process's end is reported once. */
   let reported = false;
+  /** Its output has closed: only the close handler decides about its run from then on (a deferred rejudge does not). */
+  let closing = false;
   let buffer = '';
   let stderr = '';
   let streamError: string | undefined;
@@ -238,7 +240,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       onReady: () => host.changed(last),
     });
     const closeInput = () => { inputClosedByTower = true; clearFinishTimer(); clearWaitTimers(); owned.claude?.close(); if (!child.stdin.writableEnded) child.stdin.end(); };
-    const idle = () => !turnActive && (!current || current.status === 'running') && child.exitCode === null && !child.stdin.writableEnded;
+    const idle = () => !closing && !turnActive && (!current || current.status === 'running') && child.exitCode === null && !child.stdin.writableEnded;
     const arm = (timer: 'followUp' | 'wait', ms: number) => {
       const handle = setTimeout(timer === 'followUp' ? followUp : waitLimit, ms);
       handle.unref();
@@ -250,7 +252,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
      */
     const release = (error?: string) => {
       const served = current;
-      if (!served) return;
+      if (!served || closing) return;
       clearFinishTimer(); clearWaitTimers(); waitDeadline = undefined;
       tasks.detach();
       // A notice Tower handed over and Claude has not taken yet is now for a turn no run waits for.
@@ -337,7 +339,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       }, finishRecheckMs);
     };
     owned.finishInput = () => {
-      if (turnActive || owned.claude?.hasPendingSteers() || child.stdin.writableEnded) return;
+      if (closing || turnActive || owned.claude?.hasPendingSteers() || child.stdin.writableEnded) return;
       if (!current) { keptIdle(); return; }
       if (!sawCompletion) return;
       // A failed turn is not kept open for its background work. Claude does not end while that work runs, so the
@@ -551,6 +553,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
     child.on('error', (error: Error) => { streamError = errorMessage(error); });
     child.on('close', async (code: number | null, signal: NodeJS.Signals | null) => {
       if (buffer) parseLine(buffer);
+      closing = true;
       clearFinishTimer(); clearWaitTimers();
       const pendingApproval = !!current?.approvals?.length;
       const pendingSteer = owned.claude?.hasPendingSteers();
