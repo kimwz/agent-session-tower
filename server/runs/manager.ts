@@ -1326,9 +1326,10 @@ export class RunManager extends EventEmitter {
       for (const from of [...this.handedOver.keys()]) if (this.servedBy(from) === run.id) this.handedOver.delete(from);
       const { code, signal, sawCompletion, sawSessionId, waitTimedOut, outstanding, noticePending } = summary;
       let streamError = summary.streamError;
+      // The process is gone: nothing it ran keeps its conversation busy any more, whatever set the wait last.
+      delete run.backgroundWait;
       // Its last run already ended at its answer (see answered); the process was kept only for background work.
       if (run.status === 'completed' || run.status === 'error') {
-        delete run.backgroundWait;
         if (summary.wakeup && !this.stopping) this.scheduleContinuation(run, summary.wakeup);
         this.changed(run);
       } else if (run.status !== 'cancelled') {

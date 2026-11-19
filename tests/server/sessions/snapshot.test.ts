@@ -71,3 +71,19 @@ test('invalid managed lifecycle dates cannot replace valid session times', () =>
   assert.equal(result.lastRequestAt, native.lastRequestAt);
   assert.equal(result.lastCompletedAt, native.lastCompletedAt);
 });
+
+test('a kept process still running work keeps its session working; a service alone does not', () => {
+  const idle = { ...session, status: 'idle' as const };
+  const kept = (status: Run['status'], backgroundWait: Run['backgroundWait']): Run => ({ ...run, status, backgroundWait });
+  const project = (item: Run) => projectSessionStates([idle], [item], settled)[0]!;
+  const working = project(kept('completed', { since: run.finishedAt!, tasks: 3, work: 2 }));
+  assert.equal(working.status, 'working');
+  assert.equal(working.statusReason, '백그라운드 작업 실행 중');
+  assert.equal(project(kept('completed', { since: run.finishedAt!, tasks: 1, work: 0 })).status, 'idle', 'a dev server alone is not the agent working');
+  assert.equal(project(kept('completed', undefined)).status, 'idle');
+  // Records from an older worker: a run failed at the wait limit was kept for work; a completed one for a service.
+  assert.equal(project(kept('error', { since: run.finishedAt!, tasks: 9 })).status, 'working');
+  assert.equal(project(kept('completed', { since: run.finishedAt!, tasks: 1 })).status, 'idle');
+  // A failed run kept for its work does not read as a stopped session either.
+  assert.equal(projectSessionStates([session], [kept('error', { since: run.finishedAt!, tasks: 1, work: 1 })], settled)[0]?.status, 'working');
+});

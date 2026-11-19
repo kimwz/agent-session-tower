@@ -6,15 +6,27 @@ function latestTime(previous: string | undefined, candidate: string | undefined)
   return !previous || !Number.isFinite(Date.parse(previous)) || at > Date.parse(previous) ? new Date(at).toISOString() : previous;
 }
 
+/**
+ * A finished run whose Claude process is kept for background work that is not only a service: the agent is still busy.
+ * Records from before 1.188 carry no `work` count; there a failed run kept for its work (the wait limit) counts, while a
+ * completed one was usually kept for a service only.
+ */
+function keptWorking(run: Run): boolean {
+  if (!run.backgroundWait || (run.status !== 'completed' && run.status !== 'error')) return false;
+  return run.backgroundWait.work === undefined ? run.status === 'error' && run.backgroundWait.tasks > 0 : run.backgroundWait.work > 0;
+}
+
 /** Combine native activity with stronger evidence from a turn this monitor owns. */
 export function projectSessionStates(sessions: readonly Session[], runs: readonly Run[], settledRunIds: ReadonlySet<string> = new Set()): Session[] {
   const latest = new Map<string, Run>();
   const running = new Set<string>();
   const waiting = new Set<string>();
+  const kept = new Set<string>();
   const activity = new Map<string, { lastRequestAt?: string; lastCompletedAt?: string }>();
   for (const run of runs) {
     if (run.status === 'running') running.add(run.sessionId);
     if (run.status === 'running' && run.backgroundWait) waiting.add(run.sessionId);
+    if (keptWorking(run)) kept.add(run.sessionId);
     const previous = latest.get(run.sessionId);
     if (!previous || run.createdAt >= previous.createdAt) latest.set(run.sessionId, run);
     const times = activity.get(run.sessionId) ?? {};
@@ -34,6 +46,7 @@ export function projectSessionStates(sessions: readonly Session[], runs: readonl
       lastCompletedAt: latestTime(nativeSession.lastCompletedAt, times.lastCompletedAt),
     } : nativeSession;
     if (running.has(session.id)) return { ...session, status: 'working', statusReason: waiting.has(session.id) ? '백그라운드 작업이 끝나기를 기다리는 중' : 'Agent Session Tower에서 작업 중' };
+    if (kept.has(session.id)) return { ...session, status: 'working', statusReason: '백그라운드 작업 실행 중' };
     const run = latest.get(session.id);
     // A queued cancellation says nothing about the independent CLI's current task.
     if (session.status !== 'working' || !run?.startedAt || !run.finishedAt || !settledRunIds.has(run.id) || !['cancelled', 'error'].includes(run.status)) return session;

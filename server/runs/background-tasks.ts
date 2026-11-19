@@ -87,7 +87,7 @@ export class BackgroundTaskTracker {
   /** Started in the foreground; followed only in case they move to the background. */
   private readonly foreground = new Map<string, Kind>();
   /** Still running, but no run waits for them any more (see detach). */
-  private readonly detached = new Set<string>();
+  private readonly detached = new Map<string, Kind>();
   /**
    * Ended, but Claude has not yet taken the notice. `reply` numbers the model reply under way when it ended (or when
    * that reply was found too close to tell); `unsure` marks a notice only such a close reply may have taken.
@@ -206,10 +206,12 @@ export class BackgroundTaskTracker {
   get detachedCount(): number { return this.detached.size + this.unread.size - this.unreadCount; }
   /** Detached tasks that ended and whose notice Claude has not taken yet. */
   get detachedUnreadCount(): number { return this.unread.size - this.unreadCount; }
+  /** Detached tasks still running that are work, not a service: an agent still busy, though no run waits for it. */
+  get detachedWorkCount(): number { return [...this.detached.values()].filter(kind => kind === 'work').length; }
 
   /** No run waits for what runs now: it only keeps the process (a run that ends before its background work). */
   detach(): void {
-    for (const id of this.running.keys()) this.detached.add(id);
+    for (const [id, kind] of this.running) this.detached.set(id, kind);
     this.running.clear();
     for (const [id, entry] of this.unread) this.unread.set(id, { ...entry, detached: true });
   }

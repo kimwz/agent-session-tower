@@ -322,10 +322,12 @@ export interface Run {
    * A running turn: it has answered, but background work it waits for (a background agent; a command or monitor too
    * when others read its result) still runs inside the provider process, and the turn stays open so the agent can
    * pick up the results. A finished run: it ended at its answer and its process is kept for background work no run
-   * waits for (a server), until that ends. `since` is when this began and `tasks` how many are still running (0 while
-   * Claude is about to take a finished one).
+   * waits for any more (a server, or work past the wait limit), until that ends. `since` is when this began and `tasks`
+   * how many are still running (0 while Claude is about to take a finished one). `work`, set on a finished run only,
+   * counts those that are not a service (agents, builds, renders): while any is left the conversation shows as working.
+   * Records of a running turn and from before 1.188 have none.
    */
-  backgroundWait?: { since: string; tasks: number };
+  backgroundWait?: { since: string; tasks: number; work?: number };
   /**
    * The master's turns only: what it writes, text block by text block as it streams, so its words can be read aloud
    * while they are written. Unlike `output`, it holds no tool notes and is never cut at its start.

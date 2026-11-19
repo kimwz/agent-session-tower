@@ -126,6 +126,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   let configBound: Promise<void> = Promise.resolve();
   /** The process's end is reported once. */
   let reported = false;
+  /** Its output has closed: only the close handler decides about its run from then on (a deferred rejudge does not). */
+  let closing = false;
   let buffer = '';
   let stderr = '';
   let streamError: string | undefined;
@@ -238,7 +240,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       onReady: () => host.changed(last),
     });
     const closeInput = () => { inputClosedByTower = true; clearFinishTimer(); clearWaitTimers(); owned.claude?.close(); if (!child.stdin.writableEnded) child.stdin.end(); };
-    const idle = () => !turnActive && (!current || current.status === 'running') && child.exitCode === null && !child.stdin.writableEnded;
+    const idle = () => !closing && !turnActive && (!current || current.status === 'running') && child.exitCode === null && !child.stdin.writableEnded;
     const arm = (timer: 'followUp' | 'wait', ms: number) => {
       const handle = setTimeout(timer === 'followUp' ? followUp : waitLimit, ms);
       handle.unref();
@@ -250,14 +252,14 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
      */
     const release = (error?: string) => {
       const served = current;
-      if (!served) return;
+      if (!served || closing) return;
       clearFinishTimer(); clearWaitTimers(); waitDeadline = undefined;
       tasks.detach();
       // A notice Tower handed over and Claude has not taken yet is now for a turn no run waits for.
       noticeId = undefined;
       current = undefined; replies = undefined;
       const count = tasks.detachedCount;
-      if (count) served.backgroundWait = { since: new Date().toISOString(), tasks: count };
+      if (count) served.backgroundWait = { since: new Date().toISOString(), tasks: count, work: tasks.detachedWorkCount };
       else delete served.backgroundWait;
       if (count) host.append(served, `\n[Tower] ${error ? 'Stopped waiting' : 'Turn finished'}; ${count} background task${count === 1 ? '' : 's'} keep${count === 1 ? 's' : ''} running in this conversation's Claude process.\n`);
       host.answered(served, owned, error);
@@ -281,8 +283,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
     const waitLimit = () => {
       waitTimer = undefined;
       if (!idle() || !current) return;
-      if (current.approvals?.length) { arm('wait', followUpMs); return; }
-      // Never reported as success.
+      // A message being inserted is not answered yet: the turn it joins must not end before Claude takes it.
+      if (current.approvals?.length || owned.claude?.hasPendingSteers()) { arm('wait', followUpMs); return; }
       waitTimedOut = true;
       const minutes = Math.round(waitMaxMs / 60_000);
       // Work an earlier run left (the owner's server) is not this run's to end.
@@ -295,8 +297,26 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         return;
       }
       note(`\n[Tower] Background work was still running after ${minutes} minutes; the turn ends and the work keeps running.\n`);
-      release(`The turn answered, but its background work did not finish within the ${minutes} minutes Tower waits; it keeps running in this conversation.`);
+      // The owner's answered turn ends as such, its process kept, still working (see projectSessionStates). It fails
+      // instead on a stream error, before a new conversation's identity is saved, once a signal ended the process, and
+      // for a run others read (it got here only because an earlier run's server keeps the process).
+      const limit = `The turn answered, but its background work did not finish within the ${minutes} minutes Tower waits; it keeps running in this conversation.`;
+      const failure = streamError ?? (identitySaving || child.signalCode || waitsForServices(current) ? limit : undefined);
+      // Reported with this run: the kept process takes the next message (see canAdopt).
+      streamError = undefined;
+      release(failure);
       owned.finishInput?.();
+    };
+    /**
+     * Keeps a kept process's count of work current, including work Claude starts in a turn of its own (detached only
+     * once that turn ends), so its conversation shows as busy while it runs (see projectSessionStates).
+     */
+    const keptWork = () => {
+      if (current) return;
+      const work = tasks.detachedWorkCount + tasks.holding(false), count = tasks.detachedCount + tasks.runningCount;
+      // Work Claude starts after its run ended with nothing left keeps the process from then on.
+      if (!last.backgroundWait) { if (work) { last.backgroundWait = { since: new Date().toISOString(), tasks: count, work }; host.changed(last); } return; }
+      if (last.backgroundWait.work !== work || last.backgroundWait.tasks !== count) { last.backgroundWait = { ...last.backgroundWait, tasks: count, work }; host.changed(last); }
     };
     /** A kept process ends once nothing it runs is left and Claude is idle: input closes, as at any turn's end. */
     const keptIdle = () => {
@@ -305,7 +325,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       const count = tasks.detachedCount;
       if (count) {
         clearFinishTimer();
-        if (last.backgroundWait?.tasks !== count) { last.backgroundWait = { since: last.backgroundWait?.since ?? new Date().toISOString(), tasks: count }; host.changed(last); }
+        if (!last.backgroundWait) { last.backgroundWait = { since: new Date().toISOString(), tasks: count, work: tasks.detachedWorkCount }; host.changed(last); }
+        else keptWork();
         if (tasks.detachedUnreadCount && !followUpTimer) arm('followUp', followUpMs);
         return;
       }
@@ -318,7 +339,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       }, finishRecheckMs);
     };
     owned.finishInput = () => {
-      if (turnActive || owned.claude?.hasPendingSteers() || child.stdin.writableEnded) return;
+      if (closing || turnActive || owned.claude?.hasPendingSteers() || child.stdin.writableEnded) return;
       if (!current) { keptIdle(); return; }
       if (!sawCompletion) return;
       // A failed turn is not kept open for its background work. Claude does not end while that work runs, so the
@@ -440,7 +461,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         if (noticeId && event.uuid === noticeId) noticeId = undefined;
         else { tasks.observeReplay(event); wakeups.observeReplay(messageText(event)); }
       }
-      if ((event.session_id === undefined || event.session_id === session.nativeId) && tasks.observe(event) && !turnActive) owned.finishInput?.();
+      if ((event.session_id === undefined || event.session_id === session.nativeId) && tasks.observe(event)) { keptWork(); if (!turnActive) owned.finishInput?.(); }
       if (mainContext && event.type === 'system' && event.subtype === 'compact_boundary') contextInput = undefined;
       if (event.type === 'system' && event.subtype === 'task_started' && event.is_backgrounded === false && (event.session_id === undefined || event.session_id === session.nativeId)) owned.claude?.foregroundStarted();
       if (mainContext) wakeups.observe(event);
@@ -499,7 +520,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         turnActive = false;
         owned.claude?.setTurnIdle(true);
         // A turn Claude started by itself in a kept process has no run to fail.
-        if (event.is_error && current) streamError = (event.errors ?? [event.result ?? 'Claude Code could not complete this turn.']).join('\n');
+        // A failure without any description still fails (an empty message would read as success).
+        if (event.is_error && current) streamError = (event.errors ?? [event.result ?? '']).join('\n').trim() || 'Claude Code could not complete this turn.';
         // A denied tool call (by the user or the auto mode classifier) is part of a turn that
         // still finished; Claude's own reply explains it. Only a failed turn is reported.
         if (event.is_error && current && event.permission_denials?.length) {
@@ -531,6 +553,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
     child.on('error', (error: Error) => { streamError = errorMessage(error); });
     child.on('close', async (code: number | null, signal: NodeJS.Signals | null) => {
       if (buffer) parseLine(buffer);
+      closing = true;
       clearFinishTimer(); clearWaitTimers();
       const pendingApproval = !!current?.approvals?.length;
       const pendingSteer = owned.claude?.hasPendingSteers();
