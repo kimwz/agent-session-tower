@@ -4,6 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.188.0] - 2026-11-19
+
+- **백그라운드 작업을 120분 넘게 돌리는 대화가 캔버스에서 꺼진 것처럼 보이지 않습니다.** 소유자가 보낸 Claude 턴은 답한 뒤에도 그 턴이 띄운 백그라운드 작업(작업자 에이전트, 빌드, 테스트, 렌더)이 끝나기를 기다리고, 120분이 지나면 기다림을 멈춥니다. 이때 Claude 프로세스와 작업은 계속 돌았는데, Tower는 그 턴을 "요청 실패"로 기록하고 대화를 작업 중이 아닌 것으로 보여 캔버스의 로딩 표시가 꺼졌습니다. 이제 그 턴은 답한 대로 완료되고, 프로세스에 작업이 남아 있는 동안 대화는 "백그라운드 작업 실행 중"으로 작업 중 표시가 유지됩니다. Claude가 그 프로세스에서 스스로 시작한 턴의 작업도 함께 셉니다. 개발 서버처럼 끝나지 않는 서비스만 남은 대화는 지금처럼 작업 중으로 보이지 않습니다. 마스터·트리거 등 다른 곳에서 보낸 턴은 지금처럼 기다림이 끝나면 실패로 끝납니다.
+
 ## [1.187.0] - 2026-11-18
 
 - **다른 컴퓨터의 Claude Code·Codex에서 공개 주소(`https://<공개 주소>/mcp`)로 Tower를 MCP로 쓸 수 있습니다.** 지금까지 `/mcp`는 이 컴퓨터의 localhost에서만 답해, 밖에서는 SSH 터널을 열어야 했습니다. 이제 **설정 › 외부 MCP**에서 만든 키를 `X-Tower-Mcp-Key` 헤더로 보내는 클라이언트는 Tower의 HTTPS 공개 주소에서 같은 다섯 도구(`tower_api`, `tower_query`, `session_read`, `terminal_read`, `tower_guide`)를 씁니다.
