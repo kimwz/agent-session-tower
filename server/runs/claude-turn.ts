@@ -282,6 +282,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       waitTimer = undefined;
       if (!idle() || !current) return;
       if (current.approvals?.length) { arm('wait', followUpMs); return; }
+      // A turn ends as answered only once a new conversation's identity is saved (see finishInput); a failed save stops it.
+      if (identitySaving) { void identitySaved.then(() => { if (!waitTimer) arm('wait', 0); }); return; }
       waitTimedOut = true;
       const minutes = Math.round(waitMaxMs / 60_000);
       // Work an earlier run left (the owner's server) is not this run's to end.
@@ -306,8 +308,10 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
      * once that turn ends), so its conversation shows as busy while it runs (see projectSessionStates).
      */
     const keptWork = () => {
-      if (current || !last.backgroundWait) return;
+      if (current) return;
       const work = tasks.detachedWorkCount + tasks.holding(false);
+      // Work Claude starts after its run ended with nothing left keeps the process from then on.
+      if (!last.backgroundWait) { if (work) { last.backgroundWait = { since: new Date().toISOString(), tasks: tasks.detachedCount + tasks.runningCount, work }; host.changed(last); } return; }
       if (last.backgroundWait.work !== work) { last.backgroundWait = { ...last.backgroundWait, work }; host.changed(last); }
     };
     /** A kept process ends once nothing it runs is left and Claude is idle: input closes, as at any turn's end. */

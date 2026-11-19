@@ -458,6 +458,21 @@ test('work Claude starts in a turn of its own in a kept process shows its conver
   assert.equal(status(), 'idle');
 });
 
+test('work Claude starts after its run ended with nothing left also shows its conversation as busy', async t => {
+  // The limit comes while Tower's notice is still unanswered: the run ends with no task left. Claude then takes the
+  // notice and starts a build.
+  const { manager, release, cleanup } = await fixture({ first: [started('review-1'), notified('review-1')], replyDelay: 60_000, lingerOnClose: true,
+    later: [{ when: 'build', frames: [says('One more build.'), ...bash('build-1', 'npm run build')] }] }, { followUpMs: 20, waitMaxMs: 300 });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Run the reviews', {}, { origin: { kind: 'owner' } });
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.equal(done.backgroundWait, undefined);
+  await release('build');
+  await until(() => find(manager, run.id).backgroundWait?.work === 1);
+  assert.equal(projectSessionStates([{ ...fixtureSession, status: 'idle' }], manager.list())[0].status, 'working');
+});
+
 test("a master's message in a process kept for the owner's server still fails at the limit", async t => {
   const { manager, cleanup } = await fixture({ first: [...service('server-1'), says('The server is up.')], onMessage: [started('review-1')] }, { waitMaxMs: 200 });
   t.after(cleanup);
