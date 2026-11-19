@@ -325,7 +325,11 @@ export interface Run {
    * waits for (a server), until that ends. `since` is when this began and `tasks` how many are still running (0 while
    * Claude is about to take a finished one).
    */
-  backgroundWait?: { since: string; tasks: number };
+  /**
+   * Background work this run waits for, or, once it has finished, work its kept Claude process still runs. `work`
+   * counts what is not a service (agents, builds, renders); absent on records from before 1.188.
+   */
+  backgroundWait?: { since: string; tasks: number; work?: number };
   /**
    * The master's turns only: what it writes, text block by text block as it streams, so its words can be read aloud
    * while they are written. Unlike `output`, it holds no tool notes and is never cut at its start.

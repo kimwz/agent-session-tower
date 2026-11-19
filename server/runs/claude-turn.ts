@@ -257,7 +257,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       noticeId = undefined;
       current = undefined; replies = undefined;
       const count = tasks.detachedCount;
-      if (count) served.backgroundWait = { since: new Date().toISOString(), tasks: count };
+      if (count) served.backgroundWait = { since: new Date().toISOString(), tasks: count, work: tasks.detachedWorkCount };
       else delete served.backgroundWait;
       if (count) host.append(served, `\n[Tower] ${error ? 'Stopped waiting' : 'Turn finished'}; ${count} background task${count === 1 ? '' : 's'} keep${count === 1 ? 's' : ''} running in this conversation's Claude process.\n`);
       host.answered(served, owned, error);
@@ -282,7 +282,6 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       waitTimer = undefined;
       if (!idle() || !current) return;
       if (current.approvals?.length) { arm('wait', followUpMs); return; }
-      // Never reported as success.
       waitTimedOut = true;
       const minutes = Math.round(waitMaxMs / 60_000);
       // Work an earlier run left (the owner's server) is not this run's to end.
@@ -295,8 +294,21 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         return;
       }
       note(`\n[Tower] Background work was still running after ${minutes} minutes; the turn ends and the work keeps running.\n`);
-      release(`The turn answered, but its background work did not finish within the ${minutes} minutes Tower waits; it keeps running in this conversation.`);
+      // The owner's answered turn ends as such, its process kept, still working (see projectSessionStates). A stream
+      // error still fails it, and so does the limit for work read by others, kept only for what an earlier run left.
+      release(streamError ?? (waitsForServices(current)
+        ? `The turn answered, but its background work did not finish within the ${minutes} minutes Tower waits; it keeps running in this conversation.`
+        : undefined));
       owned.finishInput?.();
+    };
+    /**
+     * Keeps a kept process's count of work current, including work Claude starts in a turn of its own (detached only
+     * once that turn ends), so its conversation shows as busy while it runs (see projectSessionStates).
+     */
+    const keptWork = () => {
+      if (current || !last.backgroundWait) return;
+      const work = tasks.detachedWorkCount + tasks.holding(false);
+      if (last.backgroundWait.work !== work) { last.backgroundWait = { ...last.backgroundWait, work }; host.changed(last); }
     };
     /** A kept process ends once nothing it runs is left and Claude is idle: input closes, as at any turn's end. */
     const keptIdle = () => {
@@ -305,7 +317,8 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
       const count = tasks.detachedCount;
       if (count) {
         clearFinishTimer();
-        if (last.backgroundWait?.tasks !== count) { last.backgroundWait = { since: last.backgroundWait?.since ?? new Date().toISOString(), tasks: count }; host.changed(last); }
+        if (last.backgroundWait?.tasks !== count) { last.backgroundWait = { since: last.backgroundWait?.since ?? new Date().toISOString(), tasks: count, work: last.backgroundWait?.work }; host.changed(last); }
+        keptWork();
         if (tasks.detachedUnreadCount && !followUpTimer) arm('followUp', followUpMs);
         return;
       }
@@ -440,7 +453,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
         if (noticeId && event.uuid === noticeId) noticeId = undefined;
         else { tasks.observeReplay(event); wakeups.observeReplay(messageText(event)); }
       }
-      if ((event.session_id === undefined || event.session_id === session.nativeId) && tasks.observe(event) && !turnActive) owned.finishInput?.();
+      if ((event.session_id === undefined || event.session_id === session.nativeId) && tasks.observe(event)) { keptWork(); if (!turnActive) owned.finishInput?.(); }
       if (mainContext && event.type === 'system' && event.subtype === 'compact_boundary') contextInput = undefined;
       if (event.type === 'system' && event.subtype === 'task_started' && event.is_backgrounded === false && (event.session_id === undefined || event.session_id === session.nativeId)) owned.claude?.foregroundStarted();
       if (mainContext) wakeups.observe(event);
