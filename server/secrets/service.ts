@@ -283,18 +283,20 @@ export class SecretService {
   async ensureRemoteTask(context: SecretContext, options: { owner?: boolean } = {}): Promise<SecretContext> { return this.mutate(() => ({ ...context, ...this.remoteTask(context, options.owner === true) })); }
   private remoteTask(target: SecretTarget, owner: boolean): SecretTarget {
     const found = this.journal.tasks.find(task => task.id === target.taskId);
-    // A node keeps one task for a session's whole life, but its lease here lasts 8 hours. One that only ran out (not one
-    // closed when its session was archived) starts a new lease for the same session and folder, admitted as a new task
-    // would be: the node's session would otherwise lose this vault for good.
+    // A node keeps one task for a session's whole life, but its lease here lasts 8 hours. One whose lease only ran out
+    // (an explicit close leaves no lease behind) starts a new lease for the same session and folder, admitted as a new task
+    // would be: the node's session would otherwise lose this vault for good. It is first ended as the sweep ends it, so
+    // nothing the old lease held (owner connections, temporary values) carries over or counts as coverage.
     const lapsed = found !== undefined && found.expiresAt !== undefined && found.hostId === target.hostId && found.sessionId === target.sessionId
       && found.root === target.root && (found.status === 'open' ? found.expiresAt <= this.now() : found.closedAt === found.expiresAt);
+    if (lapsed && found.status === 'open') this.lapse(found);
     const existing = found !== undefined && !lapsed;
     if (!this.data().peers.some(peer => peer.enabled && peer.device.id === target.hostId) || !canonicalRoot(target.root) || !/^[a-f0-9-]{36}$/.test(target.taskId) || !target.sessionId) throw new Error('Remote task denied');
     // Nothing shared with that folder or computer: the owner can change that by sharing.
     if (!owner && !existing && !covered(this.policy(), target.hostId, target.root, target.taskId, this.now())) throw notShared('Remote task denied');
     const { hostId, sessionId, root, taskId } = target; const trusted = { hostId, sessionId, root, taskId, projectId: this.projectId(hostId, root) };
     if (existing) { this.task(trusted); return trusted; }
-    if (lapsed) { Object.assign(found, { status: 'open', expiresAt: this.now() + REMOTE_TASK_MS, connected: [] }); delete found.closedAt; return trusted; }
+    if (lapsed) { Object.assign(found, { status: 'open', expiresAt: this.now() + REMOTE_TASK_MS }); delete found.closedAt; return trusted; }
     if (this.journal.tasks.length >= 10000) throw new Error('Task count limit');
     this.journal.tasks.push({ id: taskId, hostId, sessionId, root, status: 'open', createdAt: this.now(), expiresAt: this.now() + REMOTE_TASK_MS, excluded: [], connected: [] }); return trusted;
   }
@@ -342,9 +344,17 @@ export class SecretService {
   async closeTask(taskId: string) { return this.mutate(() => { const task = this.journal.tasks.find(task => task.id === taskId); if (!task) throw new Error('Unknown task'); this.endTask(task); }); }
 
   async closeSessions(hashes: string[]): Promise<void> { return this.mutate(() => {
-    for (const task of this.journal.tasks) if (task.status === 'open' && hashes.includes(createHash('sha256').update('tower-secret-session-close-v1:' + task.sessionId).digest('hex'))) this.endTask(task);
+    for (const task of this.journal.tasks) {
+      if (!hashes.includes(createHash('sha256').update('tower-secret-session-close-v1:' + task.sessionId).digest('hex'))) continue;
+      // A task whose lease had already run out is closed for good too, so it is never renewed.
+      if (task.status === 'open') this.endTask(task); else delete task.expiresAt;
+    }
   }); }
-  private endTask(task: SecretTask): void {
+  /** Closed for good: an archived session's task, or one its computer closed. Without a lease left, it is never renewed. */
+  private endTask(task: SecretTask): void { this.release(task); delete task.expiresAt; }
+  /** Its lease ran out: closed at that time, and renewable for the same session where sharing still covers it. */
+  private lapse(task: SecretTask): void { this.release(task); task.closedAt = task.expiresAt; }
+  private release(task: SecretTask): void {
     task.status = 'closed'; task.closedAt = this.now(); task.connected = [];
     const groupIds = this.journal.groups.filter(group => group.taskId === task.id).map(group => group.id);
     this.journal.secrets = this.journal.secrets.filter(secret => secret.temporaryTaskId !== task.id && !groupIds.includes(secret.metadata.groupId));
@@ -353,7 +363,7 @@ export class SecretService {
     // Claims stay while a signed close response is being committed; expired replay is rejected by its envelope.
   }
   async sweep(liveRuns: ReadonlySet<string>): Promise<void> { return this.mutate(() => {
-    for (const task of this.journal.tasks) if (task.status === 'open' && task.expiresAt !== undefined && task.expiresAt <= this.now()) { this.endTask(task); task.closedAt = task.expiresAt; }
+    for (const task of this.journal.tasks) if (task.status === 'open' && task.expiresAt !== undefined && task.expiresAt <= this.now()) this.lapse(task);
     const expired = this.secrets().filter(secret => secret.metadata.expiresAt !== undefined && secret.metadata.expiresAt <= this.now()).map(secret => secret.metadata.id);
     this.data().secrets = this.data().secrets.filter(secret => !expired.includes(secret.metadata.id));
     this.journal.secrets = this.journal.secrets.filter(secret => !expired.includes(secret.metadata.id));
