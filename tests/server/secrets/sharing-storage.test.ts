@@ -265,8 +265,11 @@ test('a node session past its 8-hour lease gets a new one where sharing still co
   const admitted = await f.service.ensureRemoteTask(remote);
   const lease = 8 * 60 * 60_000;
   f.advance(lease + 1);
+  assert.deepEqual(f.service.availableFor(remote).map(item => item.name), ['shared'], 'the session view reads it as the lease its next use gets');
+  assert.deepEqual(f.service.catalogFor(remote).map(item => [item.name, item.status]), [['shared', 'available']]);
   assert.deepEqual((await f.service.list(await f.service.ensureRemoteTask(remote))).map(item => item.name), ['shared'], 'a lease that ran out, not yet swept, is renewed');
   f.advance(lease + 1); await f.service.sweep(new Set());
+  assert.deepEqual(f.service.availableFor(remote).map(item => item.name), ['shared'], 'swept too');
   const renewed = await f.service.ensureRemoteTask(remote);
   assert.deepEqual(renewed, admitted, 'the same task, as the node knows it');
   assert.deepEqual((await f.service.list(renewed)).map(item => item.name), ['shared'], 'a swept lease is renewed too');
