@@ -257,6 +257,28 @@ test('a node’s existing task is admitted without coverage, only with its own i
   await f.service.removePeer(NODE); await assert.rejects(f.service.ensureRemoteTask(remote), /Remote task denied/);
 });
 
+test('a node session past its 8-hour lease gets a new one where sharing still covers it; a closed task never does', async t => {
+  const f = await fixture(t);
+  await f.service.trustPeer({ device: { ...f.service.device(), id: NODE }, routeId: 'node', direction: 'node', enabled: true });
+  const secret = await f.service.create({ name: 'shared', kind: 'scalar', value: 's', sharing: { allMachines: false, folders: [{ hostId: NODE, root: '/node' }] } });
+  const remote = { hostId: NODE, sessionId: 'node-session', root: '/node', taskId: randomUUID(), runId: 'node-run' };
+  const admitted = await f.service.ensureRemoteTask(remote);
+  const lease = 8 * 60 * 60_000;
+  f.advance(lease + 1);
+  assert.deepEqual((await f.service.list(await f.service.ensureRemoteTask(remote))).map(item => item.name), ['shared'], 'a lease that ran out, not yet swept, is renewed');
+  f.advance(lease + 1); await f.service.sweep(new Set());
+  const renewed = await f.service.ensureRemoteTask(remote);
+  assert.deepEqual(renewed, admitted, 'the same task, as the node knows it');
+  assert.deepEqual((await f.service.list(renewed)).map(item => item.name), ['shared'], 'a swept lease is renewed too');
+  f.advance(lease + 1); await f.service.sweep(new Set());
+  await f.service.setSharing(secret.id, 1, { allMachines: false, folders: [] });
+  await assert.rejects(f.service.ensureRemoteTask(remote), /Remote task denied/, 'a renewal needs coverage, as a new task does');
+  await f.service.setSharing(secret.id, 2, { allMachines: false, folders: [{ hostId: NODE, root: '/node' }] });
+  await f.service.ensureRemoteTask(remote);
+  await f.service.closeTask(remote.taskId);
+  await assert.rejects(f.service.ensureRemoteTask(remote), /Task identity denied/, 'a task the node closed (its session archived) stays closed');
+});
+
 test('disconnecting stops a key in that session whatever allows it, and connecting again lifts the stop', async t => {
   const f = await fixture(t);
   const ruled = legacyRecord(f.host, { name: 'ruled', groupId: 'g', value: 'r' });

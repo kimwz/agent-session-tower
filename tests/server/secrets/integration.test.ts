@@ -88,11 +88,13 @@ test('two encrypted runtimes relay source-authoritative selected fields, owner c
   assert.deepEqual(f.errors, []); assert.equal(JSON.stringify(f.wires).includes(VISIBLE), false); assert.equal(JSON.stringify(f.wires).includes(HIDDEN), false); assert.equal(stored(f.b).secrets.length, 0); assert.equal(f.runsB.list()[0].output, '');
   const disk = await storedText(f.stateA) + await storedText(f.stateB); assert.equal(disk.includes(VISIBLE), false); assert.equal(disk.includes(HIDDEN), false); assert.equal(disk.includes(PASSWORD), false);
 });
-test('source lock, offline relay and task expiry fail closed while owner run remains active', async t => {
-  const f = await pair(t); await f.a.create({ name: 'remote scalar', kind: 'scalar', value: VISIBLE, sharing: f.toB });
+test('source lock, offline relay and an expired lease no longer shared fail closed while owner run remains active; one still shared is renewed', async t => {
+  const f = await pair(t); const shared = await f.a.create({ name: 'remote scalar', kind: 'scalar', value: VISIBLE, sharing: f.toB });
   await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})); const fixedTask = (await f.recipient.context(f.capB)).taskId; const carry = f.a.handoff()!; await f.a.lock(); const locked = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(locked.secrets, []); assert.equal(locked.unavailableSources.length, 1);
   await f.a.adopt(carry); const offline = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {}), true) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(offline.secrets, []); assert.equal(offline.unavailableSources.length, 1);
-  f.advance(8 * 60 * 60_000 + 1); const expired = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(expired.secrets, []); assert.equal(expired.unavailableSources.length, 1); assert.equal(f.runsB.list()[0].status, 'running'); assert.equal(stored(f.b).secrets.length, 0); assert.equal((await f.recipient.context(f.capB)).taskId, fixedTask);
+  f.advance(8 * 60 * 60_000 + 1); const renewed = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(renewed.secrets.map(item => item.name), ['remote scalar'], 'still shared: a new lease for the same session'); assert.deepEqual(renewed.unavailableSources, []);
+  await f.a.setSharing(shared.id, 1, { allMachines: false, folders: [] });
+  f.advance(8 * 60 * 60_000 + 1); const expired = await f.relay(f.recipient.tool(f.capB, 'secrets_list', {})) as { secrets: SecretMetadata[]; unavailableSources: unknown[] }; assert.deepEqual(expired.secrets, []); assert.equal(f.runsB.list()[0].status, 'running'); assert.equal(stored(f.b).secrets.length, 0); assert.equal((await f.recipient.context(f.capB)).taskId, fixedTask);
 });
 test('recipient session disconnection filters the session view and lists and blocks use without changing the source sharing', async t => {
   const f = await pair(t);

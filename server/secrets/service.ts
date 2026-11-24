@@ -282,12 +282,19 @@ export class SecretService {
    */
   async ensureRemoteTask(context: SecretContext, options: { owner?: boolean } = {}): Promise<SecretContext> { return this.mutate(() => ({ ...context, ...this.remoteTask(context, options.owner === true) })); }
   private remoteTask(target: SecretTarget, owner: boolean): SecretTarget {
-    const existing = this.journal.tasks.some(task => task.id === target.taskId);
+    const found = this.journal.tasks.find(task => task.id === target.taskId);
+    // A node keeps one task for a session's whole life, but its lease here lasts 8 hours. One that only ran out (not one
+    // closed when its session was archived) starts a new lease for the same session and folder, admitted as a new task
+    // would be: the node's session would otherwise lose this vault for good.
+    const lapsed = found !== undefined && found.expiresAt !== undefined && found.hostId === target.hostId && found.sessionId === target.sessionId
+      && found.root === target.root && (found.status === 'open' ? found.expiresAt <= this.now() : found.closedAt === found.expiresAt);
+    const existing = found !== undefined && !lapsed;
     if (!this.data().peers.some(peer => peer.enabled && peer.device.id === target.hostId) || !canonicalRoot(target.root) || !/^[a-f0-9-]{36}$/.test(target.taskId) || !target.sessionId) throw new Error('Remote task denied');
     // Nothing shared with that folder or computer: the owner can change that by sharing.
     if (!owner && !existing && !covered(this.policy(), target.hostId, target.root, target.taskId, this.now())) throw notShared('Remote task denied');
     const { hostId, sessionId, root, taskId } = target; const trusted = { hostId, sessionId, root, taskId, projectId: this.projectId(hostId, root) };
     if (existing) { this.task(trusted); return trusted; }
+    if (lapsed) { Object.assign(found, { status: 'open', expiresAt: this.now() + REMOTE_TASK_MS, connected: [] }); delete found.closedAt; return trusted; }
     if (this.journal.tasks.length >= 10000) throw new Error('Task count limit');
     this.journal.tasks.push({ id: taskId, hostId, sessionId, root, status: 'open', createdAt: this.now(), expiresAt: this.now() + REMOTE_TASK_MS, excluded: [], connected: [] }); return trusted;
   }
