@@ -289,7 +289,7 @@ export class SecretService {
    * its own identity whatever is shared now, so its close still arrives; each use is authorized on its own.
    */
   async ensureRemoteTask(context: SecretContext, options: { owner?: boolean; closing?: boolean } = {}): Promise<SecretContext> { return this.mutate(() => ({ ...context, ...this.remoteTask(context, options.owner === true, options.closing === true) })); }
-  /** `closing`: the node is closing this task (its session was archived), which a lapsed lease admits whatever is shared now. */
+  /** `closing`: the node is closing this task (its session was archived); a lapsed one is closed for good here and then, never reopened. */
   private remoteTask(target: SecretTarget, owner: boolean, closing = false): SecretTarget {
     const found = this.journal.tasks.find(task => task.id === target.taskId);
     // A node keeps one task for a session's whole life, but its lease here lasts 8 hours. One whose lease only ran out
@@ -299,9 +299,10 @@ export class SecretService {
     const lapsed = found !== undefined && lapsedLease(found, this.now()) && found.hostId === target.hostId && found.sessionId === target.sessionId && found.root === target.root;
     if (lapsed && found.status === 'open') this.lapse(found);
     const existing = found !== undefined && !lapsed;
+    if (closing && lapsed) { this.endTask(found); return { hostId: target.hostId, sessionId: target.sessionId, root: target.root, taskId: target.taskId, projectId: this.projectId(target.hostId, target.root) }; }
     if (!this.data().peers.some(peer => peer.enabled && peer.device.id === target.hostId) || !canonicalRoot(target.root) || !/^[a-f0-9-]{36}$/.test(target.taskId) || !target.sessionId) throw new Error('Remote task denied');
     // Nothing shared with that folder or computer: the owner can change that by sharing.
-    if (!owner && !existing && !(closing && lapsed) && !covered(this.policy(), target.hostId, target.root, target.taskId, this.now())) throw notShared('Remote task denied');
+    if (!owner && !existing && !covered(this.policy(), target.hostId, target.root, target.taskId, this.now())) throw notShared('Remote task denied');
     const { hostId, sessionId, root, taskId } = target; const trusted = { hostId, sessionId, root, taskId, projectId: this.projectId(hostId, root) };
     if (existing) { this.task(trusted); return trusted; }
     if (lapsed) { Object.assign(found, { status: 'open', expiresAt: this.now() + REMOTE_TASK_MS }); delete found.closedAt; return trusted; }

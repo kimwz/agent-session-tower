@@ -319,7 +319,8 @@ test('a lease renewed or ended keeps nothing of the old one, and only a lapse is
   await f.service.setSharing(unshared.id, 1, { allMachines: false, folders: [] });
   await assert.rejects(f.service.ensureRemoteTask(later), /Remote task denied/);
   await f.service.ensureRemoteTask(later, { closing: true });
-  await f.service.closeTask(later.taskId);
+  assert.equal(storedTask(f.service, later.taskId)?.status, 'closed', 'closed for good then, never reopened even for the close');
+  assert.equal(storedTask(f.service, later.taskId)?.expiresAt, undefined);
   await f.service.setSharing(unshared.id, 2, { allMachines: false, folders: [{ hostId: NODE, root: '/later' }] });
   await assert.rejects(f.service.ensureRemoteTask(later), /Task identity denied/);
   // A renewal is saved: after a restart the session keeps its new lease.
