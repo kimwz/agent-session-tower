@@ -311,6 +311,17 @@ test('a lease renewed or ended keeps nothing of the old one, and only a lapse is
   f.advance(lease + 1); await f.service.sweep(new Set());
   await f.service.closeSessions([createHash('sha256').update(`tower-secret-session-close-v1:${archived.sessionId}`).digest('hex')]);
   await assert.rejects(f.service.ensureRemoteTask(archived), /Task identity denied/);
+  // An archive's close reaches a lapsed task no longer shared, so sharing it again later renews nothing.
+  const unshared = await f.service.create({ name: 'unshared later', kind: 'scalar', value: 'u', sharing: { allMachines: false, folders: [{ hostId: NODE, root: '/later' }] } });
+  const later = node('/later');
+  await f.service.ensureRemoteTask(later);
+  f.advance(lease + 1); await f.service.sweep(new Set());
+  await f.service.setSharing(unshared.id, 1, { allMachines: false, folders: [] });
+  await assert.rejects(f.service.ensureRemoteTask(later), /Remote task denied/);
+  await f.service.ensureRemoteTask(later, { closing: true });
+  await f.service.closeTask(later.taskId);
+  await f.service.setSharing(unshared.id, 2, { allMachines: false, folders: [{ hostId: NODE, root: '/later' }] });
+  await assert.rejects(f.service.ensureRemoteTask(later), /Task identity denied/);
   // A renewal is saved: after a restart the session keeps its new lease.
   const kept = node();
   await f.service.ensureRemoteTask(kept);

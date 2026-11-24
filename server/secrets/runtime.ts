@@ -133,14 +133,15 @@ export class SecretRuntime {
   }) {
     const service = options.service;
     const accepted = new Map<string, SecretContext>();
-    const normalized = (context: SecretContext) => {
+    // A close is admitted for its own task whatever is shared now, so an archive always reaches this vault.
+    const normalized = (context: SecretContext, closing = false) => {
       if (this.blocked) throw fail('보관함 잠금 해제를 완료하지 못했습니다.', 'unavailable');
       if (options.remoteAllowed && !options.remoteAllowed(context)) throw fail('원격 작업을 허용하지 않습니다.', 'forbidden');
-      return service.ensureRemoteTask(context);
+      return service.ensureRemoteTask(context, { closing });
     };
     this.remote = new RemoteSecretBroker({ device: () => service.device(), deviceKeys: () => service.deviceKeys(), peers: () => service.status().locked ? [] : service.peers(),
       followed: () => this.followedRoute, refused: (context, request) => this.shareRequested(context, request),
-      begin: async (context, id, digest) => { const trusted = await normalized(context); const claim = await service.beginOperation(trusted, id, digest); if (claim.fresh && id.startsWith('remote-id:')) accepted.set(id, trusted); return claim.fresh; },
+      begin: async (context, id, digest, operation) => { const trusted = await normalized(context, operation === 'close'); const claim = await service.beginOperation(trusted, id, digest); if (claim.fresh && id.startsWith('remote-id:')) accepted.set(id, trusted); return claim.fresh; },
       // Remote replay is refused even after completion; retain only its proof, not an unused response cache.
       finish: async (_context, id, digest, _answer) => { const trusted = accepted.get(id); if (!trusted) throw fail('원격 요청 기록을 확인할 수 없습니다.'); try { await service.finishOperation(trusted, id, digest, { answered: true }); } finally { accepted.delete(id); } },
       handle: async (context, request) => {
@@ -150,7 +151,7 @@ export class SecretRuntime {
           if (options.remoteAllowed && !options.remoteAllowed(context)) throw fail('원격 작업을 허용하지 않습니다.', 'forbidden');
           return request.operation === 'catalog' ? service.catalogFor(context) : service.availableFor(context).map(wireMetadata);
         }
-        const trusted = await normalized(context);
+        const trusted = await normalized(context, request.operation === 'close');
         if (request.operation === 'list') return service.list(trusted);
         if (request.operation === 'close') { await service.closeTask(trusted.taskId); return { closed: true }; }
         const payload = z.object({ reference: ref, operation: z.enum(SECRET_OPERATIONS).exclude(['discover']), reasons: z.literal(true).optional() }).strict().parse(request.payload);
