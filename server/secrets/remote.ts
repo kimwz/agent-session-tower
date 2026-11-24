@@ -42,7 +42,7 @@ export interface RemoteSecretBrokerOptions {
   device: () => SecretDevice; deviceKeys: () => RemoteSecretKeys; peers: () => SecretPeer[];
   handle: (context: SecretContext, request: { operation: RemoteSecretOperation; payload: unknown; id: string }) => unknown | Promise<unknown>;
   /** Atomically persist a first claim before resolving values. Existing claims, including uncertain ones, return false. */
-  begin: (context: SecretContext, id: string, digest: string) => boolean | Promise<boolean>;
+  begin: (context: SecretContext, id: string, digest: string, operation: RemoteSecretOperation) => boolean | Promise<boolean>;
   finish?: (context: SecretContext, id: string, digest: string, response: RemoteSecretResponse) => void | Promise<void>;
   /** A refusal told with its reason (`REASONS`), for the owner's notice; called once the response is sealed. */
   refused?: (context: SecretContext, request: { operation: RemoteSecretOperation; payload: unknown }, code: typeof REASONS[number]) => void;
@@ -236,8 +236,8 @@ export class RemoteSecretBroker {
     let result: unknown; let reason: typeof REASONS[number] | undefined; let begun = !claimed;
     try {
       try {
-        if (claimed && (!await this.options.begin(request.context, `remote-id:${request.from}:${request.id}`, digest)
-          || !await this.options.begin(request.context, `remote-nonce:${request.from}:${request.nonce}`, digest))) return fail('SECRET_REMOTE_UNCERTAIN');
+        if (claimed && (!await this.options.begin(request.context, `remote-id:${request.from}:${request.id}`, digest, request.operation)
+          || !await this.options.begin(request.context, `remote-nonce:${request.from}:${request.nonce}`, digest, request.operation))) return fail('SECRET_REMOTE_UNCERTAIN');
         begun = true;
       } catch (error) {
         // A first use in a folder nothing is shared with is told so, instead of going unanswered.

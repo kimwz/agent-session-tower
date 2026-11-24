@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { SECRET_OPERATIONS, type SecretContext, type SecretMetadata, type SecretUsage } from '../../../shared/secrets.js';
 import { kindOf } from '../../../shared/errors.js';
 import type { SecretService } from '../../../server/secrets/service.js';
@@ -255,6 +255,81 @@ test('a node’s existing task is admitted without coverage, only with its own i
   for (const other of [{ ...remote, sessionId: 'other-session' }, { ...remote, root: '/node/sub' }]) await assert.rejects(f.service.ensureRemoteTask(other), /Task identity denied/);
   await assert.rejects(f.service.ensureRemoteTask({ ...remote, taskId: randomUUID() }), /Remote task denied/, 'a new task still needs coverage');
   await f.service.removePeer(NODE); await assert.rejects(f.service.ensureRemoteTask(remote), /Remote task denied/);
+});
+
+test('a node session past its 8-hour lease gets a new one where sharing still covers it; a closed task never does', async t => {
+  const f = await fixture(t);
+  await f.service.trustPeer({ device: { ...f.service.device(), id: NODE }, routeId: 'node', direction: 'node', enabled: true });
+  const secret = await f.service.create({ name: 'shared', kind: 'scalar', value: 's', sharing: { allMachines: false, folders: [{ hostId: NODE, root: '/node' }] } });
+  const remote = { hostId: NODE, sessionId: 'node-session', root: '/node', taskId: randomUUID(), runId: 'node-run' };
+  const admitted = await f.service.ensureRemoteTask(remote);
+  const lease = 8 * 60 * 60_000;
+  f.advance(lease + 1);
+  assert.deepEqual(f.service.availableFor(remote).map(item => item.name), ['shared'], 'the session view reads it as the lease its next use gets');
+  assert.deepEqual(f.service.catalogFor(remote).map(item => [item.name, item.status]), [['shared', 'available']]);
+  assert.deepEqual((await f.service.list(await f.service.ensureRemoteTask(remote))).map(item => item.name), ['shared'], 'a lease that ran out, not yet swept, is renewed');
+  f.advance(lease + 1); await f.service.sweep(new Set());
+  assert.deepEqual(f.service.availableFor(remote).map(item => item.name), ['shared'], 'swept too');
+  const renewed = await f.service.ensureRemoteTask(remote);
+  assert.deepEqual(renewed, admitted, 'the same task, as the node knows it');
+  assert.deepEqual((await f.service.list(renewed)).map(item => item.name), ['shared'], 'a swept lease is renewed too');
+  f.advance(lease + 1); await f.service.sweep(new Set());
+  await f.service.setSharing(secret.id, 1, { allMachines: false, folders: [] });
+  await assert.rejects(f.service.ensureRemoteTask(remote), /Remote task denied/, 'a renewal needs coverage, as a new task does');
+  await f.service.setSharing(secret.id, 2, { allMachines: false, folders: [{ hostId: NODE, root: '/node' }] });
+  await f.service.ensureRemoteTask(remote);
+  await f.service.closeTask(remote.taskId);
+  await assert.rejects(f.service.ensureRemoteTask(remote), /Task identity denied/, 'a task the node closed (its session archived) stays closed');
+});
+
+test('a lease renewed or ended keeps nothing of the old one, and only a lapse is renewable', async t => {
+  const f = await fixture(t);
+  await f.service.trustPeer({ device: { ...f.service.device(), id: NODE }, routeId: 'node', direction: 'node', enabled: true });
+  const lease = 8 * 60 * 60_000;
+  const node = (root = '/node') => ({ hostId: NODE, sessionId: `s-${randomUUID()}`, root, taskId: randomUUID(), runId: 'node-run' });
+  // An owner connection is what let this session in; once its lease runs out, unswept, it neither carries over nor counts.
+  const connectedOnly = await f.service.create({ name: 'connected only', kind: 'scalar', value: 'c', sharing: { allMachines: false, folders: [] } });
+  const owned = node('/owned');
+  await f.service.connectSession(owned, [connectedOnly.id]);
+  assert.deepEqual((await f.service.list(await f.service.ensureRemoteTask(owned))).map(item => item.name), ['connected only']);
+  f.advance(lease + 1);
+  await assert.rejects(f.service.ensureRemoteTask(owned), /Remote task denied/, 'the lapsed connection is no coverage');
+  await f.service.sweep(new Set());
+  assert.deepEqual(storedTask(f.service, owned.taskId)?.connected, [], 'the sweep ends it');
+  await assert.rejects(f.service.ensureRemoteTask(owned), /Remote task denied/, 'and nothing renews it');
+  // A close at the very moment the lease runs out is still a close.
+  await f.service.create({ name: 'shared', kind: 'scalar', value: 's', sharing: { allMachines: false, folders: [{ hostId: NODE, root: '/node' }] } });
+  const closing = node();
+  await f.service.ensureRemoteTask(closing);
+  f.advance(lease);
+  await f.service.closeTask(closing.taskId);
+  f.advance(1);
+  await assert.rejects(f.service.ensureRemoteTask(closing), /Task identity denied/);
+  // An archived session's task whose lease had already run out is closed for good.
+  const archived = node();
+  await f.service.ensureRemoteTask(archived);
+  f.advance(lease + 1); await f.service.sweep(new Set());
+  await f.service.closeSessions([createHash('sha256').update(`tower-secret-session-close-v1:${archived.sessionId}`).digest('hex')]);
+  await assert.rejects(f.service.ensureRemoteTask(archived), /Task identity denied/);
+  // An archive's close reaches a lapsed task no longer shared, so sharing it again later renews nothing.
+  const unshared = await f.service.create({ name: 'unshared later', kind: 'scalar', value: 'u', sharing: { allMachines: false, folders: [{ hostId: NODE, root: '/later' }] } });
+  const later = node('/later');
+  await f.service.ensureRemoteTask(later);
+  f.advance(lease + 1); await f.service.sweep(new Set());
+  await f.service.setSharing(unshared.id, 1, { allMachines: false, folders: [] });
+  await assert.rejects(f.service.ensureRemoteTask(later), /Remote task denied/);
+  await f.service.ensureRemoteTask(later, { closing: true });
+  assert.equal(storedTask(f.service, later.taskId)?.status, 'closed', 'closed for good then, never reopened even for the close');
+  assert.equal(storedTask(f.service, later.taskId)?.expiresAt, undefined);
+  await f.service.setSharing(unshared.id, 2, { allMachines: false, folders: [{ hostId: NODE, root: '/later' }] });
+  await assert.rejects(f.service.ensureRemoteTask(later), /Task identity denied/);
+  // A renewal is saved: after a restart the session keeps its new lease.
+  const kept = node();
+  await f.service.ensureRemoteTask(kept);
+  f.advance(lease + 1); await f.service.sweep(new Set());
+  await f.service.ensureRemoteTask(kept);
+  assert.equal(storedTask(f.service, kept.taskId)?.status, 'open');
+  assert.equal(storedTask(f.service, kept.taskId)?.expiresAt, f.now() + lease);
 });
 
 test('disconnecting stops a key in that session whatever allows it, and connecting again lifts the stop', async t => {

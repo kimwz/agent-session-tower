@@ -48,6 +48,14 @@ const USAGE_LIMIT = 1000;
 /** At most this many automatic folder additions are remembered; once full, clones add no folders by themselves (`autoFoldersStopped`). */
 const MAX_AUTO_FOLDERS = 5000;
 const REMOTE_TASK_MS = 8 * 60 * 60_000;
+/** A remote task whose lease only ran out (an explicit close leaves none): its session gets a new lease where it is covered. */
+const lapsedLease = (task: SecretTask, now: number) => task.expiresAt !== undefined && (task.status === 'open' ? task.expiresAt <= now : task.closedAt === task.expiresAt);
+/**
+ * How a task reads in a session's view: one whose lease lapsed reads as the new lease its next use would get (nothing the
+ * old one held, under no id of its own, its stops kept); others as they are.
+ */
+const renewedView = (task: SecretTask | undefined, now: number): SecretTask | undefined => task && lapsedLease(task, now)
+  ? { id: '', hostId: task.hostId, sessionId: task.sessionId, root: task.root, status: 'open', createdAt: task.createdAt, excluded: [...task.excluded], connected: [] } : task;
 const unshared = (): StoredSharing => storedSharing({ revision: 1, allMachines: false, machines: [], folders: [] });
 const policySecret = (secret: StoredSecret): PolicySecret => ({ metadata: secret.metadata, fieldNames: secret.fields ? Object.keys(secret.fields) : undefined, sharing: secret.sharing });
 const emptyJournal = (): Journal => ({ groups: [], rules: [], tasks: [], secrets: [], usage: [], operations: Object.create(null) });
@@ -280,14 +288,24 @@ export class SecretService {
    * the owner acted on, which its node already verified, and starts one in any folder. A task that exists is admitted with
    * its own identity whatever is shared now, so its close still arrives; each use is authorized on its own.
    */
-  async ensureRemoteTask(context: SecretContext, options: { owner?: boolean } = {}): Promise<SecretContext> { return this.mutate(() => ({ ...context, ...this.remoteTask(context, options.owner === true) })); }
-  private remoteTask(target: SecretTarget, owner: boolean): SecretTarget {
-    const existing = this.journal.tasks.some(task => task.id === target.taskId);
+  async ensureRemoteTask(context: SecretContext, options: { owner?: boolean; closing?: boolean } = {}): Promise<SecretContext> { return this.mutate(() => ({ ...context, ...this.remoteTask(context, options.owner === true, options.closing === true) })); }
+  /** `closing`: the node is closing this task (its session was archived); a lapsed one is closed for good here and then, never reopened. */
+  private remoteTask(target: SecretTarget, owner: boolean, closing = false): SecretTarget {
+    const found = this.journal.tasks.find(task => task.id === target.taskId);
+    // A node keeps one task for a session's whole life, but its lease here lasts 8 hours. One whose lease only ran out
+    // (an explicit close leaves no lease behind) starts a new lease for the same session and folder, admitted as a new task
+    // would be: the node's session would otherwise lose this vault for good. It is first ended as the sweep ends it, so
+    // nothing the old lease held (owner connections, temporary values) carries over or counts as coverage.
+    const lapsed = found !== undefined && lapsedLease(found, this.now()) && found.hostId === target.hostId && found.sessionId === target.sessionId && found.root === target.root;
+    if (lapsed && found.status === 'open') this.lapse(found);
+    const existing = found !== undefined && !lapsed;
+    if (closing && lapsed) { this.endTask(found); return { hostId: target.hostId, sessionId: target.sessionId, root: target.root, taskId: target.taskId, projectId: this.projectId(target.hostId, target.root) }; }
     if (!this.data().peers.some(peer => peer.enabled && peer.device.id === target.hostId) || !canonicalRoot(target.root) || !/^[a-f0-9-]{36}$/.test(target.taskId) || !target.sessionId) throw new Error('Remote task denied');
     // Nothing shared with that folder or computer: the owner can change that by sharing.
     if (!owner && !existing && !covered(this.policy(), target.hostId, target.root, target.taskId, this.now())) throw notShared('Remote task denied');
     const { hostId, sessionId, root, taskId } = target; const trusted = { hostId, sessionId, root, taskId, projectId: this.projectId(hostId, root) };
     if (existing) { this.task(trusted); return trusted; }
+    if (lapsed) { Object.assign(found, { status: 'open', expiresAt: this.now() + REMOTE_TASK_MS }); delete found.closedAt; return trusted; }
     if (this.journal.tasks.length >= 10000) throw new Error('Task count limit');
     this.journal.tasks.push({ id: taskId, hostId, sessionId, root, status: 'open', createdAt: this.now(), expiresAt: this.now() + REMOTE_TASK_MS, excluded: [], connected: [] }); return trusted;
   }
@@ -335,9 +353,17 @@ export class SecretService {
   async closeTask(taskId: string) { return this.mutate(() => { const task = this.journal.tasks.find(task => task.id === taskId); if (!task) throw new Error('Unknown task'); this.endTask(task); }); }
 
   async closeSessions(hashes: string[]): Promise<void> { return this.mutate(() => {
-    for (const task of this.journal.tasks) if (task.status === 'open' && hashes.includes(createHash('sha256').update('tower-secret-session-close-v1:' + task.sessionId).digest('hex'))) this.endTask(task);
+    for (const task of this.journal.tasks) {
+      if (!hashes.includes(createHash('sha256').update('tower-secret-session-close-v1:' + task.sessionId).digest('hex'))) continue;
+      // A task whose lease had already run out is closed for good too, so it is never renewed.
+      if (task.status === 'open') this.endTask(task); else delete task.expiresAt;
+    }
   }); }
-  private endTask(task: SecretTask): void {
+  /** Closed for good: an archived session's task, or one its computer closed. Without a lease left, it is never renewed. */
+  private endTask(task: SecretTask): void { this.release(task); delete task.expiresAt; }
+  /** Its lease ran out: closed at that time, and renewable for the same session where sharing still covers it. */
+  private lapse(task: SecretTask): void { this.release(task); task.closedAt = task.expiresAt; }
+  private release(task: SecretTask): void {
     task.status = 'closed'; task.closedAt = this.now(); task.connected = [];
     const groupIds = this.journal.groups.filter(group => group.taskId === task.id).map(group => group.id);
     this.journal.secrets = this.journal.secrets.filter(secret => secret.temporaryTaskId !== task.id && !groupIds.includes(secret.metadata.groupId));
@@ -346,7 +372,7 @@ export class SecretService {
     // Claims stay while a signed close response is being committed; expired replay is rejected by its envelope.
   }
   async sweep(liveRuns: ReadonlySet<string>): Promise<void> { return this.mutate(() => {
-    for (const task of this.journal.tasks) if (task.status === 'open' && task.expiresAt !== undefined && task.expiresAt <= this.now()) { this.endTask(task); task.closedAt = task.expiresAt; }
+    for (const task of this.journal.tasks) if (task.status === 'open' && task.expiresAt !== undefined && task.expiresAt <= this.now()) this.lapse(task);
     const expired = this.secrets().filter(secret => secret.metadata.expiresAt !== undefined && secret.metadata.expiresAt <= this.now()).map(secret => secret.metadata.id);
     this.data().secrets = this.data().secrets.filter(secret => !expired.includes(secret.metadata.id));
     this.journal.secrets = this.journal.secrets.filter(secret => !expired.includes(secret.metadata.id));
@@ -363,7 +389,7 @@ export class SecretService {
     const state = this.policy(); const hostId = subject.hostId ?? state.deviceId; const now = this.now();
     const task = subject.taskId ? state.tasks.find(task => task.id === subject.taskId) : sessionTask(state, subject.sessionId, hostId, subject.root);
     if (task && (task.hostId !== hostId || task.sessionId !== subject.sessionId || task.root !== subject.root)) throw new Error('Task identity denied');
-    return available(state, task ?? { id: subject.taskId ?? '', hostId, sessionId: subject.sessionId, root: subject.root, status: 'open', createdAt: now, excluded: [], connected: [] }, now);
+    return available(state, renewedView(task, now) ?? { id: subject.taskId ?? '', hostId, sessionId: subject.sessionId, root: subject.root, status: 'open', createdAt: now, excluded: [], connected: [] }, now);
   }
   /** A trusted node's read of what its session may discover here; admits and records nothing. */
   availableFor(context: SecretContext): SecretAvailable[] {
@@ -379,7 +405,7 @@ export class SecretService {
     const state = this.policy(); const now = this.now();
     const task = state.tasks.find(task => task.id === context.taskId);
     if (task && (task.hostId !== context.hostId || task.sessionId !== context.sessionId || task.root !== context.root)) throw new Error('Task identity denied');
-    return catalog({ ...state, secrets: this.data().secrets.map(policySecret) }, task ?? { id: context.taskId, hostId: context.hostId, sessionId: context.sessionId, root: context.root, status: 'open', createdAt: now, excluded: [], connected: [] }, now);
+    return catalog({ ...state, secrets: this.data().secrets.map(policySecret) }, renewedView(task, now) ?? { id: context.taskId, hostId: context.hostId, sessionId: context.sessionId, root: context.root, status: 'open', createdAt: now, excluded: [], connected: [] }, now);
   }
   /** How many saved secrets a computer may use in all its folders: shared with all machines or with it. */
   machineShared(hostId: string): number {
