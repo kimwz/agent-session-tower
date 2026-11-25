@@ -21,7 +21,8 @@ export async function terminalHostPaths(stateDir: string) {
  * answers, how shells run, when it exits). A host keeps running across Tower updates while shells are open; one with
  * this revision is up to date whatever release it came with, so an update does not wait on it.
  */
-export const TERMINAL_HOST_REVISION = 1;
+// 2: a private node-pty copy macOS's temporary cleanup removed is copied again (1.188.1).
+export const TERMINAL_HOST_REVISION = 2;
 
 export interface TerminalHostReply {
   protocol: number;
