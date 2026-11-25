@@ -29,20 +29,23 @@ test('real PTY starts an isolated shell in the workspace with terminal dimension
 
 test('a private PTY copy whose helper was deleted is copied again on the next shell', async () => {
   const modules = [{ spawn: () => { throw new Error('first'); } }, { spawn: () => { throw new Error('second'); } }];
-  const present = new Set<string>(['/copy-1/spawn-helper']);
+  const present = new Set<string>();
+  const released: string[] = [];
   let loads = 0;
   const load = ptyLoader(async () => {
     const index = loads++;
-    present.add(`/copy-${index + 1}/spawn-helper`);
-    return { module: modules[index], helper: `/copy-${index + 1}/spawn-helper` };
+    const helper = `/copy-${index + 1}/spawn-helper`;
+    present.add(helper);
+    return { module: modules[index], helper, release: async () => { released.push(helper); } };
   }, async path => present.has(path));
   assert.equal(await load(), modules[0]);
   assert.equal(await load(), modules[0]);
   assert.equal(loads, 1);
   present.delete('/copy-1/spawn-helper');
+  assert.deepEqual(await Promise.all([load(), load(), load()]), [modules[1], modules[1], modules[1]]);
   assert.equal(await load(), modules[1]);
-  assert.equal(await load(), modules[1]);
-  assert.equal(loads, 2);
+  assert.equal(loads, 2, 'shells opened together copy once');
+  assert.deepEqual(released, ['/copy-1/spawn-helper'], 'the replaced copy is released');
 });
 
 test('an installation helper is never checked again, and a failed load is retried', async () => {

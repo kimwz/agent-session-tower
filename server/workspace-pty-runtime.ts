@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { getAsset, isSea } from 'node:sea';
-import { access, chmod, cp, mkdir, writeFile } from 'node:fs/promises';
+import { access, chmod, cp, mkdir, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { createPrivateTemporary } from './temporary/directories.js';
 import { dirname, join } from 'node:path';
@@ -9,8 +9,8 @@ import type { TerminalSpawnOptions, WorkspacePty } from './workspace-terminals.j
 const require = createRequire(import.meta.url);
 /** What Tower uses of node-pty and its prebuilt twin. Typed here, since either package may be absent where Tower is built. */
 export interface PtyModule { spawn(file: string, args: string[], options: TerminalSpawnOptions): WorkspacePty }
-/** A loaded module, and the helper it spawns through when that helper lives in a private temporary copy. */
-export interface LoadedPty { module: PtyModule; helper?: string }
+/** A loaded module; a private temporary copy also names the helper it spawns through and how to release it. */
+export interface LoadedPty { module: PtyModule; helper?: string; release?: () => Promise<void> }
 type Loaded = LoadedPty;
 
 /** Loads once, and again when the private copy's helper has gone. Exported for tests. */
@@ -26,7 +26,11 @@ export function ptyLoader(load: () => Promise<Loaded>, helperPresent: (path: str
     if (!loaded.helper || await helperPresent(loaded.helper)) return loaded.module;
     // macOS deletes temporary files nothing used for days, so a long-lived terminal host loses its private copy's
     // helper and could open no shell until restarted. Copy again.
-    if (loading === current) loading = undefined;
+    if (loading === current) {
+      loading = undefined;
+      // Shells already open keep running on the loaded code; only the files of the old copy go.
+      loaded.release?.().catch(error => console.error('PTY temporary runtime cleanup failed:', error));
+    }
     return (await cached()).module;
   };
 }
@@ -39,12 +43,15 @@ async function present(path: string): Promise<boolean> {
   try { await access(path, constants.X_OK); return true; } catch { return false; }
 }
 
-async function privateRuntime(): Promise<Awaited<ReturnType<typeof createPrivateTemporary>>> {
+/** A private folder for a PTY copy, released when the process exits or when `release` is called first. */
+async function privateRuntime(): Promise<{ directory: string; release(): Promise<void> }> {
   const temporary = await createPrivateTemporary('pty');
   const { directory } = temporary;
-  await chmod(directory, 0o700);
-  process.once('exit', () => { try { temporary.releaseOnExit(); } catch (error) { console.error('PTY temporary runtime cleanup failed:', error); } });
-  return temporary;
+  const onExit = (): void => { try { temporary.releaseOnExit(); } catch (error) { console.error('PTY temporary runtime cleanup failed:', error); } };
+  process.once('exit', onExit);
+  const release = async (): Promise<void> => { process.off('exit', onExit); await temporary.release(); };
+  try { await chmod(directory, 0o700); } catch (error) { await release(); throw error; }
+  return { directory, release };
 }
 
 async function load(): Promise<Loaded> {
@@ -61,7 +68,7 @@ async function load(): Promise<Loaded> {
         await writeFile(destination, Buffer.from(getAsset(`pty/${file}`)), { mode: file.endsWith('spawn-helper') ? 0o700 : 0o600 });
       }
       const helper = files.find(file => file.endsWith('spawn-helper'));
-      return { module: require(join(directory, 'lib/index.js')), ...(helper ? { helper: join(directory, helper) } : {}) };
+      return { module: require(join(directory, 'lib/index.js')), ...(helper ? { helper: join(directory, helper) } : {}), release: temporary.release };
     } catch (error) { await temporary.release(); throw error; }
   }
   // node-pty is built where it is installed; where it could not be (Linux without a compiler), the same library with
@@ -83,7 +90,7 @@ async function installed(name: string): Promise<Loaded> {
       try { await access(helper); } catch { continue; }
       if (await present(helper)) break;
       // best-effort: a read-only installation keeps its mode and gets the private copy below.
-      try { await chmod(helper, 0o755); } catch { /* Read-only installation. */ }
+      try { await chmod(helper, (await stat(helper)).mode | 0o100); } catch { /* Read-only installation. */ }
       if (!await present(helper)) {
         const temporary = await privateRuntime();
         const { directory } = temporary;
@@ -92,7 +99,7 @@ async function installed(name: string): Promise<Loaded> {
           await cp(join(root, native), join(directory, native), { recursive: true });
           const copy = join(directory, native, 'spawn-helper');
           await chmod(copy, 0o700);
-          return { module: require(join(directory, 'lib/index.js')), helper: copy };
+          return { module: require(join(directory, 'lib/index.js')), helper: copy, release: temporary.release };
         } catch (error) { await temporary.release(); throw error; }
       }
       break;
